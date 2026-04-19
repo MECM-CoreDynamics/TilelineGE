@@ -1,7 +1,32 @@
 # Tileline Documentation Index
 
-This directory contains design and implementation notes for subsystems that are intended to live
-in `src/` crates (not benchmark-only code).
+Tileline should be read as a **parallel compute runtime with game engine capabilities**.
+
+These documents exist to explain that runtime-first architecture in implementation-adjacent terms:
+CPU scheduling, GPU planning, physics, scene/runtime flow, scripting, packaging, networking,
+console tooling, and the roadmap that ties them together.
+
+## How To Read This Repo
+
+If you are new to Tileline, the best mental model is:
+
+- `mps` owns CPU execution and scaling direction
+- `gms` / `mgs` own GPU scheduling direction
+- `paradoxpe` owns physics
+- `runtime` owns the canonical app/runtime path
+- `tl-core` is the bridge layer that keeps those systems aligned
+
+That means the docs here are intentionally biased toward **runtime orchestration** rather than only
+feature lists.
+
+## Start Here
+
+- `../README.md`: project overview, positioning, and quick start
+- `tileline-v0.5.0-roadmap.md`: current major roadmap (`Heimdall Update`)
+- `tileline-v0.5.5-roadmap.md`: MPS SIMD + standalone extraction direction
+- `runtime-tlapp-console.md`: live runtime control surface inside TLApp
+- `paradoxpe-foundation.md`: physics architecture and data flow
+- `runtime-bridge-flow.md`: bridge/runtime ownership model
 
 ## Documents
 
@@ -56,7 +81,10 @@ in `src/` crates (not benchmark-only code).
 
 - Prefer implementation-adjacent docs that reference real modules and public APIs.
 - Keep benchmark docs separate from engine/runtime behavior.
-- Favor explicit performance constraints (latency budgets, zero-copy paths, bounded waits).
+- Favor explicit performance constraints, ownership boundaries, measurable runtime behavior, and
+  zero-copy/bounded-wait constraints where they matter.
+- Write docs so Tileline can be understood as a coherent runtime stack, not just a loose
+  collection of experiments.
 
 ## PDF Build Utility
 

@@ -1,292 +1,319 @@
-# Tileline Engine (Prototype Workspace)
+# Tileline
 
-Tileline is a parallel-first game engine architecture prototype focused on explicit CPU/GPU scaling:
+> Parallel Compute Runtime with Game Engine Capabilities
 
-- `MPS` (Multi Processing Scaler): CPU-side task scheduling and WASM execution
-- `GMS` (Graphics Multi Scaler): GPU discovery, scoring, and asymmetric multi-GPU planning
-- `MGS` (Mobile Graphics Scheduler): mobile TBDR-aware serial fallback scheduler and tile planning
-- `NPS` (Network Packet Scaler): bit-packed UDP protocol, reliability, and MPS-offloaded packet processing
-- `ParadoxPE`: fixed-step physics foundation with SoA storage, broadphase, solver, joints, sleep, snapshot/interpolation support, and script/WASM host ABI
-- `tl-core`: engine bridge layer that synchronizes MPS and GMS
-- `runtime`: render-loop integration glue for `wgpu` submit/present flows and NPS UDP transport/telemetry pumping
+Tileline is a runtime-first engine workspace for projects that need explicit CPU/GPU scheduling,
+physics, scripting, networking, scene composition, asset packaging, and live runtime tooling.
 
-This workspace is currently in pre-alpha transition phase (Foundation -> Pre-Alpha). The main goals are:
+The shortest accurate way to describe Tileline today is:
 
-- lock-free task flow between CPU and GPU planning stages
-- explicit multi-GPU orchestration (primary throughput GPU + secondary latency/helper GPU)
-- Apple Silicon / UMA-aware stability controls
-- WASM-based scripting/runtime integration path (MPS-targeted)
-- one canonical runtime-owned scene loop (script + physics + render + network)
-- telemetry-first regression visibility across MPS/GMS/ParadoxPE/NPS
+**Tileline is a parallel compute runtime with game engine capabilities.**
 
-## Workspace Layout
+That wording matters. Tileline is not being built as an editor-first clone of a traditional game
+engine. It is being built as a **scheduler-aware runtime stack** where rendering, physics,
+scripting, networking, and asset flow are all treated as execution systems that can be measured,
+balanced, and evolved deliberately.
 
-- `mps/`: CPU topology detection, priority balancer, lock-free scheduler, WASM dispatch (Wasmer)
-- `gms/`: GPU inventory/scoring, multi-GPU planner, adaptive UMA buffer control, benchmark tooling
-- `mgs/`: mobile GPU family detection, TBDR tile planner, serial fallback chain, and mobile render benchmark
-- `nps/`: low-level UDP packet protocol, bit packing, reliability, authority handoff, MPS-integrated packet manager
-- `paradoxpe/`: fixed-step physics core with packed handles, SoA body storage, parallel broadphase, narrowphase/solver passes, starter joints/sleep, snapshot/interpolation buffering, and `.tlscript`-friendly host ABI
-- `tl-core/`: `MpsGmsBridge`, portable multi-GPU sync abstractions, and `.tlscript` compiler/runtime metadata layers
-- `runtime/`: frame-loop coordinators, scene/sprite runtime payload management, `.tlscript` parallel planning glue, and NPS UDP transport runtime integration
+## Recommended Positioning
 
-## Documentation
+If we want to market Tileline differently, this is the direction that fits the codebase best.
 
-- `README.md`: workspace overview and quick start
-- `CHANGELOG.md`: release history
-- `CONTRIBUTING.md`: contribution workflow and PR expectations
-- `CODE_OF_CONDUCT.md`: community behavior standards
-- `SECURITY.md`: vulnerability reporting and support policy
-- `docs/README.md`: documentation index
-- `docs/tlscript-lexer.md`: `.tlscript` zero-copy lexer/token design
-- `docs/tlscript-parser-plan.md`: `.tlscript` parser/AST roadmap and V1 grammar
-- `docs/tlscript-semantic.md`: `.tlscript` semantic analyzer (types, handles, WASM sandboxing)
-- `docs/tlscript-parallel-runtime.md`: `.tlscript` parallel contracts, advisor, and runtime dispatch planning
-- `docs/tileline-pre-alpha-transition.md`: immediate Foundation -> Pre-Alpha transition gates and sprint plan
-- `docs/tileline-alpha-plan.md`: Alpha A1 scope (`.tlsprite` list editor + MAS scaffold + dark lavender theme baseline)
-- `docs/tileline-pre-beta-fsr-plan.md`: pre-beta FSR 1.0, adaptive quality, and input accessibility plan
-- `docs/tileline-beta-roadmap.md`: phased plan from foundation state to a usable beta
-- `docs/nps-protocol.md`: NPS packet format, reliability, authority handoff, and MPS integration
-- `docs/nps-runtime-plan.md`: NPS channel/tick/snapshot runtime plan for the beta transport path
-- `docs/paradoxpe-foundation.md`: ParadoxPE handle model, SoA storage, broadphase/solver pipeline, snapshot base, and script ABI
-- `docs/paradoxpe-tlscript-examples.md`: verified `.tlscript` examples targeting the current ParadoxPE ABI
-- `docs/gms-dispatch-planner.md`: GMS workload planning and multi-GPU dispatch notes
-- `docs/runtime-bridge-flow.md`: canonical MPS -> GMS -> runtime synchronization flow
-- `docs/runtime-scene-showcase.md`: runtime scene/sprite payload model and bounce-tank showcase scaffolding
-- `docs/runtime-scene-workload.md`: runtime scene/sprite density to GMS workload mapping
-- `docs/runtime-scheduler-path.md`: runtime auto-selection policy for `GMS` vs `MGS`
-- `docs/runtime-draw-hud.md`: runtime draw-batch compiler + telemetry HUD overlay integration
-- `docs/runtime-pak.md`: `.pak` asset packaging/list/unpack support for pre-beta distribution
-- `docs/runtime-tlpfile-gui.md`: `.tlpfile` project manifest and general-purpose runtime GUI shell
-- `docs/runtime-tlsprite.md`: `.tlsprite` parser and runtime sprite-program integration flow
-- `docs/runtime-tljoint.md`: scene-based multi `.tlscript` + `.tlsprite` binding manifest for runtime composition
-- `docs/runtime-mas.md`: MAS audio scheduler design and MPS integration path
-- `docs/runtime-tlscript-showcase.md`: runtime `.tlscript` compile/evaluate bootstrap and safe patch application flow
-- `docs/alpha-foss-ui-assets.md`: FOSS icon/font candidates and asset policy for Alpha editor UI
-- `docs/mgs-scene-workload.md`: runtime/mobile scene/sprite density to MGS hint and tile planning mapping
-- `docs/demos/README.md`: show/demo documentation area (`docs/demos/*`)
+### Primary Positioning
 
-## Contributing and Community
+- **Parallel compute runtime with game engine capabilities**
 
-If you want to contribute before `v0.5.0` release stabilization:
+### Short Alternatives
 
-- start with [CONTRIBUTING.md](CONTRIBUTING.md)
-- follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
-- use [SECURITY.md](SECURITY.md) for vulnerability reporting
+- **A runtime-first engine for simulation-heavy games**
+- **A scheduler-aware engine stack for physics, graphics, and networking**
+- **A Linux-first interactive runtime for games, sandboxes, and compute-heavy scenes**
+- **An engine architecture where CPU/GPU orchestration is part of the product**
 
-Contribution terms:
+### What Tileline Is Not Trying To Be
 
-- the project is currently open-source and may be commercialized in the future
-- contributions are accepted under `MPL-2.0` and may be used in future commercial distributions
-- contributions do not create employment, equity, or revenue-share rights unless separately agreed
-  in writing
+- not a Unity or Unreal clone
+- not just a renderer benchmark lab
+- not only a physics sandbox
+- not only a scripting language experiment
 
-GitHub templates are included for issues and pull requests under `.github/`.
+Tileline is strongest when described as a system for **interactive workloads that benefit from
+parallel execution, explicit scheduling, telemetry, and engine-grade runtime composition**.
 
-## Current Architecture
+## Why Tileline Is Different
 
-### 1. CPU Production (MPS)
+Most engines expose scenes, editors, and assets first, and keep their scheduling model buried under
+the hood.
 
-CPU-side preprocessing / simulation tasks are submitted to `mps::MpsScheduler` with:
+Tileline does the opposite:
 
-- priority (`Critical`, `High`, `Normal`, `Background`)
-- core preference (`Performance`, `Efficient`, `Auto`)
-- native Rust closures or WASM tasks
+- it treats **parallel execution** as a product feature
+- it exposes **runtime telemetry and scaling behavior** as first-class signals
+- it builds **game engine capabilities on top of that runtime model**
+- it aims to keep the stack understandable from CPU topology all the way to scene presentation
 
-The scheduler is topology-aware and designed to saturate logical cores in a `make -j$(nproc)` style.
+That makes Tileline especially interesting for:
 
-### 2. CPU -> GPU Bridge (`tl-core`)
+- simulation-heavy games
+- sandbox and systems-driven prototypes
+- performance-focused engine R&D
+- Linux-first runtime experimentation
+- projects that want tighter control over CPU/GPU/physics/network behavior than mainstream engines
 
-`tl_core::MpsGmsBridge` converts completed MPS tasks into frame-scoped GPU workload plans:
+## Current Identity
 
-- lock-free completion queue (`crossbeam::queue::SegQueue`)
-- frame sealing (`seal_frame`) to avoid partial planning
-- data-oriented mapping from bridge tasks to GMS workload classes
-- single-GPU and explicit multi-GPU plans produced per frame
+Tileline currently combines these roles in one workspace:
 
-### 3. GPU Planning and Sync (GMS + `tl-core::graphics::multigpu::sync`)
+- a **parallel compute runtime**
+- a **scene runtime** for 2D/3D content
+- a **physics-backed game loop**
+- a **scriptable execution environment**
+- a **networking/runtime packaging toolchain**
+- a **live debug and telemetry shell** via TLApp
 
-GMS provides:
+The result is not a single monolithic engine binary. It is a collection of focused subsystems that
+compose into a runtime-driven engine stack.
 
-- adapter discovery and scoring
-- SM/CU/CoreCluster-aware distribution heuristics (with native-probe -> table -> heuristic fallback)
-- asymmetric multi-GPU planning (heavy lanes to primary, UI/Post-FX to secondary)
-- aggressive secondary-lane floor + heavy spill redistribution so helper GPU utilization does not
-  collapse under primary saturation
-- portable sync plan metadata (queue timelines + bounded waits)
+## Core Subsystems
 
-`tl-core` adds a portable runtime synchronizer:
+| Subsystem | Role | Notes |
+| --- | --- | --- |
+| `mps/` | Multi Processing Scaler | CPU scheduling, topology awareness, lock-free dispatch, SIMD direction, separate repo/submodule |
+| `gms/` | Graphics Multi Scaler | GPU discovery, scoring, workload planning, multi-GPU direction |
+| `mgs/` | Mobile Graphics Scheduler | Mobile/TBDR-aware scheduling and fallback path |
+| `paradoxpe/` | Physics core | Fixed-step physics, SoA body storage, broadphase, narrowphase, solver, joints, sleep, snapshots |
+| `tl-core/` | Bridge and render-core layer | Runtime bridge logic, multigpu sync abstractions, Vulkan transition work |
+| `runtime/` | Canonical app/runtime layer | TLApp, scene runtime, project loading, console, render integration, sprite/script systems |
+| `nps/` | Network Packet Scaler | Low-level packet path, reliability, authority/snapshot transport direction |
+| `MAS` | Multi Audio Synthesizer | Runtime-owned audio direction, early integration path |
 
-- `SubmissionIndex` as timeline markers
-- bounded `Device::poll(PollType::Wait { .. })` compose waits (default `0.8ms`)
-- Apple UMA integration via `gms::AdaptiveBuffer`
+## Content And Runtime Path
 
-### 4. Render Loop Integration (`runtime`)
+Tileline already has an engine-owned content/runtime path rather than only example glue.
 
-`runtime` contains canonical non-benchmark integration glue:
+### Content Formats
 
-- bridge pumping and frame-plan draining
-- queue submission recording (primary / secondary / transfer)
-- present reconcile calls before `SurfaceTexture::present`
-- optional Apple UMA telemetry feedback
+- `.tlscript`: runtime scripting and scene control
+- `.tlsprite`: sprite/HUD/light-oriented authoring format
+- `.tljoint`: composition layer for scenes that combine scripts and sprite programs
+- `.tlpfile`: project manifest / runtime project root
+- `.pak`: runtime packaging format for distributable asset bundles
+
+### Runtime Surfaces
+
+- `tlapp`: canonical demo/runtime executable
+- in-app console overlay (`Ctrl+F1`) for runtime control, metrics, and diagnostics
+- project GUI path for `.tlpfile`
+- runtime scene pipeline for 3D and early 2D foundation work
+
+## What Exists Today
+
+The codebase already includes real, non-trivial engine/runtime functionality:
+
+- parallel CPU scheduling infrastructure through MPS integration
+- GPU planning work through GMS and MGS
+- ParadoxPE fixed-step physics with snapshots/interpolation and contact telemetry
+- TLApp runtime with scene build, telemetry HUD, live console, and runtime controls
+- `.tlscript`, `.tlsprite`, `.tljoint`, and `.tlpfile` authoring/loading path
+- `.pak` pack/list/unpack tooling
+- render-path experimentation including hybrid RT/FSR-facing work and raw Vulkan migration work
+- early 2D foundation planning and runtime integration direction
+
+## Current Reality And Honesty Check
+
+Tileline is ambitious, but the README should stay honest about where the project is.
+
+### True Today
+
+- Tileline is already more than a prototype benchmark workspace
+- it has a real runtime shape
+- it has real physics, scripting, scene, console, packaging, and bridge layers
+- it is increasingly coherent as a runtime-first engine stack
+
+### Also True Today
+
+- the project is still evolving quickly
+- render backend transition work is ongoing
+- the stable runtime path still leans on `wgpu` while raw Vulkan cutover work continues
+- some systems are mature enough for experimentation, not yet for mass-market stability
+- several independence goals (`wgpu`, `rayon`, `bevy`) are active roadmap work, not finished facts
+
+In other words:
+
+**Tileline is credible as an engine architecture and runtime platform today, and it is still in the
+phase where architectural choices matter more than polish.**
+
+## What To Call Tileline Publicly
+
+If the goal is to market Tileline more effectively, this is the wording I would recommend using in
+public-facing places:
+
+> Tileline is a parallel compute runtime with game engine capabilities, built for
+> simulation-heavy interactive software and games that benefit from explicit CPU/GPU scheduling,
+> physics, scripting, telemetry, and runtime composition.
+
+That line fits the repo better than simply calling it “a game engine,” because it highlights the
+real differentiator instead of underselling the architecture.
+
+## Repository Layout
+
+```text
+.
+├── gms/         GPU planning, scoring, and multi-GPU direction
+├── mgs/         mobile graphics scheduling path
+├── mps/         CPU scheduling runtime (vendored as submodule)
+├── nps/         network packet/runtime transport foundation
+├── paradoxpe/   physics engine core
+├── runtime/     TLApp, scene runtime, content loading, console, integration
+├── tl-core/     bridge, sync, and render-core transition layer
+├── docs/        design docs, roadmaps, release notes, demos
+├── scripts/     packaging, release, and helper scripts
+└── dist/        generated release/package artifacts
+```
 
 ## Quick Start
 
-### Build / Check
+### 1. Clone And Initialize Submodules
+
+```bash
+git submodule update --init --recursive
+```
+
+This matters because `mps/` is tracked as its own repository and vendored here as a submodule.
+
+### 2. Check The Workspace
 
 ```bash
 cargo check
 ```
 
-### Run GMS Render Benchmark
-
-```bash
-cargo run -p gms --example render_benchmark -- --mode max --vsync off --warmup 2 --duration 10 --resolution 1280x720
-```
-
-Stable mode (recommended for Apple Silicon UMA tests):
-
-```bash
-cargo run -p gms --example render_benchmark -- --mode stable --vsync on --warmup 2 --duration 10 --resolution 1920x1080
-```
-
-### Run MGS Render Benchmark
-
-```bash
-cargo run -p mgs --example render_benchmark -- --mode stable --vsync on --warmup 2 --duration 10 --resolution 1280x720
-```
-
-### Test Core Runtime Integration
-
-```bash
-cargo test -p tl-core
-cargo test -p runtime
-```
-
-### Run Runtime TLApp Demo
+### 3. Run TLApp
 
 ```bash
 cargo run -p runtime --bin tlapp -- --fps-cap 60 --vsync auto
 ```
 
-### Run `.tlsprite` Editor (List Mode)
-
-```bash
-cargo run -p runtime --bin tlsprite_editor -- --file docs/demos/tlapp/bounce_hud.tlsprite
-```
-
-### Run Project GUI (`.tlpfile`)
-
-```bash
-cargo run -p runtime --bin tlproject_gui -- --project docs/demos/tlapp/tlapp_project.tlpfile
-```
-
-Legacy example entrypoint remains available:
+Legacy example entrypoint also exists:
 
 ```bash
 cargo run -p runtime --example tlapp -- --fps-cap 60 --vsync auto
 ```
 
-### Run NPS Starter Packet Example
+### 4. Open The Project GUI
 
 ```bash
-cargo run -p nps --example starter_packet
+cargo run -p runtime --bin tlproject_gui -- --project docs/demos/tlapp/tlapp_project.tlpfile
 ```
 
-### Package Pre-Beta Assets (`.pak`)
+### 5. Open The `.tlsprite` Editor
+
+```bash
+cargo run -p runtime --bin tlsprite_editor -- --file docs/demos/tlapp/bounce_hud.tlsprite
+```
+
+### 6. Package Demo Assets
 
 ```bash
 ./scripts/package_prebeta_pak.sh
 ```
 
-## Canonical Runtime Flow (Non-Benchmark)
+## Useful Development Commands
 
-The intended engine-side `wgpu` frame flow is:
+### Workspace Checks
 
-1. `runtime::WgpuRenderLoopCoordinator::tick_bridge()`
-2. `begin_next_frame_plan()`
-3. Submit primary GPU work and call `record_primary_submission(...)`
-4. Optionally submit secondary helper work with `submit_secondary_helper_for_frame(...)`
-5. Optionally submit transfer work and call `record_transfer_submission(...)`
-6. Call `reconcile_present(...)` before `frame.present()`
-7. Call `report_frame_telemetry(...)` (especially for Apple UMA paths)
+```bash
+cargo check
+cargo test -p tl-core
+cargo test -p runtime
+```
 
-This keeps synchronization policy inside `src/` crates instead of benchmark/example code.
+### GMS Benchmark
 
-For pre-alpha integration freeze, prefer:
+```bash
+cargo run -p gms --example render_benchmark -- --mode max --vsync off --warmup 2 --duration 10 --resolution 1280x720
+```
 
-1. `runtime::WgpuRenderLoopCoordinator::run_pre_alpha_frame(...)`
-2. with canonical phase order: `network -> script -> physics -> render_plan -> present`
-3. when wiring real systems, use `run_pre_alpha_frame_with_systems(...)`
+### MGS Benchmark
 
-## Platform Notes
+```bash
+cargo run -p mgs --example render_benchmark -- --mode stable --vsync on --warmup 2 --duration 10 --resolution 1280x720
+```
 
-### NVIDIA / AMD Unit Counts
+### NPS Starter Example
 
-GMS uses a layered detection strategy for SM/CU/CoreCluster counts:
+```bash
+cargo run -p nps --example starter_packet
+```
 
-1. Native probe (best effort):
-   - NVIDIA: `nvidia-smi`
-   - AMD: `rocminfo`
-   - Apple: `system_profiler`
-2. Device-name lookup table
-3. `wgpu`-limits-based heuristic fallback
+## Documentation Guide
 
-The benchmark and planner diagnostics show the active source (`native`, `table`, or `heuristic`).
+Start here:
 
-## Current `.tlscript` Status
+- `docs/README.md`: documentation index
+- `docs/tileline-v0.5.0-roadmap.md`: current major roadmap (`Heimdall Update`)
+- `docs/tileline-v0.5.5-roadmap.md`: upcoming MPS SIMD + standalone extraction track
+- `docs/runtime-tlapp-console.md`: in-app runtime console and live controls
+- `docs/runtime-pak.md`: `.pak` packaging flow
+- `docs/runtime-tlpfile-gui.md`: `.tlpfile` runtime/project shell
+- `docs/paradoxpe-foundation.md`: physics architecture notes
+- `docs/nps-protocol.md`: networking/runtime transport notes
+- `MPS-BENCHMARK.md`: benchmark notes and comparative performance thinking
 
-`.tlscript` now includes a substantial compiler/runtime planning pipeline:
+## Roadmap Direction
 
-- zero-copy lexer/token model (`&str` slices)
-- indentation-aware parser + AST
-- semantic analysis (types, handles, WASM sandbox policy)
-- typed IR + lowering
-- WASM codegen (MVP-oriented)
-- `@net(...)` compiler hook for sync metadata extraction
-- `@parallel(...)` / `@main_thread` / `@reduce(...)` contract validation
-- parallel advisor + runtime dispatch planner/fallback metrics
-- ParadoxPE-aware `domain="bodies"` runtime planning and MPS chunk routing helpers
-- verified ParadoxPE `.tlscript` examples compiled through lexer -> semantic -> IR -> WASM tests
-- initial ParadoxPE host ABI names wired into semantic/lowering/codegen defaults
-- fixed joint support, material combine rules, and snapshot/interpolation primitives in the physics core
-- NPS-side direct `PhysicsSnapshot` to quantized transform-batch export path
+### v0.5.0: Heimdall Update
 
-Next pipeline steps:
+The major direction for `v0.5.0` is not cosmetic polish. It is about making Tileline behave like a
+coherent runtime-first engine core.
 
-- typed IR-driven WASM codegen refactor (replace remaining AST-direct paths)
-- `.tlscript` -> MPS compile/cache/submit runtime path
-- richer host ABI for gameplay systems (ParadoxPE solver/control, networking, engine handles)
-- runtime profiling/diagnostics surfaces for script parallel dispatch decisions
+That roadmap centers on:
+
+- render-stack optimization
+- effects and texture support
+- ParadoxPE + MPS revision
+- MAS runtime integration
+- stronger GPU planning and scaling
+- reduced dependence on `rayon`, `bevy`, and eventually `wgpu` in shipping paths
+
+### v0.5.5: MPS Expansion
+
+The `v0.5.5` direction extends the CPU runtime identity even further:
+
+- SIMD work (`AVX-512`, `NEON`, `VMX/AltiVec` direction)
+- stronger runtime-dispatched MPS kernels
+- MPS living as a truly independent library/repo while still powering Tileline
+
+## Why This Repo Can Be Marketed Differently
+
+Tileline has enough unique structure now that marketing it as merely “another engine prototype” is
+underselling it.
+
+A better framing is:
+
+- **engine architecture for parallel runtime ownership**
+- **compute-oriented runtime that can power games**
+- **scheduler-first stack for physics, graphics, scripts, and packets**
+
+That is not just branding. It reflects the actual code layout:
+
+- separate CPU and GPU scaling layers
+- a real physics engine core
+- runtime-native scene and asset formats
+- live runtime tooling
+- packaging and project composition
+- a growing bridge layer between simulation and rendering
+
+## Status Summary
+
+Tileline is currently best understood as:
+
+- **experimental** in architecture
+- **serious** in direction
+- **usable for internal demos and runtime experiments**
+- **not yet pretending to be a finished mainstream engine**
+
+That combination is a strength, not a weakness, if we describe it correctly.
 
 ## License
 
-This repository is licensed under the Mozilla Public License 2.0 (`MPL-2.0`).
+Tileline is licensed under the Mozilla Public License 2.0 (`MPL-2.0`).
 The root `LICENSE` file is the source of truth.
-
-## Release v0.2.0
-
-`v0.2.0` extends release packaging with runtime `.pak` tooling and keeps the runnable `tlapp`
-binary artifact flow.
-
-Build/package artifacts:
-
-```bash
-./scripts/release_v0.2.0.sh
-```
-
-Cross-target toolchain doctor/setup:
-
-```bash
-./scripts/setup_cross_toolchains.sh --target all
-```
-
-Release notes:
-
-- `docs/releases/v0.4.5.md`
-- `docs/releases/v0.4.5-github.md`
-- `docs/releases/v0.4.5.1.md`
-- `docs/releases/v0.4.5.1-github.md`
-- `docs/releases/v0.3.0.md`
-- `docs/releases/v0.2.0.md`
-- `docs/releases/v0.1.0.md`
-- `CHANGELOG.md`

@@ -7,12 +7,12 @@
 //! remaining single-step hot path.
 
 use mps::{
-    DispatcherPhaseCallbacks, MpsThreadPoolMetrics, PhysicsDispatchTrigger, TaskDispatcher,
-    TaskDispatcherConfig,
+    DispatcherPhaseCallbacks, DispatcherPhasePlan, MpsThreadPoolMetrics, PhysicsDispatchTrigger,
+    TaskDispatcher, TaskDispatcherConfig,
 };
 use paradoxpe::PhysicsWorld;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -66,6 +66,7 @@ impl PhysicsMpsRunner {
     /// Create a runner from an existing world. Spawns the MPS worker pool.
     pub fn new(world: PhysicsWorld) -> Self {
         let mut dispatcher_config = TaskDispatcherConfig::default();
+        dispatcher_config.queue_capacity = dispatcher_config.queue_capacity.max(262_144);
         dispatcher_config.transform_capacity =
             dispatcher_config.transform_capacity.max(world.body_count());
         let dispatcher = Arc::new(
@@ -122,6 +123,11 @@ impl PhysicsMpsRunner {
             active_frame_id: metrics.active_frame_id,
             simd_backend: metrics.simd_backend,
             simd_lanes: metrics.simd_lanes,
+            phase_jobs: metrics.phase_jobs,
+            phase_completed_jobs: metrics.phase_completed_jobs,
+            hot_worker_ratio: metrics.hot_worker_ratio,
+            phase_skew: metrics.phase_skew,
+            queue_saturation_events: metrics.queue_saturation_events,
         }
     }
 
@@ -134,67 +140,38 @@ impl PhysicsMpsRunner {
         let fallback_tx = tx.clone();
         let world = Arc::clone(&self.world);
         let frame_id = self.next_frame_id.fetch_add(1, Ordering::Relaxed);
-        let planned_substeps = Arc::new(AtomicU32::new(0));
-        let planned_fixed_dt_bits = Arc::new(AtomicU32::new(0));
-        let planned_sleep_stride = Arc::new(AtomicUsize::new(1));
-        let planned_valid = Arc::new(AtomicBool::new(false));
-
-        let prepare_world = Arc::clone(&world);
-        let prepare_substeps = Arc::clone(&planned_substeps);
-        let prepare_fixed_dt_bits = Arc::clone(&planned_fixed_dt_bits);
-        let prepare_sleep_stride = Arc::clone(&planned_sleep_stride);
-        let prepare_valid = Arc::clone(&planned_valid);
-        let broadphase = Arc::new(move |ctx: &mps::DispatcherTaskContext| {
+        let planned_step = {
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let mut world = prepare_world.lock().unwrap();
-                if let Some(plan) = world.prepare_step_execution(dt) {
-                    prepare_substeps.store(plan.substeps, Ordering::Release);
-                    prepare_fixed_dt_bits.store(plan.fixed_dt.to_bits(), Ordering::Release);
-                    prepare_sleep_stride.store(plan.sleep_update_stride, Ordering::Release);
-                    prepare_valid.store(true, Ordering::Release);
-                } else {
-                    prepare_valid.store(false, Ordering::Release);
-                    prepare_substeps.store(0, Ordering::Release);
-                }
+                let mut world = world.lock().unwrap();
+                world.prepare_step_execution(dt)
             }));
-            if result.is_err() {
-                eprintln!(
-                    "[physics mps] frame {} panicked while preparing step execution plan",
-                    ctx.frame_id
-                );
-                prepare_valid.store(false, Ordering::Release);
-                prepare_substeps.store(0, Ordering::Release);
+            match result {
+                Ok(plan) => plan,
+                Err(_) => {
+                    eprintln!(
+                        "[physics mps] frame {} panicked while preparing step execution plan",
+                        frame_id
+                    );
+                    None
+                }
             }
-        });
+        };
+
+        let Some(plan) = planned_step else {
+            let _ = fallback_tx.send(0);
+            return PhysicsStepToken {
+                rx,
+                dispatcher: Arc::clone(&self.dispatcher),
+                frame_id,
+                await_publish: false,
+            };
+        };
 
         let integration_world = Arc::clone(&world);
-        let integration_substeps = Arc::clone(&planned_substeps);
-        let integration_fixed_dt_bits = Arc::clone(&planned_fixed_dt_bits);
-        let integration_sleep_stride = Arc::clone(&planned_sleep_stride);
-        let integration_valid = Arc::clone(&planned_valid);
         let integration_tx = tx;
         let integration = Arc::new(move |ctx: &mps::DispatcherTaskContext| {
-            if !integration_valid.load(Ordering::Acquire) {
-                let _ = integration_tx.send(0);
-                return;
-            }
-
-            let substeps = integration_substeps.load(Ordering::Acquire);
-            if substeps == 0 {
-                let _ = integration_tx.send(0);
-                return;
-            }
-
-            let fixed_dt = f32::from_bits(integration_fixed_dt_bits.load(Ordering::Acquire));
-            let sleep_update_stride = integration_sleep_stride.load(Ordering::Acquire).max(1);
-
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut world = integration_world.lock().unwrap();
-                let plan = paradoxpe::PhysicsStepExecutionPlan {
-                    substeps,
-                    fixed_dt,
-                    sleep_update_stride,
-                };
                 let completed_substeps = world.step_with_execution_plan(plan);
                 world.write_render_transforms_to_dispatcher_storage(
                     ctx.transforms.as_ref(),
@@ -217,10 +194,15 @@ impl PhysicsMpsRunner {
             }
         });
 
-        let callbacks = DispatcherPhaseCallbacks::default()
-            .with_broadphase(broadphase)
-            .with_integration(integration);
-        let trigger = PhysicsDispatchTrigger::new(frame_id, 1, 0, 1, 1);
+        let callbacks = DispatcherPhaseCallbacks::default().with_integration(integration);
+        let trigger = PhysicsDispatchTrigger::with_phase_plans(
+            frame_id,
+            DispatcherPhasePlan::default(),
+            DispatcherPhasePlan::default(),
+            DispatcherPhasePlan::default(),
+            DispatcherPhasePlan::new(1, 1),
+            DispatcherPhasePlan::default(),
+        );
         let await_publish =
             if let Err(err) = self.dispatcher.trigger_next_physics(trigger, callbacks) {
                 eprintln!(

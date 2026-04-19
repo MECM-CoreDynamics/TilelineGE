@@ -171,6 +171,7 @@ impl TlAppRuntime {
         let frame_begin = Instant::now();
         let mobile_path =
             matches!(self.platform, RuntimePlatform::Android) || self.mgs_is_mobile_hardware;
+        let tick_tuning_metrics = self.world.thread_pool_metrics();
         let raw_dt = (frame_begin - self.frame_started_at).as_secs_f32();
         // Keep simulation time real-time (decoupled from render FPS) and only guard against large
         // stalls (alt-tab/debugger) so physics does not enter slow-motion at low FPS.
@@ -187,6 +188,30 @@ impl TlAppRuntime {
             self.frame_time_jitter_ema_ms += (frame_delta - self.frame_time_jitter_ema_ms) * 0.16;
         }
         self.frame_started_at = frame_begin;
+        self.physics_backlog_hold_timer = (self.physics_backlog_hold_timer - sim_dt).max(0.0);
+        let recent_queue_saturation_events = tick_tuning_metrics
+            .queue_saturation_events
+            .saturating_sub(self.last_physics_queue_saturation_events);
+        self.last_physics_queue_saturation_events = tick_tuning_metrics.queue_saturation_events;
+        let mut physics_backlog = evaluate_physics_backlog(
+            &tick_tuning_metrics,
+            recent_queue_saturation_events,
+            self.physics_backlog_hold_timer > 0.0,
+        );
+        if physics_backlog.severe {
+            self.physics_backlog_hold_timer =
+                self.physics_backlog_hold_timer
+                    .max(if mobile_path { 0.78 } else { 0.62 });
+        } else if physics_backlog.moderate {
+            self.physics_backlog_hold_timer =
+                self.physics_backlog_hold_timer
+                    .max(if mobile_path { 0.44 } else { 0.34 });
+        }
+        physics_backlog = evaluate_physics_backlog(
+            &tick_tuning_metrics,
+            recent_queue_saturation_events,
+            self.physics_backlog_hold_timer > 0.0,
+        );
 
         self.poll_input_devices();
         if self.console.open {
@@ -439,6 +464,33 @@ impl TlAppRuntime {
         if raw_pressure >= 7 && smoothed_pressure >= 5.0 {
             load_plan.tick_scale *= if mobile_path { 0.78 } else { 0.84 };
         }
+        if physics_backlog.moderate {
+            load_plan.tick_scale *= if physics_backlog.severe {
+                if mobile_path {
+                    0.56
+                } else {
+                    0.64
+                }
+            } else if mobile_path {
+                0.72
+            } else {
+                0.80
+            };
+            load_plan.max_substeps = load_plan.max_substeps.min(if physics_backlog.severe {
+                if mobile_path {
+                    4
+                } else {
+                    6
+                }
+            } else if mobile_path {
+                5
+            } else {
+                8
+            });
+            load_plan.spawn_per_tick_cap = load_plan
+                .spawn_per_tick_cap
+                .min(if physics_backlog.severe { 96 } else { 144 });
+        }
         if moderate_jitter {
             load_plan.tick_scale *= 0.82;
             load_plan.max_substeps = load_plan.max_substeps.min(8);
@@ -542,8 +594,24 @@ impl TlAppRuntime {
                 load_plan.tick_scale,
                 self.fps_limit_hint,
                 self.mps_logical_threads,
+                tick_tuning_metrics.simd_backend,
+                tick_tuning_metrics.simd_lanes,
                 mobile_path,
             );
+            if physics_backlog.moderate {
+                let backlog_scale = if physics_backlog.severe {
+                    if mobile_path {
+                        0.58
+                    } else {
+                        0.68
+                    }
+                } else if mobile_path {
+                    0.78
+                } else {
+                    0.86
+                };
+                desired_hz *= backlog_scale;
+            }
             if mobile_path {
                 let mobile_ceiling = match self.tick_profile {
                     TickProfile::Balanced => 120.0,
@@ -570,7 +638,12 @@ impl TlAppRuntime {
             if let Some(cap) = self.tick_cap {
                 desired_hz = desired_hz.min(cap);
             }
-            let ramp_up = desired_hz > self.tick_hz;
+            if physics_backlog.severe && self.actual_tick_ema_hz > 1.0 {
+                desired_hz = desired_hz.min((self.actual_tick_ema_hz * 0.96).max(24.0));
+            } else if physics_backlog.block_ramp_up && self.actual_tick_ema_hz > 1.0 {
+                desired_hz = desired_hz.min((self.actual_tick_ema_hz * 1.04).max(24.0));
+            }
+            let ramp_up = desired_hz > self.tick_hz && !physics_backlog.block_ramp_up;
             let base_smoothing = if mobile_path {
                 match (self.tick_profile, ramp_up) {
                     (TickProfile::Max, true) => 0.16,
@@ -600,7 +673,9 @@ impl TlAppRuntime {
             } else {
                 base_smoothing
             };
-            let max_rise_ratio = if severe_jitter {
+            let max_rise_ratio = if physics_backlog.block_ramp_up {
+                1.0
+            } else if severe_jitter {
                 1.01
             } else if moderate_jitter {
                 1.03
@@ -609,7 +684,11 @@ impl TlAppRuntime {
             } else {
                 1.08
             };
-            let max_drop_ratio = if severe_jitter {
+            let max_drop_ratio = if physics_backlog.severe {
+                0.56
+            } else if physics_backlog.moderate {
+                0.70
+            } else if severe_jitter {
                 0.68
             } else if moderate_jitter {
                 0.78
@@ -643,7 +722,12 @@ impl TlAppRuntime {
                     ema_floor.min(cap_floor.clamp(32.0, 220.0))
                 }
             };
-            let floor_hz = hard_floor.min(catch_up_hz * 0.90).max(24.0);
+            let mut floor_hz = hard_floor.min(catch_up_hz * 0.90).max(24.0);
+            if physics_backlog.severe && self.actual_tick_ema_hz > 1.0 {
+                floor_hz = floor_hz.min((self.actual_tick_ema_hz * 0.88).max(24.0));
+            } else if physics_backlog.moderate && self.actual_tick_ema_hz > 1.0 {
+                floor_hz = floor_hz.min((self.actual_tick_ema_hz * 0.98).max(24.0));
+            }
             self.tick_hz = self.tick_hz.max(floor_hz).min(catch_up_hz);
             // Apply user-specified tick cap. This limits how fast the physics
             // ticks, keeping the main thread from over-spinning on timestep
@@ -656,7 +740,15 @@ impl TlAppRuntime {
                 .set_timestep(1.0 / self.tick_hz, self.max_substeps);
             // Retune interval is asymmetric for the same reason as smoothing:
             // rising tick is slow and conservative, falling tick is faster.
-            let base_interval = if mobile_path {
+            let base_interval = if physics_backlog.severe {
+                0.04
+            } else if physics_backlog.moderate {
+                if mobile_path {
+                    0.05
+                } else {
+                    0.045
+                }
+            } else if mobile_path {
                 if ramp_up {
                     0.24
                 } else {
@@ -705,6 +797,22 @@ impl TlAppRuntime {
             self.last_substeps = 0;
             0
         };
+        let achieved_tick_hz = if raw_dt > 1e-6 {
+            substeps as f32 / raw_dt.max(1e-6)
+        } else {
+            0.0
+        };
+        self.actual_tick_hz = achieved_tick_hz;
+        if achieved_tick_hz > 0.0 {
+            if self.actual_tick_ema_hz <= 1e-3 {
+                self.actual_tick_ema_hz = achieved_tick_hz;
+            } else {
+                self.actual_tick_ema_hz =
+                    smooth_tick_hz(self.actual_tick_ema_hz, achieved_tick_hz, 0.30);
+            }
+        } else {
+            self.actual_tick_ema_hz = smooth_tick_hz(self.actual_tick_ema_hz, 0.0, 0.12);
+        }
         // Tick metrics were captured in the previous frame's physics_tick call.
         let tick = self.last_tick;
         let mut active_runtime_plan: Option<RuntimeFramePlan> = None;
@@ -1212,9 +1320,10 @@ impl TlAppRuntime {
         let render_backend_label = self.renderer.backend_label();
         let performance_contract = self.performance_contract_evaluation();
         let title = format!(
-            "Tileline TLApp | FPS {:.1} | Frame {:.2} ms | Tick {:.0} Hz | Scene {} | Balls {} (draw {}) | Tiles {} (vis {} cull {} chunks {} dirty {}) | Lights {} | RT {:?}/{} ({}) | FSR {:?}/{} ({:.2}) | Substeps {} | Phys {}µs (int {}µs bp {}µs np {}µs sv {}µs sl {}µs) | contract {}:{} | {:?} {} {} {:?}{}{}{}{}{}{}{}{}",
+            "Tileline TLApp | FPS {:.1} | Frame {:.2} ms | Tick {:.0}/{:.0} Hz | Scene {} | Balls {} (draw {}) | Tiles {} (vis {} cull {} chunks {} dirty {}) | Lights {} | RT {:?}/{} ({}) | FSR {:?}/{} ({:.2}) | Substeps {} | Phys {}µs (int {}µs bp {}µs np {}µs sv {}µs sl {}µs) | phys q{:.2} i{:.2} h{:.2} s{:.2} | contract {}:{} | {:?} {} {} {:?}{}{}{}{}{}{}{}{}",
             self.fps_tracker.ema_fps(),
             frame_time * 1_000.0,
+            self.actual_tick_ema_hz,
             self.tick_hz,
             draw.mode.as_str(),
             tick.live_balls,
@@ -1238,6 +1347,10 @@ impl TlAppRuntime {
             step_timings.narrowphase_us,
             step_timings.solver_us,
             step_timings.sleep_us,
+            physics_backlog.queue_pressure,
+            physics_backlog.inflight_pressure,
+            physics_backlog.hot_worker_ratio,
+            physics_backlog.phase_skew,
             performance_contract.scenario.label(),
             performance_contract.tier.label(),
             self.adapter_backend,
@@ -1274,7 +1387,7 @@ impl TlAppRuntime {
             let performance_contract = evaluate_performance_contract(
                 tick.live_balls,
                 report,
-                self.tick_hz,
+                self.actual_tick_ema_hz.max(self.actual_tick_hz),
                 self.frame_time_jitter_ema_ms,
                 self.runtime_bridge_telemetry.physics_lag_frames,
             );
@@ -1303,7 +1416,7 @@ impl TlAppRuntime {
                 .as_deref()
                 .unwrap_or("none");
             println!(
-                "tlapp fps | inst: {:>6.1} | ema: {:>6.1} | avg: {:>6.1} | stddev: {:>5.2} ms | scene_mode: {} | balls: {:>5} | draw: {:>5} | tiles_draw: {:>5} | tiles_vis: {:>5} | tiles_culled: {:>5} | tile_chunks: {:>4} | tile_dirty: {:>4} | lights: {:>2} | substeps: {} | phys_us: {:>6} | int_us: {:>5} | bp_us: {:>5} | np_us: {:>5} | sv_us: {:>5} | sl_us: {:>5} | snap_us: {:>5} | pre_phys_us: {:>5} | scene_us: {:>5} | compile_us: {:>5} | upload_us: {:>5} | present_us: {:>6} | scattered: {:>4} | rd_culled: {:>4} | rd_blur: {:>4} | fill: {:>4.2} | fill_ema: {:>4.2} | contract: {}:{} stable={} | rt_mode: {:?} | rt_active: {} | rt_dynamic: {:>4} | rt_reason: {} | fsr_mode: {:?} | fsr_active: {} | fsr_scale: {:>4.2} | fsr_sharpness: {:>4.2} | fsr_reason: {} | mps_threads: {} | phys_workers: {} | phys_queue: {} | phys_inflight: {} | phys_frame: {} | shards: {} | pairs: {} | manifolds: {} | platform: {:?} | backend: {:?} | render_backend: {} | scheduler: {} | present: {:?} | fallback: {} | adapter: {} | reason: {} | pipeline: {} | bridge_path: {} | queued_plan_depth: {} | bridge_pump_published: {} | bridge_pump_drained: {} | physics_lag_frames: {} | bridge_fallback: {} | gms_mode: {} | gms_budget: {} | gms_util: {:>4.2} | gms_q: {} | gms_ai_ml_drop: {:>4.3} | gms_reason: {} | c0_mode: i={} b={} n={} s={} | c0_reason: i={} b={} n={} s={} | c0_serial_us: i={} b={} n={} s={}",
+                "tlapp fps | inst: {:>6.1} | ema: {:>6.1} | avg: {:>6.1} | stddev: {:>5.2} ms | scene_mode: {} | balls: {:>5} | draw: {:>5} | tiles_draw: {:>5} | tiles_vis: {:>5} | tiles_culled: {:>5} | tile_chunks: {:>4} | tile_dirty: {:>4} | lights: {:>2} | tick_actual: {:>6.1} | tick_target: {:>6.1} | substeps: {} | phys_us: {:>6} | int_us: {:>5} | bp_us: {:>5} | np_us: {:>5} | sv_us: {:>5} | sl_us: {:>5} | snap_us: {:>5} | pre_phys_us: {:>5} | scene_us: {:>5} | compile_us: {:>5} | upload_us: {:>5} | present_us: {:>6} | scattered: {:>4} | rd_culled: {:>4} | rd_blur: {:>4} | fill: {:>4.2} | fill_ema: {:>4.2} | phys_q: {:>4.2} | phys_i: {:>4.2} | phys_hot: {:>4.2} | phys_skew: {:>4.2} | phys_score: {:>4.2} | phys_sat: {:>3} | contract: {}:{} stable={} | rt_mode: {:?} | rt_active: {} | rt_dynamic: {:>4} | rt_reason: {} | fsr_mode: {:?} | fsr_active: {} | fsr_scale: {:>4.2} | fsr_sharpness: {:>4.2} | fsr_reason: {} | mps_threads: {} | phys_workers: {} | phys_queue: {} | phys_inflight: {} | phys_frame: {} | shards: {} | pairs: {} | manifolds: {} | platform: {:?} | backend: {:?} | render_backend: {} | scheduler: {} | present: {:?} | fallback: {} | adapter: {} | reason: {} | pipeline: {} | bridge_path: {} | queued_plan_depth: {} | bridge_pump_published: {} | bridge_pump_drained: {} | physics_lag_frames: {} | bridge_fallback: {} | gms_mode: {} | gms_budget: {} | gms_util: {:>4.2} | gms_q: {} | gms_ai_ml_drop: {:>4.3} | gms_reason: {} | c0_mode: i={} b={} n={} s={} | c0_reason: i={} b={} n={} s={} | c0_serial_us: i={} b={} n={} s={}",
                 report.instant_fps,
                 report.ema_fps,
                 report.avg_fps,
@@ -1317,6 +1430,8 @@ impl TlAppRuntime {
                 tile_frame.visible_chunks,
                 tile_frame.dirty_chunks,
                 upload.light_count,
+                self.actual_tick_ema_hz,
+                self.tick_hz,
                 substeps,
                 step_timings.total_us(),
                 step_timings.integrate_us,
@@ -1335,6 +1450,12 @@ impl TlAppRuntime {
                 self.last_distance_blurred,
                 self.last_framebuffer_fill_ratio,
                 self.framebuffer_fill_ema,
+                physics_backlog.queue_pressure,
+                physics_backlog.inflight_pressure,
+                physics_backlog.hot_worker_ratio,
+                physics_backlog.phase_skew,
+                physics_backlog.score,
+                recent_queue_saturation_events,
                 performance_contract.scenario.label(),
                 performance_contract.tier.label(),
                 performance_contract.stable,

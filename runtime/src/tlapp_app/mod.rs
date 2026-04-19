@@ -58,6 +58,7 @@ use crate::{MetalSceneRenderer, MetalSceneRendererConfig};
 use crate::{VulkanSceneRenderer, VulkanSceneRendererConfig};
 use gms::safe_default_required_limits_for_adapter;
 use mgs::MobileGpuProfile;
+use mps::{MpsThreadPoolMetrics, SimdBackendKind};
 use nalgebra::Vector3;
 use paradoxpe::{
     parallel::ParallelExecutionMode, BroadphaseConfig, ContactSolverConfig, NarrowphaseConfig,
@@ -1160,6 +1161,10 @@ struct TlAppRuntime {
     tick_profile: TickProfile,
     tick_cap: Option<f32>,
     tick_hz: f32,
+    actual_tick_hz: f32,
+    actual_tick_ema_hz: f32,
+    last_physics_queue_saturation_events: u64,
+    physics_backlog_hold_timer: f32,
     fps_limit_hint: f32,
     uncapped_dynamic_fps_hint: bool,
     adaptive_pacer_enabled: bool,
@@ -1225,6 +1230,18 @@ struct TlAppRuntime {
     /// Current smoothed render scale maintained by Dynamo FSR (starts at 1.0 = native).
     fsr_dynamo_scale: f32,
     shutdown_prepared: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PhysicsBacklogState {
+    queue_pressure: f32,
+    inflight_pressure: f32,
+    hot_worker_ratio: f32,
+    phase_skew: f32,
+    score: f32,
+    moderate: bool,
+    severe: bool,
+    block_ramp_up: bool,
 }
 
 enum TlAppRenderer {
@@ -1995,6 +2012,8 @@ fn choose_aggressive_tick_hz(
     tick_scale: f32,
     fps_limit_hint: f32,
     logical_threads: usize,
+    simd_backend: SimdBackendKind,
+    simd_lanes: usize,
     mobile_path: bool,
 ) -> f32 {
     let fps_limit = fps_limit_hint.clamp(24.0, 1_200.0);
@@ -2146,8 +2165,27 @@ fn choose_aggressive_tick_hz(
             }
         }
     };
-    let dynamic_max =
-        (fps_limit * ceiling_factor * thread_gain).min(policy.max_tick_hz.max(dynamic_min));
+    let simd_gain = match simd_backend {
+        SimdBackendKind::Scalar => 1.0,
+        SimdBackendKind::X86Avx512 => {
+            let lane_bonus = ((simd_lanes as f32 / 16.0) - 1.0).max(0.0) * 0.04;
+            if mobile_path {
+                1.04 + lane_bonus
+            } else {
+                1.14 + lane_bonus
+            }
+        }
+        SimdBackendKind::Aarch64Neon | SimdBackendKind::PowerPcAltivec => {
+            let lane_bonus = ((simd_lanes as f32 / 4.0) - 1.0).max(0.0) * 0.03;
+            if mobile_path {
+                1.06 + lane_bonus
+            } else {
+                1.08 + lane_bonus
+            }
+        }
+    };
+    let dynamic_max = (fps_limit * ceiling_factor * thread_gain * simd_gain)
+        .min(policy.max_tick_hz.max(dynamic_min));
 
     target_hz.clamp(dynamic_min, dynamic_max)
 }
@@ -2199,6 +2237,62 @@ fn physics_safe_tick_ceiling_hz(
     let ceiling = (1_000_000.0 / per_substep_us) * cpu_budget_ratio * thread_gain;
     let hard_cap = if mobile_path { 180.0 } else { 420.0 };
     Some(ceiling.clamp(24.0, hard_cap))
+}
+
+fn evaluate_physics_backlog(
+    metrics: &MpsThreadPoolMetrics,
+    recent_queue_saturation_events: u64,
+    hold_timer_active: bool,
+) -> PhysicsBacklogState {
+    let worker_count = metrics.worker_count.max(1) as f32;
+    let queue_pressure = metrics.queued_jobs as f32 / worker_count;
+    let inflight_pressure = metrics.in_flight_jobs as f32 / worker_count;
+    let hot_worker_ratio = metrics.hot_worker_ratio.max(1.0);
+    let phase_skew = metrics.phase_skew.max(1.0);
+    let active_frame_pressure = if metrics.active_frame_id.is_some()
+        && (metrics.queued_jobs > 0 || metrics.in_flight_jobs > 0)
+    {
+        0.35
+    } else {
+        0.0
+    };
+    let saturation_pressure = if recent_queue_saturation_events > 0 {
+        0.9 + (recent_queue_saturation_events.min(16) as f32 * 0.06)
+    } else {
+        0.0
+    };
+    let hold_pressure = if hold_timer_active { 0.35 } else { 0.0 };
+    let score = queue_pressure * 0.95
+        + inflight_pressure * 0.30
+        + (hot_worker_ratio - 1.0).max(0.0) * 1.75
+        + (phase_skew - 1.0).max(0.0) * 1.45
+        + active_frame_pressure
+        + saturation_pressure
+        + hold_pressure;
+    let moderate = score > 0.95
+        || queue_pressure > 0.35
+        || hot_worker_ratio > 1.35
+        || phase_skew > 1.30
+        || recent_queue_saturation_events > 0;
+    let severe = score > 2.10
+        || queue_pressure > 1.10
+        || hot_worker_ratio > 1.70
+        || phase_skew > 1.70
+        || recent_queue_saturation_events > 2;
+    let block_ramp_up = hold_timer_active
+        || moderate
+        || (metrics.active_frame_id.is_some() && metrics.queued_jobs > 0);
+
+    PhysicsBacklogState {
+        queue_pressure,
+        inflight_pressure,
+        hot_worker_ratio,
+        phase_skew,
+        score,
+        moderate,
+        severe,
+        block_ramp_up,
+    }
 }
 
 fn smooth_fps_limit_hint(current_hint_hz: f32, measured_hint_hz: f32, mobile_path: bool) -> f32 {

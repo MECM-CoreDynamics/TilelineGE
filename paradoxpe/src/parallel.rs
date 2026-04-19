@@ -5,6 +5,7 @@
 //! - deterministic merge order for collect/filter-map operations
 //! - sequential fallback for small workloads
 
+use std::cell::Cell;
 use std::thread;
 
 /// Execution mode snapshot returned by ParadoxPE parallel helpers.
@@ -54,9 +55,42 @@ impl ParallelExecutionMode {
     }
 }
 
+thread_local! {
+    static EXTERNAL_PARALLEL_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Guard that suppresses ParadoxPE's internal scoped-thread helpers while an
+/// external dispatcher (MPS) owns the frame.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) struct ExternalParallelGuard;
+
+impl Drop for ExternalParallelGuard {
+    fn drop(&mut self) {
+        EXTERNAL_PARALLEL_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn enter_external_parallel_mode() -> ExternalParallelGuard {
+    EXTERNAL_PARALLEL_DEPTH.with(|depth| {
+        depth.set(depth.get().saturating_add(1));
+    });
+    ExternalParallelGuard
+}
+
+#[inline]
+fn external_parallel_mode_active() -> bool {
+    EXTERNAL_PARALLEL_DEPTH.with(|depth| depth.get() > 0)
+}
 /// Return the logical worker count available to this process.
 #[inline]
 pub fn worker_count() -> usize {
+    if external_parallel_mode_active() {
+        return 1;
+    }
     thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
