@@ -38,7 +38,8 @@ use crate::{
     tileline_version_entries, unpack_pak, BounceTankRuntimePatch, BounceTankSceneConfig,
     BounceTankSceneController, BounceTankTickMetrics, ChunkedTileWorld2d, DrawPathCompiler,
     FsrConfig, FsrDynamoConfig, FsrMode, FsrQualityPreset, FsrStatus, GmsGuardrailProfile,
-    GmsScalerConfig, GmsScalerDomain, GmsScalerMode, GraphicsSchedulerPath, RayTracingMode,
+    GmsScalerConfig, GmsScalerDomain, GmsScalerMode, GraphicsSchedulerPath, MlsBackendKind,
+    MlsExecutionMode, MlsPrecisionMode, MlsRuntimeConfig, MlsWorkloadKind, RayTracingMode,
     RenderSyncMode, RuntimeAdapterInfo, RuntimeBridgeConfig, RuntimeBridgeMetrics,
     RuntimeBridgeOrchestrator, RuntimeBridgePath, RuntimeBridgeTick, RuntimeFramePlan,
     RuntimeGpuBackend, RuntimeGpuDeviceType, RuntimePlatform, RuntimeSceneMode,
@@ -46,11 +47,12 @@ use crate::{
     TelemetryHudSample, TickRatePolicy, TileCoord2d, TileMutation2d, TileView2d, TileWorld2dConfig,
     TileWorldFrameTelemetry, TljointDiagnosticLevel, TljointSceneBundle, TlpfileDiagnosticLevel,
     TlpfileGraphicsScheduler, TlpfileSceneDimension, TlscriptGmsMetricSnapshot,
-    TlscriptOverlayTileLookup, TlscriptPerformancePreset, TlscriptShowcaseConfig,
-    TlscriptShowcaseContactSnapshot, TlscriptShowcaseControlInput, TlscriptShowcaseFrameInput,
-    TlscriptShowcaseFrameOutput, TlscriptShowcaseProgram, TlscriptTileLookup, TlscriptToggleMode,
-    TlspriteHotReloadEvent, TlspriteProgram, TlspriteProgramCache, TlspriteWatchReloader,
-    WgpuSceneRenderer, ENGINE_ID, ENGINE_VERSION, MAX_SCENE_LIGHTS,
+    TlscriptMlsMetricSnapshot, TlscriptOverlayTileLookup, TlscriptPerformancePreset,
+    TlscriptShowcaseConfig, TlscriptShowcaseContactSnapshot, TlscriptShowcaseControlInput,
+    TlscriptShowcaseFrameInput, TlscriptShowcaseFrameOutput, TlscriptShowcaseProgram,
+    TlscriptTileLookup, TlscriptToggleMode, TlspriteHotReloadEvent, TlspriteProgram,
+    TlspriteProgramCache, TlspriteWatchReloader, WgpuSceneRenderer, ENGINE_ID, ENGINE_VERSION,
+    MAX_SCENE_LIGHTS,
 };
 #[cfg(target_os = "macos")]
 use crate::{MetalSceneRenderer, MetalSceneRendererConfig};
@@ -112,6 +114,12 @@ const CONSOLE_HELP_COMMANDS: &[&str] = &[
     "gms.status | gms.mode <adaptive|fixed> | gms.target_fps <n>",
     "gms.budget <render|physics|ai_ml|postfx|ui> <pct>",
     "gms.guardrail <balanced|aggressive|relaxed>",
+    "mls.status | mls.mode <off|auto|on> | mls.backend <auto|amd|nvidia|apple|rockchip|cpu>",
+    "mls.precision <auto|fp32|fp16|bf16|int8>",
+    "mls.workload <upscale|agent|physics_assist|training> <on|off>",
+    "mls.budget <upscale|agent|physics_assist|training> <pct>",
+    "mls.model.bind <slot> <path-or-pack-ref> | mls.train <slot> <steps>",
+    "mls.checkpoint <slot> <save|load> <name>",
     "sim.status | sim.pause | sim.resume | sim.step <n> | sim.reset",
     "scene.mode <3d|2d>",
     "tile.status | tile.set <x y id> | tile.dig <x y> | tile.fill <x0 y0 x1 y1 id>",
@@ -614,6 +622,7 @@ mod script_runtime_tile_lookup_tests {
             Some(&runtime_lookup),
             TlscriptShowcaseContactSnapshot::default(),
             TlscriptGmsMetricSnapshot::default(),
+            TlscriptMlsMetricSnapshot::default(),
         );
         assert_eq!(out.patch.spawn_per_tick, Some(271));
     }
@@ -1217,6 +1226,17 @@ struct TlAppRuntime {
     gms_cli_override_ai_ml_budget_pct: Option<u8>,
     gms_cli_override_postfx_budget_pct: Option<u8>,
     gms_cli_override_ui_budget_pct: Option<u8>,
+    mls_cli_override_mode: Option<MlsExecutionMode>,
+    mls_cli_override_backend: Option<MlsBackendKind>,
+    mls_cli_override_precision: Option<MlsPrecisionMode>,
+    mls_cli_override_upscale_budget_pct: Option<u8>,
+    mls_cli_override_agent_budget_pct: Option<u8>,
+    mls_cli_override_physics_assist_budget_pct: Option<u8>,
+    mls_cli_override_training_budget_pct: Option<u8>,
+    mls_cli_override_upscale_enabled: Option<bool>,
+    mls_cli_override_agent_enabled: Option<bool>,
+    mls_cli_override_physics_assist_enabled: Option<bool>,
+    mls_cli_override_training_enabled: Option<bool>,
     runtime_bridge_telemetry: RuntimeBridgeTelemetry,
     bridge_frame_counter: u64,
     adapter_backend: wgpu::Backend,
@@ -1555,6 +1575,7 @@ impl<'src> ScriptRuntime<'src> {
         tile_lookup: Option<&dyn TlscriptTileLookup>,
         contact_snapshot: TlscriptShowcaseContactSnapshot,
         gms_metrics: TlscriptGmsMetricSnapshot,
+        mls_metrics: TlscriptMlsMetricSnapshot,
     ) -> TlscriptShowcaseFrameOutput {
         match self {
             Self::Single(program) => program
@@ -1564,6 +1585,7 @@ impl<'src> ScriptRuntime<'src> {
                     tile_lookup,
                     contact_snapshot,
                     gms_metrics,
+                    mls_metrics.clone(),
                 ),
             Self::Joint(bundle) => bundle.evaluate_frame_with_tile_lookup_and_contacts(
                 input,
@@ -1571,6 +1593,7 @@ impl<'src> ScriptRuntime<'src> {
                 tile_lookup,
                 contact_snapshot,
                 gms_metrics,
+                mls_metrics.clone(),
             ),
             Self::MultiScripts(programs) => {
                 let mut merged = empty_showcase_output();
@@ -1586,6 +1609,7 @@ impl<'src> ScriptRuntime<'src> {
                         Some(&overlay_lookup),
                         contact_snapshot,
                         gms_metrics,
+                        mls_metrics.clone(),
                     );
                     merge_showcase_output(&mut merged, output, index);
                 }
@@ -1664,6 +1688,51 @@ fn merge_showcase_output(
     }
     if next.gms_scaler.ui_budget_pct.is_some() {
         merged.gms_scaler.ui_budget_pct = next.gms_scaler.ui_budget_pct;
+    }
+    if next.mls.mode.is_some() {
+        merged.mls.mode = next.mls.mode;
+    }
+    if next.mls.backend.is_some() {
+        merged.mls.backend = next.mls.backend;
+    }
+    if next.mls.precision.is_some() {
+        merged.mls.precision = next.mls.precision;
+    }
+    if next.mls.upscale_budget_pct.is_some() {
+        merged.mls.upscale_budget_pct = next.mls.upscale_budget_pct;
+    }
+    if next.mls.agent_budget_pct.is_some() {
+        merged.mls.agent_budget_pct = next.mls.agent_budget_pct;
+    }
+    if next.mls.physics_assist_budget_pct.is_some() {
+        merged.mls.physics_assist_budget_pct = next.mls.physics_assist_budget_pct;
+    }
+    if next.mls.training_budget_pct.is_some() {
+        merged.mls.training_budget_pct = next.mls.training_budget_pct;
+    }
+    if next.mls.upscale_enabled.is_some() {
+        merged.mls.upscale_enabled = next.mls.upscale_enabled;
+    }
+    if next.mls.agent_enabled.is_some() {
+        merged.mls.agent_enabled = next.mls.agent_enabled;
+    }
+    if next.mls.physics_assist_enabled.is_some() {
+        merged.mls.physics_assist_enabled = next.mls.physics_assist_enabled;
+    }
+    if next.mls.training_enabled.is_some() {
+        merged.mls.training_enabled = next.mls.training_enabled;
+    }
+    if !next.mls.model_bindings.is_empty() {
+        merged
+            .mls
+            .model_bindings
+            .append(&mut next.mls.model_bindings);
+    }
+    if !next.mls.run_slots.is_empty() {
+        merged.mls.run_slots.append(&mut next.mls.run_slots);
+    }
+    if !next.mls.train_steps.is_empty() {
+        merged.mls.train_steps.append(&mut next.mls.train_steps);
     }
     if next.force_full_fbx_sphere.is_some() {
         merged.force_full_fbx_sphere = next.force_full_fbx_sphere;

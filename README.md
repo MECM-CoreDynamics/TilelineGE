@@ -285,6 +285,8 @@ Start here:
 - `docs/README.md`: documentation index
 - `docs/tileline-v0.5.0-roadmap.md`: current major roadmap (`Heimdall Update`)
 - `docs/tileline-v0.5.5-roadmap.md`: upcoming MPS SIMD + standalone extraction track
+- `docs/tileline-v0.6.0-roadmap.md`: MLS runtime stack with unified RAM+VRAM / UMA-first direction
+- `docs/tileline-v0.6.5-roadmap.md`: GGUF + NVFP4 follow-up for MLS
 - `docs/runtime-tlapp-console.md`: in-app runtime console and live controls
 - `docs/runtime-pak.md`: `.pak` packaging flow
 - `docs/runtime-tlpfile-gui.md`: `.tlpfile` runtime/project shell
@@ -316,6 +318,23 @@ The `v0.5.5` direction extends the CPU runtime identity even further:
 - SIMD work (`AVX-512`, `NEON`, `VMX/AltiVec` direction)
 - stronger runtime-dispatched MPS kernels
 - MPS living as a truly independent library/repo while still powering Tileline
+
+### v0.6.0: MLS Runtime Stack
+
+The `v0.6.0` direction turns MLS into a first-class runtime layer:
+
+- inference + local training
+- runtime-owned control surfaces across `.tlpfile`, CLI, and `.tlscript`
+- advisory-only physics assist
+- unified RAM+VRAM / UMA-first memory model instead of a user-visible PyTorch-style split
+
+### v0.6.5: MLS Format + Precision Expansion
+
+The `v0.6.5` follow-up extends that MLS base with:
+
+- `GGUF` model support
+- `NVFP4`-class low-precision NVIDIA inference paths
+- stronger format/precision telemetry without breaking the v0.6.0 MLS contract
 
 ## Why This Repo Can Be Marketed Differently
 

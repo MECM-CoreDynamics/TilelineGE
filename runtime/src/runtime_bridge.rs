@@ -9,7 +9,11 @@
 
 use gms::SceneWorkloadEstimate;
 use mgs::MobileGpuProfile;
-use tl_core::{BridgeFramePlan, MgsBridgeFramePlan, MpsGmsBridgeConfig, MpsMgsBridgeConfig};
+use tl_core::{
+    BridgeFramePlan, MgsBridgeFramePlan, MlsBackendKind, MlsExecutionMode, MlsPrecisionMode,
+    MlsRuntime, MlsRuntimeConfig, MlsTelemetry, MlsWorkloadKind, MpsGmsBridgeConfig,
+    MpsMgsBridgeConfig,
+};
 
 use crate::frame_loop::{FrameLoopRuntime, FrameLoopRuntimeConfig};
 use crate::mgs_frame_loop::{MgsFrameLoopRuntime, MgsFrameLoopRuntimeConfig};
@@ -141,6 +145,15 @@ pub struct RuntimeBridgeMetrics {
     pub lane_queue_depth: usize,
     pub ai_ml_drop_rate: f32,
     pub fallback_reason: Option<String>,
+    pub mls_backend: MlsBackendKind,
+    pub mls_device: String,
+    pub mls_active_workloads: Vec<MlsWorkloadKind>,
+    pub mls_infer_queue_depth: usize,
+    pub mls_train_queue_depth: usize,
+    pub mls_drop_rate: f32,
+    pub mls_fallback_reason: Option<String>,
+    pub mls_precision: MlsPrecisionMode,
+    pub mls_step_time_ms: f32,
 }
 
 /// Runtime GMS scaler mode.
@@ -291,6 +304,7 @@ pub struct RuntimeBridgeConfig {
     pub gms_scene_workload: SceneWorkloadBridgeConfig,
     pub gms_scene_dispatch: SceneDispatchBridgeConfig,
     pub gms_scaler: GmsScalerConfig,
+    pub mls: MlsRuntimeConfig,
     pub mgs_frame_loop: MgsFrameLoopRuntimeConfig,
     pub mgs_bridge: MpsMgsBridgeConfig,
     pub mgs_scene_workload: MobileSceneWorkloadBridgeConfig,
@@ -307,6 +321,7 @@ impl Default for RuntimeBridgeConfig {
             gms_scene_workload: SceneWorkloadBridgeConfig::default(),
             gms_scene_dispatch: SceneDispatchBridgeConfig::default(),
             gms_scaler: GmsScalerConfig::default(),
+            mls: MlsRuntimeConfig::default(),
             mgs_frame_loop: MgsFrameLoopRuntimeConfig::default(),
             mgs_bridge: MpsMgsBridgeConfig::default(),
             mgs_scene_workload: MobileSceneWorkloadBridgeConfig::default(),
@@ -328,6 +343,7 @@ pub struct RuntimeBridgeOrchestrator {
     inner: RuntimeBridgeLoop,
     last_plan: Option<RuntimeFramePlan>,
     gms_scaler: GmsScalerConfig,
+    mls: MlsRuntime,
     gms_complexity_ema: f64,
     gms_ai_ml_requested_jobs: u64,
     gms_ai_ml_kept_jobs: u64,
@@ -356,6 +372,7 @@ impl RuntimeBridgeOrchestrator {
                     config.gms_bridge,
                 )),
                 gms_scaler: config.gms_scaler,
+                mls: MlsRuntime::new(config.mls.clone()),
                 config,
                 last_plan: None,
                 gms_complexity_ema: 0.0,
@@ -375,6 +392,7 @@ impl RuntimeBridgeOrchestrator {
                         profile,
                     )),
                     gms_scaler: config.gms_scaler,
+                    mls: MlsRuntime::new(config.mls.clone()),
                     config,
                     last_plan: None,
                     gms_complexity_ema: 0.0,
@@ -390,6 +408,14 @@ impl RuntimeBridgeOrchestrator {
 
     pub fn gms_scaler_config(&self) -> GmsScalerConfig {
         self.gms_scaler
+    }
+
+    pub fn mls_config(&self) -> MlsRuntimeConfig {
+        self.mls.config().clone()
+    }
+
+    pub fn mls_telemetry(&self) -> MlsTelemetry {
+        self.mls.telemetry().clone()
     }
 
     pub fn set_gms_mode(&mut self, mode: GmsScalerMode) {
@@ -408,6 +434,51 @@ impl RuntimeBridgeOrchestrator {
         self.gms_scaler.guardrail = profile;
     }
 
+    pub fn set_mls_mode(&mut self, mode: MlsExecutionMode) {
+        self.mls.set_mode(mode);
+    }
+
+    pub fn set_mls_backend(&mut self, backend: MlsBackendKind) {
+        self.mls.set_backend(backend);
+    }
+
+    pub fn set_mls_precision(&mut self, precision: MlsPrecisionMode) {
+        self.mls.set_precision(precision);
+    }
+
+    pub fn set_mls_workload_enabled(&mut self, workload: MlsWorkloadKind, enabled: bool) {
+        self.mls.set_workload_enabled(workload, enabled);
+    }
+
+    pub fn set_mls_budget(&mut self, workload: MlsWorkloadKind, pct: u8) {
+        self.mls.set_budget(workload, pct);
+    }
+
+    pub fn bind_mls_model(
+        &mut self,
+        slot: u32,
+        source: impl Into<String>,
+    ) -> Result<String, String> {
+        self.mls.bind_model(slot, source)
+    }
+
+    pub fn run_mls_slot(&mut self, slot: u32) -> Result<String, String> {
+        self.mls.run(slot)
+    }
+
+    pub fn train_mls_slot(&mut self, slot: u32, steps: u32) -> Result<String, String> {
+        self.mls.train_step(slot, steps)
+    }
+
+    pub fn checkpoint_mls_slot(
+        &mut self,
+        slot: u32,
+        save: bool,
+        name: &str,
+    ) -> Result<String, String> {
+        self.mls.checkpoint(slot, save, name)
+    }
+
     pub fn gms_metric(&self, name: &str) -> Option<f64> {
         let name = name.trim().to_ascii_lowercase();
         match name.as_str() {
@@ -420,6 +491,10 @@ impl RuntimeBridgeOrchestrator {
             "target_fps" => Some(self.gms_scaler.target_fps as f64),
             _ => None,
         }
+    }
+
+    pub fn mls_metric(&self, name: &str) -> Option<f64> {
+        self.mls.metric(name)
     }
 
     pub fn gms_status_line(&self) -> Option<String> {
@@ -448,6 +523,10 @@ impl RuntimeBridgeOrchestrator {
                 .map(|r| format!(" fallback_reason={r}"))
                 .unwrap_or_default()
         ))
+    }
+
+    pub fn mls_status_line(&self) -> String {
+        self.mls.status_line()
     }
 
     /// Selected runtime bridge path.
@@ -518,6 +597,15 @@ impl RuntimeBridgeOrchestrator {
                 tick.bridge_pump_drained = result.drained_frame_plans;
                 tick.queued_plan_depth = result.queued_frame_plans;
                 self.gms_last_lane_queue_depth = result.queued_frame_plans;
+                let ai_ml_drop_rate = 1.0
+                    - (self.gms_ai_ml_kept_jobs as f32
+                        / self.gms_ai_ml_requested_jobs.max(1) as f32)
+                        .clamp(0.0, 1.0);
+                self.mls.note_scheduler_feedback(
+                    self.gms_last_lane_queue_depth,
+                    self.mls.telemetry().train_queue_depth,
+                    ai_ml_drop_rate,
+                );
                 frame_loop.pop_next_frame_plan().map(RuntimeFramePlan::Gms)
             }
             RuntimeBridgeLoop::Mgs(frame_loop) => {
@@ -526,6 +614,11 @@ impl RuntimeBridgeOrchestrator {
                 tick.bridge_pump_drained = result.drained_frame_plans;
                 tick.queued_plan_depth = result.queued_frame_plans;
                 self.gms_last_lane_queue_depth = result.queued_frame_plans;
+                self.mls.note_scheduler_feedback(
+                    result.queued_frame_plans,
+                    self.mls.telemetry().train_queue_depth,
+                    self.mls.telemetry().drop_rate,
+                );
                 frame_loop.pop_next_frame_plan().map(RuntimeFramePlan::Mgs)
             }
         };
@@ -548,6 +641,7 @@ impl RuntimeBridgeOrchestrator {
 
     /// Snapshot unified path-independent metrics.
     pub fn metrics(&self) -> RuntimeBridgeMetrics {
+        let mls = self.mls.telemetry();
         match &self.inner {
             RuntimeBridgeLoop::Gms(frame_loop) => {
                 let m = frame_loop.metrics();
@@ -566,6 +660,17 @@ impl RuntimeBridgeOrchestrator {
                             / self.gms_ai_ml_requested_jobs.max(1) as f32)
                             .clamp(0.0, 1.0),
                     fallback_reason: self.gms_last_fallback_reason.clone(),
+                    mls_backend: mls.backend,
+                    mls_device: mls.device.clone(),
+                    mls_active_workloads: mls.active_workloads.clone(),
+                    mls_infer_queue_depth: mls.infer_queue_depth,
+                    mls_train_queue_depth: mls.train_queue_depth,
+                    mls_drop_rate: mls.drop_rate,
+                    mls_fallback_reason: mls
+                        .fallback_reason
+                        .map(|reason| reason.as_str().to_string()),
+                    mls_precision: mls.precision,
+                    mls_step_time_ms: mls.step_time_ms,
                 }
             }
             RuntimeBridgeLoop::Mgs(frame_loop) => {
@@ -582,6 +687,17 @@ impl RuntimeBridgeOrchestrator {
                     lane_queue_depth: m.queued_frame_plans,
                     ai_ml_drop_rate: 0.0,
                     fallback_reason: None,
+                    mls_backend: mls.backend,
+                    mls_device: mls.device.clone(),
+                    mls_active_workloads: mls.active_workloads.clone(),
+                    mls_infer_queue_depth: mls.infer_queue_depth,
+                    mls_train_queue_depth: mls.train_queue_depth,
+                    mls_drop_rate: mls.drop_rate,
+                    mls_fallback_reason: mls
+                        .fallback_reason
+                        .map(|reason| reason.as_str().to_string()),
+                    mls_precision: mls.precision,
+                    mls_step_time_ms: mls.step_time_ms,
                 }
             }
         }
@@ -695,6 +811,11 @@ impl RuntimeBridgeOrchestrator {
             .gms_ai_ml_requested_jobs
             .saturating_add(requested_ai_ml as u64);
         self.gms_ai_ml_kept_jobs = self.gms_ai_ml_kept_jobs.saturating_add(new_ai_ml as u64);
+        let ai_ml_drop_rate = 1.0
+            - (self.gms_ai_ml_kept_jobs as f32 / self.gms_ai_ml_requested_jobs.max(1) as f32)
+                .clamp(0.0, 1.0);
+        self.mls
+            .note_scheduler_feedback(self.gms_last_lane_queue_depth, 0, ai_ml_drop_rate);
 
         let kept_total = new_sampled
             .saturating_add(new_object)

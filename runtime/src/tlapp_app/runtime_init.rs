@@ -154,6 +154,7 @@ impl TlAppRuntime {
         let mut project_scheduler_manifest: Option<TlpfileGraphicsScheduler> = None;
         let mut project_scene_dimension_manifest: Option<TlpfileSceneDimension> = None;
         let mut project_gms_scaler_manifest: Option<GmsScalerConfig> = None;
+        let mut project_mls_manifest: Option<MlsRuntimeConfig> = None;
         if let Some(project_path) = &options.project_path {
             let project_compile = compile_tlpfile_scene_from_path(
                 project_path,
@@ -190,6 +191,7 @@ impl TlAppRuntime {
             project_scheduler_manifest = Some(bundle.scheduler);
             project_scene_dimension_manifest = Some(bundle.scene_dimension);
             project_gms_scaler_manifest = Some(bundle.gms_scaler);
+            project_mls_manifest = Some(bundle.mls.clone());
 
             if bundle.scene_name == "main" {
                 let main_joint_ok = bundle
@@ -344,6 +346,9 @@ impl TlAppRuntime {
             if let Some(gms_scaler) = project_gms_scaler_manifest {
                 bridge_config.gms_scaler = gms_scaler;
             }
+            if let Some(mls) = project_mls_manifest.clone() {
+                bridge_config.mls = mls;
+            }
             Some(RuntimeBridgeOrchestrator::new_for_scheduler(
                 scheduler_resolution.selected,
                 &adapter_info.name,
@@ -369,6 +374,15 @@ impl TlAppRuntime {
                 lane_queue_depth: 0,
                 ai_ml_drop_rate: 0.0,
                 fallback_reason: None,
+                mls_backend: crate::MlsBackendKind::Cpu,
+                mls_device: "cpu".to_string(),
+                mls_active_workloads: Vec::new(),
+                mls_infer_queue_depth: 0,
+                mls_train_queue_depth: 0,
+                mls_drop_rate: 0.0,
+                mls_fallback_reason: None,
+                mls_precision: crate::MlsPrecisionMode::Fp32,
+                mls_step_time_ms: 0.0,
             });
         let runtime_bridge_telemetry =
             RuntimeBridgeTelemetry::new(runtime_bridge_metrics.bridge_path);
@@ -903,6 +917,17 @@ impl TlAppRuntime {
             gms_cli_override_ai_ml_budget_pct: None,
             gms_cli_override_postfx_budget_pct: None,
             gms_cli_override_ui_budget_pct: None,
+            mls_cli_override_mode: None,
+            mls_cli_override_backend: None,
+            mls_cli_override_precision: None,
+            mls_cli_override_upscale_budget_pct: None,
+            mls_cli_override_agent_budget_pct: None,
+            mls_cli_override_physics_assist_budget_pct: None,
+            mls_cli_override_training_budget_pct: None,
+            mls_cli_override_upscale_enabled: None,
+            mls_cli_override_agent_enabled: None,
+            mls_cli_override_physics_assist_enabled: None,
+            mls_cli_override_training_enabled: None,
             runtime_bridge_telemetry,
             bridge_frame_counter: 1,
             adapter_backend: adapter_info.backend,

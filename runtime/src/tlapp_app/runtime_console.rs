@@ -779,6 +779,21 @@ impl TlAppRuntime {
             .fallback_reason
             .as_deref()
             .unwrap_or("none");
+        let mls_active = if self.runtime_bridge_metrics.mls_active_workloads.is_empty() {
+            "none".to_string()
+        } else {
+            self.runtime_bridge_metrics
+                .mls_active_workloads
+                .iter()
+                .map(|workload| workload.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mls_reason = self
+            .runtime_bridge_metrics
+            .mls_fallback_reason
+            .as_deref()
+            .unwrap_or("none");
         let step_timings = self.world.borrow().last_step_timings;
         let integrate_mode_label = phase_mode_label(step_timings.integrate_mode);
         let broadphase_mode_label = phase_mode_label(step_timings.broadphase_mode);
@@ -801,7 +816,7 @@ impl TlAppRuntime {
         let solver_serial_us =
             phase_serial_time_us(step_timings.solver_mode, step_timings.solver_us);
         format!(
-            "scene_mode={} tile[chunks={} dirty={} vis={} draw={} cull={}] pipeline={} bridge_path={} queued_plan_depth={} bridge_pump_published={} bridge_pump_drained={} physics_lag_frames={} bridge_fallback={} gms_mode={} gms_budgets={} gms_util={:.2} gms_q={} gms_ai_ml_drop={:.3} gms_reason={} fps_cap={fps_cap} vsync={:?} rt={:?}/{} fsr={:?}/{} scale={:.2} sharpness={:.2} render_distance={} adaptive_distance={:?} distance_blur={:?} sim_paused={} step_budget={} substeps={} c0_mode[i={} b={} n={} s={}] c0_reason[i={} b={} n={} s={}] c0_serial_us[i={} b={} n={} s={}] log_filter={} log_tail={} tailf={} watch={} script_vars={} script_calls={} {}",
+            "scene_mode={} tile[chunks={} dirty={} vis={} draw={} cull={}] pipeline={} bridge_path={} queued_plan_depth={} bridge_pump_published={} bridge_pump_drained={} physics_lag_frames={} bridge_fallback={} gms_mode={} gms_budgets={} gms_util={:.2} gms_q={} gms_ai_ml_drop={:.3} gms_reason={} mls_backend={} mls_precision={} mls_active={} mls_q={}/{} mls_drop={:.3} mls_step_ms={:.2} mls_reason={} fps_cap={fps_cap} vsync={:?} rt={:?}/{} fsr={:?}/{} scale={:.2} sharpness={:.2} render_distance={} adaptive_distance={:?} distance_blur={:?} sim_paused={} step_budget={} substeps={} c0_mode[i={} b={} n={} s={}] c0_reason[i={} b={} n={} s={}] c0_serial_us[i={} b={} n={} s={}] log_filter={} log_tail={} tailf={} watch={} script_vars={} script_calls={} {}",
             self.scene_mode().as_str(),
             self.tile_world_frame.loaded_chunks,
             self.tile_world_frame.dirty_chunks,
@@ -821,6 +836,14 @@ impl TlAppRuntime {
             self.runtime_bridge_metrics.lane_queue_depth,
             self.runtime_bridge_metrics.ai_ml_drop_rate,
             gms_reason,
+            self.runtime_bridge_metrics.mls_backend.as_str(),
+            self.runtime_bridge_metrics.mls_precision.as_str(),
+            mls_active,
+            self.runtime_bridge_metrics.mls_infer_queue_depth,
+            self.runtime_bridge_metrics.mls_train_queue_depth,
+            self.runtime_bridge_metrics.mls_drop_rate,
+            self.runtime_bridge_metrics.mls_step_time_ms,
+            mls_reason,
             self.present_mode,
             self.rt_mode,
             if rt.active { "on" } else { "off" },
@@ -963,6 +986,22 @@ impl TlAppRuntime {
             lane_queue_depth: self.runtime_bridge_metrics.lane_queue_depth,
             ai_ml_drop_rate: self.runtime_bridge_metrics.ai_ml_drop_rate,
         };
+        let mls_metrics = TlscriptMlsMetricSnapshot {
+            backend: self.runtime_bridge_metrics.mls_backend,
+            device: self.runtime_bridge_metrics.mls_device.clone(),
+            active_workloads: self
+                .runtime_bridge_metrics
+                .mls_active_workloads
+                .iter()
+                .map(|workload| workload.as_str().to_string())
+                .collect(),
+            infer_queue_depth: self.runtime_bridge_metrics.mls_infer_queue_depth,
+            train_queue_depth: self.runtime_bridge_metrics.mls_train_queue_depth,
+            drop_rate: self.runtime_bridge_metrics.mls_drop_rate,
+            fallback_reason: self.runtime_bridge_metrics.mls_fallback_reason.clone(),
+            precision: self.runtime_bridge_metrics.mls_precision,
+            step_time_ms: self.runtime_bridge_metrics.mls_step_time_ms,
+        };
         let mut output = if let Some(tile_lookup) = tile_lookup {
             program.evaluate_frame_with_controls_and_tile_lookup_and_contacts(
                 TlscriptShowcaseFrameInput {
@@ -975,6 +1014,7 @@ impl TlAppRuntime {
                 Some(tile_lookup),
                 contact_snapshot,
                 gms_metrics,
+                mls_metrics.clone(),
             )
         } else {
             let runtime_tile_lookup =
@@ -990,6 +1030,7 @@ impl TlAppRuntime {
                 Some(&runtime_tile_lookup),
                 contact_snapshot,
                 gms_metrics,
+                mls_metrics,
             )
         };
         if !compile.warnings.is_empty() {
@@ -1125,6 +1166,17 @@ impl TlAppRuntime {
                             "gms.budget <render|physics|ai_ml|postfx|ui> <pct>",
                             "gms.guardrail <balanced|aggressive|relaxed>",
                         ]),
+                        "mls" => Some(vec![
+                            "mls.status",
+                            "mls.mode <off|auto|on>",
+                            "mls.backend <auto|amd|nvidia|apple|rockchip|cpu>",
+                            "mls.precision <auto|fp32|fp16|bf16|int8>",
+                            "mls.workload <upscale|agent|physics_assist|training> <on|off>",
+                            "mls.budget <upscale|agent|physics_assist|training> <pct>",
+                            "mls.model.bind <slot> <path-or-pack-ref>",
+                            "mls.train <slot> <steps>",
+                            "mls.checkpoint <slot> <save|load> <name>",
+                        ]),
                         "sim" => Some(vec![
                             "sim.status",
                             "sim.pause",
@@ -1171,7 +1223,7 @@ impl TlAppRuntime {
                         }
                     } else {
                         self.console_feedback(
-                            "unknown help topic (use: file|gfx|gms|sim|script|cam|log)",
+                            "unknown help topic (use: file|gfx|gms|mls|sim|script|cam|log)",
                         );
                     }
                 } else {
@@ -1276,6 +1328,203 @@ impl TlAppRuntime {
                     return RuntimeCommand::Consumed;
                 };
                 match self.set_gms_guardrail_cli_override(profile) {
+                    Ok(note) => self.console_feedback(note),
+                    Err(err) => self.console_feedback(err),
+                }
+            }
+            "mls.status" => match self.mls_status_line() {
+                Ok(line) => self.console_feedback(line),
+                Err(err) => self.console_feedback(err),
+            },
+            "mls.mode" => {
+                let Some(raw_mode) = parts.next() else {
+                    self.console_feedback("usage: mls.mode <off|auto|on>");
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(mode) = MlsExecutionMode::parse(raw_mode) else {
+                    self.console_feedback("usage: mls.mode <off|auto|on>");
+                    return RuntimeCommand::Consumed;
+                };
+                match self.set_mls_mode_cli_override(mode) {
+                    Ok(note) => self.console_feedback(note),
+                    Err(err) => self.console_feedback(err),
+                }
+            }
+            "mls.backend" => {
+                let Some(raw_backend) = parts.next() else {
+                    self.console_feedback(
+                        "usage: mls.backend <auto|amd|nvidia|apple|rockchip|cpu>",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(backend) = MlsBackendKind::parse(raw_backend) else {
+                    self.console_feedback(
+                        "usage: mls.backend <auto|amd|nvidia|apple|rockchip|cpu>",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                match self.set_mls_backend_cli_override(backend) {
+                    Ok(note) => self.console_feedback(note),
+                    Err(err) => self.console_feedback(err),
+                }
+            }
+            "mls.precision" => {
+                let Some(raw_precision) = parts.next() else {
+                    self.console_feedback("usage: mls.precision <auto|fp32|fp16|bf16|int8>");
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(precision) = MlsPrecisionMode::parse(raw_precision) else {
+                    self.console_feedback("usage: mls.precision <auto|fp32|fp16|bf16|int8>");
+                    return RuntimeCommand::Consumed;
+                };
+                match self.set_mls_precision_cli_override(precision) {
+                    Ok(note) => self.console_feedback(note),
+                    Err(err) => self.console_feedback(err),
+                }
+            }
+            "mls.workload" => {
+                let Some(raw_workload) = parts.next() else {
+                    self.console_feedback(
+                        "usage: mls.workload <upscale|agent|physics_assist|training> <on|off>",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(raw_enabled) = parts.next() else {
+                    self.console_feedback(
+                        "usage: mls.workload <upscale|agent|physics_assist|training> <on|off>",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(workload) = MlsWorkloadKind::parse(raw_workload) else {
+                    self.console_feedback(
+                        "invalid workload (expected upscale|agent|physics_assist|training)",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                let enabled = match raw_enabled.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "1" => true,
+                    "off" | "false" | "0" => false,
+                    _ => {
+                        self.console_feedback("usage: mls.workload <...> <on|off>");
+                        return RuntimeCommand::Consumed;
+                    }
+                };
+                match self.set_mls_workload_cli_override(workload, enabled) {
+                    Ok(note) => self.console_feedback(note),
+                    Err(err) => self.console_feedback(err),
+                }
+            }
+            "mls.budget" => {
+                let Some(raw_workload) = parts.next() else {
+                    self.console_feedback(
+                        "usage: mls.budget <upscale|agent|physics_assist|training> <pct>",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(raw_pct) = parts.next() else {
+                    self.console_feedback(
+                        "usage: mls.budget <upscale|agent|physics_assist|training> <pct>",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(workload) = MlsWorkloadKind::parse(raw_workload) else {
+                    self.console_feedback(
+                        "invalid workload (expected upscale|agent|physics_assist|training)",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                let pct = match parse_console_u32_in_range(raw_pct, "mls.budget", 0, 100) {
+                    Ok(value) => value as u8,
+                    Err(err) => {
+                        self.console_feedback(err);
+                        return RuntimeCommand::Consumed;
+                    }
+                };
+                match self.set_mls_budget_cli_override(workload, pct) {
+                    Ok(note) => self.console_feedback(note),
+                    Err(err) => self.console_feedback(err),
+                }
+            }
+            "mls.model.bind" => {
+                let Some(raw_slot) = parts.next() else {
+                    self.console_feedback("usage: mls.model.bind <slot> <path-or-pack-ref>");
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(source) = parts.next() else {
+                    self.console_feedback("usage: mls.model.bind <slot> <path-or-pack-ref>");
+                    return RuntimeCommand::Consumed;
+                };
+                let slot = match parse_console_u32_in_range(raw_slot, "mls.model.bind", 0, u32::MAX)
+                {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.console_feedback(err);
+                        return RuntimeCommand::Consumed;
+                    }
+                };
+                match self.bind_mls_model_cli(slot, source) {
+                    Ok(note) => self.console_feedback(note),
+                    Err(err) => self.console_feedback(err),
+                }
+            }
+            "mls.train" => {
+                let Some(raw_slot) = parts.next() else {
+                    self.console_feedback("usage: mls.train <slot> <steps>");
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(raw_steps) = parts.next() else {
+                    self.console_feedback("usage: mls.train <slot> <steps>");
+                    return RuntimeCommand::Consumed;
+                };
+                let slot = match parse_console_u32_in_range(raw_slot, "mls.train", 0, u32::MAX) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.console_feedback(err);
+                        return RuntimeCommand::Consumed;
+                    }
+                };
+                let steps = match parse_console_u32_in_range(raw_steps, "mls.train", 1, 100000) {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.console_feedback(err);
+                        return RuntimeCommand::Consumed;
+                    }
+                };
+                match self.train_mls_slot_cli(slot, steps) {
+                    Ok(note) => self.console_feedback(note),
+                    Err(err) => self.console_feedback(err),
+                }
+            }
+            "mls.checkpoint" => {
+                let Some(raw_slot) = parts.next() else {
+                    self.console_feedback("usage: mls.checkpoint <slot> <save|load> <name>");
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(raw_action) = parts.next() else {
+                    self.console_feedback("usage: mls.checkpoint <slot> <save|load> <name>");
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(name) = parts.next() else {
+                    self.console_feedback("usage: mls.checkpoint <slot> <save|load> <name>");
+                    return RuntimeCommand::Consumed;
+                };
+                let slot = match parse_console_u32_in_range(raw_slot, "mls.checkpoint", 0, u32::MAX)
+                {
+                    Ok(value) => value,
+                    Err(err) => {
+                        self.console_feedback(err);
+                        return RuntimeCommand::Consumed;
+                    }
+                };
+                let save = match raw_action.to_ascii_lowercase().as_str() {
+                    "save" => true,
+                    "load" => false,
+                    _ => {
+                        self.console_feedback("usage: mls.checkpoint <slot> <save|load> <name>");
+                        return RuntimeCommand::Consumed;
+                    }
+                };
+                match self.checkpoint_mls_slot_cli(slot, save, name) {
                     Ok(note) => self.console_feedback(note),
                     Err(err) => self.console_feedback(err),
                 }

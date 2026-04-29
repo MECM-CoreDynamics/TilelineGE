@@ -136,6 +136,28 @@ Runtime status output includes live scaler telemetry:
 - `gms_ai_ml_drop`
 - `gms_reason`
 
+### MLS (`mls.*`)
+
+- `mls.status`
+- `mls.mode <off|auto|on>`
+- `mls.backend <auto|amd|nvidia|apple|rockchip|cpu>`
+- `mls.precision <auto|fp32|fp16|bf16|int8>`
+- `mls.workload <upscale|agent|physics_assist|training> <on|off>`
+- `mls.budget <upscale|agent|physics_assist|training> <pct>`
+- `mls.model.bind <slot> <path-or-pack-ref>`
+- `mls.train <slot> <steps>`
+- `mls.checkpoint <slot> <save|load> <name>`
+
+Runtime status output also includes live MLS telemetry:
+
+- `mls_backend`
+- `mls_precision`
+- `mls_active`
+- `mls_q`
+- `mls_drop`
+- `mls_step_ms`
+- `mls_reason`
+
 ### Versioning
 
 - `version` or `version all`: engine + all module versions
@@ -173,12 +195,31 @@ Useful script-side runtime queries and controls:
   - `ai_ml_drop_rate`
   - `target_fps`
   - `render_budget_pct|physics_budget_pct|ai_ml_budget_pct|postfx_budget_pct|ui_budget_pct`
+- `mls_set_mode(mode)` (`off|auto|on`)
+- `mls_set_backend(name)` (`auto|amd|nvidia|apple|rockchip|cpu`)
+- `mls_set_precision(mode)` (`auto|fp32|fp16|bf16|int8`)
+- `mls_set_budget(workload,pct)` (`upscale|agent|physics_assist|training`, `0..100`)
+- `mls_enable_workload(workload,bool)`
+- `mls_bind_model(slot,path_or_ref)`
+- `mls_run(slot)`
+- `mls_train_step(slot,steps)`
+- `mls_get_metric(name)`:
+  - `backend`
+  - `device`
+  - `precision`
+  - `fallback_reason`
+  - `infer_queue_depth|queue_depth`
+  - `train_queue_depth`
+  - `drop_rate`
+  - `step_time_ms`
+  - `upscale_budget_pct|agent_budget_pct|physics_assist_budget_pct|training_budget_pct`
+  - `active_workloads`
 
 Override precedence is fixed:
 
-1. CLI override (`gms.*`)
-2. `.tlscript` runtime override (`gms_set_*`)
-3. `.tlpfile` defaults (`[gms_scaler]`)
+1. CLI override (`gms.*`, `mls.*`)
+2. `.tlscript` runtime override (`gms_set_*`, `mls_*`)
+3. `.tlpfile` defaults (`[gms_scaler]`, `[mls]`)
 
 ## Examples
 
@@ -271,6 +312,28 @@ script.call gms_set_guardrail("aggressive")
 script.exec if gms_get_metric("sm_cu_utilization") > 0.85: gms_set_budget("postfx", 4)
 ```
 
+```text
+mls.status
+mls.mode auto
+mls.backend cpu
+mls.precision fp32
+mls.workload physics_assist on
+mls.budget upscale 55
+mls.model.bind 3 models/demo.pak#agent
+mls.train 3 8
+mls.checkpoint 3 save warmup-a
+```
+
+```text
+script.call mls_set_mode("on")
+script.call mls_set_backend("nvidia")
+script.call mls_set_precision("fp16")
+script.call mls_set_budget("upscale", 55)
+script.call mls_enable_workload("training", true)
+script.call mls_bind_model(3, "models/demo.pak#agent")
+script.call mls_train_step(3, 8)
+```
+
 ## Notes
 
 - CLI script overlay strips transient camera-delta commands from persistence to avoid accidental
@@ -278,5 +341,7 @@ script.exec if gms_get_metric("sm_cu_utilization") > 0.85: gms_set_budget("postf
 - Demo scripts keep audio disabled by default; `set_audio_*` calls enable scene-side audio state.
 - `.tlpfile` project defaults can define GMS scaler baseline under `[gms_scaler]`, including
   `mode`, `target_fps`, `min_physics_budget_pct`, and per-domain budget percentages.
+- `.tlpfile` project defaults can also define MLS baseline under `[mls]`, including backend,
+  precision, workload enablement, and per-workload budgets.
 - Any statement compile/eval warnings are reported in the console output (`[tlapp console] ...`).
 - Unknown variables in `$var` expansion are fail-soft errors for that command, not hard panics.

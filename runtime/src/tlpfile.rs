@@ -31,6 +31,7 @@ use crate::tlscript_showcase::{
 use crate::tlsprite::{
     compile_tlsprite_with_extra_roots, TlspriteDiagnosticLevel, TlspriteProgram,
 };
+use tl_core::{MlsBackendKind, MlsExecutionMode, MlsPrecisionMode, MlsRuntimeConfig};
 
 /// Project-level graphics scheduler selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +131,7 @@ pub struct TlpfileProject {
     pub name: String,
     pub scheduler: TlpfileGraphicsScheduler,
     pub gms_scaler: GmsScalerConfig,
+    pub mls: MlsRuntimeConfig,
     pub default_dimension: TlpfileSceneDimension,
     pub default_scene: String,
     pub scenes: Vec<TlpfileSceneBinding>,
@@ -163,6 +165,7 @@ pub struct TlpfileSceneBundle {
     pub project_name: String,
     pub scheduler: TlpfileGraphicsScheduler,
     pub gms_scaler: GmsScalerConfig,
+    pub mls: MlsRuntimeConfig,
     pub scene_dimension: TlpfileSceneDimension,
     pub scene_name: String,
     pub selected_joint_path: Option<PathBuf>,
@@ -205,11 +208,13 @@ pub fn parse_tlpfile(source: &str) -> TlpfileParseOutcome {
     let mut project_name: Option<String> = None;
     let mut project_scheduler: Option<TlpfileGraphicsScheduler> = None;
     let mut project_gms_scaler = GmsScalerConfig::default();
+    let mut project_mls = MlsRuntimeConfig::default();
     let mut project_default_dimension: Option<TlpfileSceneDimension> = None;
     let mut project_default_scene: Option<String> = None;
     let mut current_scene: Option<TlpfileSceneBinding> = None;
     let mut in_project_section = false;
     let mut in_gms_scaler_section = false;
+    let mut in_mls_section = false;
 
     for (line_index, raw_line) in source.lines().enumerate() {
         let line_no = line_index + 1;
@@ -236,6 +241,7 @@ pub fn parse_tlpfile(source: &str) -> TlpfileParseOutcome {
             }
             in_project_section = false;
             in_gms_scaler_section = false;
+            in_mls_section = false;
             let section = line[1..line.len() - 1].trim();
             if section.eq_ignore_ascii_case("project") {
                 in_project_section = true;
@@ -243,6 +249,10 @@ pub fn parse_tlpfile(source: &str) -> TlpfileParseOutcome {
             }
             if section.eq_ignore_ascii_case("gms_scaler") {
                 in_gms_scaler_section = true;
+                continue;
+            }
+            if section.eq_ignore_ascii_case("mls") {
+                in_mls_section = true;
                 continue;
             }
             if let Some(name) = section.strip_prefix("scene.") {
@@ -266,7 +276,7 @@ pub fn parse_tlpfile(source: &str) -> TlpfileParseOutcome {
                 level: TlpfileDiagnosticLevel::Warning,
                 line: line_no,
                 message: format!(
-                    "unknown section '{section}' ignored (expected [project], [gms_scaler], or [scene.<name>])"
+                    "unknown section '{section}' ignored (expected [project], [gms_scaler], [mls], or [scene.<name>])"
                 ),
             });
             continue;
@@ -493,6 +503,146 @@ pub fn parse_tlpfile(source: &str) -> TlpfileParseOutcome {
             continue;
         }
 
+        if in_mls_section {
+            match key {
+                "mode" => match MlsExecutionMode::parse(value) {
+                    Some(mode) => project_mls.mode = mode,
+                    None => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!("invalid mls.mode '{value}' (expected off|auto|on)"),
+                    }),
+                },
+                "backend" => match MlsBackendKind::parse(value) {
+                    Some(backend) => project_mls.backend = backend,
+                    None => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!(
+                            "invalid mls.backend '{value}' (expected auto|amd|nvidia|apple|rockchip|cpu)"
+                        ),
+                    }),
+                },
+                "precision" => match MlsPrecisionMode::parse(value) {
+                    Some(precision) => project_mls.precision = precision,
+                    None => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!(
+                            "invalid mls.precision '{value}' (expected auto|fp32|fp16|bf16|int8)"
+                        ),
+                    }),
+                },
+                "model_pack" => {
+                    project_mls.model_pack = if value.trim().is_empty() {
+                        None
+                    } else {
+                        Some(value.trim().to_string())
+                    };
+                }
+                "allow_training" => match parse_bool_flag(value) {
+                    Some(enabled) => project_mls.allow_training = enabled,
+                    None => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!("invalid mls.allow_training '{value}' (expected bool)"),
+                    }),
+                },
+                "upscale_enabled" => match parse_bool_flag(value) {
+                    Some(enabled) => project_mls.upscale_enabled = enabled,
+                    None => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!("invalid mls.upscale_enabled '{value}' (expected bool)"),
+                    }),
+                },
+                "agent_enabled" => match parse_bool_flag(value) {
+                    Some(enabled) => project_mls.agent_enabled = enabled,
+                    None => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!("invalid mls.agent_enabled '{value}' (expected bool)"),
+                    }),
+                },
+                "physics_assist_enabled" => match parse_bool_flag(value) {
+                    Some(enabled) => project_mls.physics_assist_enabled = enabled,
+                    None => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!(
+                            "invalid mls.physics_assist_enabled '{value}' (expected bool)"
+                        ),
+                    }),
+                },
+                "training_enabled" => match parse_bool_flag(value) {
+                    Some(enabled) => project_mls.training_enabled = enabled,
+                    None => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!("invalid mls.training_enabled '{value}' (expected bool)"),
+                    }),
+                },
+                "upscale_budget_pct" => match value.parse::<u8>() {
+                    Ok(v) if v <= 100 => project_mls.budgets.upscale_budget_pct = v,
+                    Ok(_) => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: "mls.upscale_budget_pct must be in 0..=100".to_string(),
+                    }),
+                    Err(_) => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!("invalid mls.upscale_budget_pct '{value}'"),
+                    }),
+                },
+                "agent_budget_pct" => match value.parse::<u8>() {
+                    Ok(v) if v <= 100 => project_mls.budgets.agent_budget_pct = v,
+                    Ok(_) => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: "mls.agent_budget_pct must be in 0..=100".to_string(),
+                    }),
+                    Err(_) => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!("invalid mls.agent_budget_pct '{value}'"),
+                    }),
+                },
+                "physics_assist_budget_pct" => match value.parse::<u8>() {
+                    Ok(v) if v <= 100 => project_mls.budgets.physics_assist_budget_pct = v,
+                    Ok(_) => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: "mls.physics_assist_budget_pct must be in 0..=100".to_string(),
+                    }),
+                    Err(_) => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!("invalid mls.physics_assist_budget_pct '{value}'"),
+                    }),
+                },
+                "training_budget_pct" => match value.parse::<u8>() {
+                    Ok(v) if v <= 100 => project_mls.budgets.training_budget_pct = v,
+                    Ok(_) => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: "mls.training_budget_pct must be in 0..=100".to_string(),
+                    }),
+                    Err(_) => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!("invalid mls.training_budget_pct '{value}'"),
+                    }),
+                },
+                other => diagnostics.push(TlpfileDiagnostic {
+                    level: TlpfileDiagnosticLevel::Warning,
+                    line: line_no,
+                    message: format!("unknown mls key '{other}' ignored"),
+                }),
+            }
+            continue;
+        }
+
         let Some(scene) = current_scene.as_mut() else {
             diagnostics.push(TlpfileDiagnostic {
                 level: TlpfileDiagnosticLevel::Error,
@@ -638,6 +788,7 @@ pub fn parse_tlpfile(source: &str) -> TlpfileParseOutcome {
             name: project_name.unwrap_or_else(|| "Tileline Project".to_string()),
             scheduler: project_scheduler.unwrap_or_default(),
             gms_scaler: project_gms_scaler,
+            mls: project_mls,
             default_dimension: project_default_dimension.unwrap_or_default(),
             default_scene,
             scenes,
@@ -870,6 +1021,7 @@ pub fn compile_tlpfile_scene_from_path(
             project_name: project.name,
             scheduler: project.scheduler,
             gms_scaler: project.gms_scaler,
+            mls: project.mls,
             scene_dimension,
             scene_name: resolved_scene_name.to_string(),
             selected_joint_path,
@@ -885,6 +1037,14 @@ pub fn compile_tlpfile_scene_from_path(
 
 fn strip_comment(line: &str) -> &str {
     line.split_once('#').map_or(line, |(head, _)| head)
+}
+
+fn parse_bool_flag(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "on" | "yes" | "1" => Some(true),
+        "false" | "off" | "no" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn push_single(
@@ -986,6 +1146,15 @@ mod tests {
             "physics_budget_pct = 40\n",
             "ai_ml_budget_pct = 20\n",
             "postfx_budget_pct = 10\n",
+            "[mls]\n",
+            "mode = on\n",
+            "backend = nvidia\n",
+            "precision = fp16\n",
+            "model_pack = models/demo.pak\n",
+            "allow_training = true\n",
+            "training_enabled = true\n",
+            "upscale_budget_pct = 50\n",
+            "[project]\n",
             "default_dimension = 3d\n",
             "default_scene = main\n",
             "[scene.main]\n",
@@ -1007,6 +1176,13 @@ mod tests {
         assert_eq!(project.gms_scaler.budgets.physics_budget_pct, 40);
         assert_eq!(project.gms_scaler.budgets.ai_ml_budget_pct, 20);
         assert_eq!(project.gms_scaler.budgets.postfx_budget_pct, 10);
+        assert_eq!(project.mls.mode, MlsExecutionMode::On);
+        assert_eq!(project.mls.backend, MlsBackendKind::Nvidia);
+        assert_eq!(project.mls.precision, MlsPrecisionMode::Fp16);
+        assert_eq!(project.mls.model_pack.as_deref(), Some("models/demo.pak"));
+        assert!(project.mls.allow_training);
+        assert!(project.mls.training_enabled);
+        assert_eq!(project.mls.budgets.upscale_budget_pct, 50);
         assert_eq!(project.default_dimension, TlpfileSceneDimension::ThreeD);
         assert_eq!(project.default_scene, "main");
         assert_eq!(project.scenes.len(), 1);

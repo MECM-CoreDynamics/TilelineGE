@@ -223,6 +223,7 @@ pub fn empty_showcase_output() -> TlscriptShowcaseFrameOutput {
         distance_blur_mode: None,
         msaa_samples: None,
         gms_scaler: Default::default(),
+        mls: Default::default(),
         force_full_fbx_sphere: None,
         camera_move_speed: None,
         camera_look_sensitivity: None,

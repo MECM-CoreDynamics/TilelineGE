@@ -13,10 +13,11 @@ use std::collections::HashMap;
 use tl_core::{
     annotate_typed_ir_with_parallel_hooks, lower_to_typed_ir_with_config, BinaryOp, Block,
     DecoratorKind, Expr, ExprKind, ExternalCallReturnHint, FunctionDef, Item, Lexer,
-    LoweringExternalSignature, Module, ParallelDispatchDecision, ParallelDispatchPlanner,
-    ParallelDispatchPlannerConfig, ParallelExecutionPolicy, ParallelHookAnalyzer,
-    ParallelHookOutcome, ParallelScheduleHint, Parser, SemanticAnalyzer, SemanticOutcome,
-    SemanticType, Stmt, TypedIrLoweringConfig, TypedIrModule, UnaryOp,
+    LoweringExternalSignature, MlsBackendKind, MlsExecutionMode, MlsPrecisionMode, Module,
+    ParallelDispatchDecision, ParallelDispatchPlanner, ParallelDispatchPlannerConfig,
+    ParallelExecutionPolicy, ParallelHookAnalyzer, ParallelHookOutcome, ParallelScheduleHint,
+    Parser, SemanticAnalyzer, SemanticOutcome, SemanticType, Stmt, TypedIrLoweringConfig,
+    TypedIrModule, UnaryOp,
 };
 
 use crate::runtime_bridge::{
@@ -107,6 +108,15 @@ const SHOWCASE_BUILTIN_CALLS: &[&str] = &[
     "gms_set_budget",
     "gms_get_metric",
     "gms_set_guardrail",
+    "mls_set_mode",
+    "mls_set_backend",
+    "mls_set_precision",
+    "mls_set_budget",
+    "mls_enable_workload",
+    "mls_bind_model",
+    "mls_run",
+    "mls_train_step",
+    "mls_get_metric",
     "set_camera_move_speed",
     "set_camera_look_sensitivity",
     "set_camera_pose",
@@ -149,6 +159,15 @@ const GMS_SET_TARGET_FPS_BUILTIN_NAME: &str = "gms_set_target_fps";
 const GMS_SET_BUDGET_BUILTIN_NAME: &str = "gms_set_budget";
 const GMS_GET_METRIC_BUILTIN_NAME: &str = "gms_get_metric";
 const GMS_SET_GUARDRAIL_BUILTIN_NAME: &str = "gms_set_guardrail";
+const MLS_SET_MODE_BUILTIN_NAME: &str = "mls_set_mode";
+const MLS_SET_BACKEND_BUILTIN_NAME: &str = "mls_set_backend";
+const MLS_SET_PRECISION_BUILTIN_NAME: &str = "mls_set_precision";
+const MLS_SET_BUDGET_BUILTIN_NAME: &str = "mls_set_budget";
+const MLS_ENABLE_WORKLOAD_BUILTIN_NAME: &str = "mls_enable_workload";
+const MLS_BIND_MODEL_BUILTIN_NAME: &str = "mls_bind_model";
+const MLS_RUN_BUILTIN_NAME: &str = "mls_run";
+const MLS_TRAIN_STEP_BUILTIN_NAME: &str = "mls_train_step";
+const MLS_GET_METRIC_BUILTIN_NAME: &str = "mls_get_metric";
 
 /// Runtime tile query surface used by `.tlscript` built-ins (for example `tile_get`).
 ///
@@ -387,6 +406,36 @@ impl Default for TlscriptGmsMetricSnapshot {
     }
 }
 
+/// Runtime-provided MLS metrics exposed to `.tlscript` (`mls_get_metric`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TlscriptMlsMetricSnapshot {
+    pub backend: MlsBackendKind,
+    pub device: String,
+    pub active_workloads: Vec<String>,
+    pub infer_queue_depth: usize,
+    pub train_queue_depth: usize,
+    pub drop_rate: f32,
+    pub fallback_reason: Option<String>,
+    pub precision: MlsPrecisionMode,
+    pub step_time_ms: f32,
+}
+
+impl Default for TlscriptMlsMetricSnapshot {
+    fn default() -> Self {
+        Self {
+            backend: MlsBackendKind::Cpu,
+            device: "cpu".to_string(),
+            active_workloads: Vec::new(),
+            infer_queue_depth: 0,
+            train_queue_depth: 0,
+            drop_rate: 0.0,
+            fallback_reason: None,
+            precision: MlsPrecisionMode::Fp32,
+            step_time_ms: 0.0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TlscriptToggleMode {
     Auto,
@@ -435,6 +484,54 @@ impl TlscriptGmsScalerOverride {
             GmsScalerDomain::PostFx => self.postfx_budget_pct = Some(value.min(100)),
             GmsScalerDomain::Ui => self.ui_budget_pct = Some(value.min(100)),
         }
+    }
+}
+
+/// Script-emitted MLS overrides (`mls_*` built-ins).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TlscriptMlsOverride {
+    pub mode: Option<MlsExecutionMode>,
+    pub backend: Option<MlsBackendKind>,
+    pub precision: Option<MlsPrecisionMode>,
+    pub upscale_budget_pct: Option<u8>,
+    pub agent_budget_pct: Option<u8>,
+    pub physics_assist_budget_pct: Option<u8>,
+    pub training_budget_pct: Option<u8>,
+    pub upscale_enabled: Option<bool>,
+    pub agent_enabled: Option<bool>,
+    pub physics_assist_enabled: Option<bool>,
+    pub training_enabled: Option<bool>,
+    pub model_bindings: Vec<(u32, String)>,
+    pub run_slots: Vec<u32>,
+    pub train_steps: Vec<(u32, u32)>,
+}
+
+impl TlscriptMlsOverride {
+    fn set_budget(&mut self, workload: &str, pct: u8) -> bool {
+        let pct = pct.min(100);
+        match workload.trim().to_ascii_lowercase().as_str() {
+            "upscale" => self.upscale_budget_pct = Some(pct),
+            "agent" => self.agent_budget_pct = Some(pct),
+            "physics_assist" | "physics-assist" | "physicsassist" => {
+                self.physics_assist_budget_pct = Some(pct)
+            }
+            "training" => self.training_budget_pct = Some(pct),
+            _ => return false,
+        }
+        true
+    }
+
+    fn set_enabled(&mut self, workload: &str, enabled: bool) -> bool {
+        match workload.trim().to_ascii_lowercase().as_str() {
+            "upscale" => self.upscale_enabled = Some(enabled),
+            "agent" => self.agent_enabled = Some(enabled),
+            "physics_assist" | "physics-assist" | "physicsassist" => {
+                self.physics_assist_enabled = Some(enabled)
+            }
+            "training" => self.training_enabled = Some(enabled),
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -545,6 +642,7 @@ pub struct TlscriptShowcaseFrameOutput {
     pub distance_blur_mode: Option<TlscriptToggleMode>,
     pub msaa_samples: Option<u32>,
     pub gms_scaler: TlscriptGmsScalerOverride,
+    pub mls: TlscriptMlsOverride,
     pub force_full_fbx_sphere: Option<bool>,
     pub camera_move_speed: Option<f32>,
     pub camera_look_sensitivity: Option<f32>,
@@ -628,6 +726,7 @@ impl<'src> TlscriptShowcaseProgram<'src> {
             tile_lookup,
             TlscriptShowcaseContactSnapshot::default(),
             TlscriptGmsMetricSnapshot::default(),
+            TlscriptMlsMetricSnapshot::default(),
         )
     }
 
@@ -639,11 +738,13 @@ impl<'src> TlscriptShowcaseProgram<'src> {
         tile_lookup: Option<&dyn TlscriptTileLookup>,
         contact_snapshot: TlscriptShowcaseContactSnapshot,
         gms_metrics: TlscriptGmsMetricSnapshot,
+        mls_metrics: TlscriptMlsMetricSnapshot,
     ) -> TlscriptShowcaseFrameOutput {
         let mut state = EvalState::new(self.max_eval_steps, self.max_loop_iterations, tile_lookup);
         state.contact_pairs = contact_snapshot.contact_pairs;
         state.contact_manifolds = contact_snapshot.contact_manifolds;
         state.gms_metrics = gms_metrics;
+        state.mls_metrics = mls_metrics.clone();
         state.vars.insert(
             "frame".to_string(),
             DemoValue::Int(input.frame_index as i64),
@@ -861,6 +962,38 @@ impl<'src> TlscriptShowcaseProgram<'src> {
                 DemoValue::Int(target_fps as i64),
             );
         }
+        state.vars.insert(
+            "mls_backend".to_string(),
+            DemoValue::Str(mls_metrics.backend.as_str().to_string()),
+        );
+        state.vars.insert(
+            "mls_device".to_string(),
+            DemoValue::Str(mls_metrics.device.clone()),
+        );
+        state.vars.insert(
+            "mls_precision".to_string(),
+            DemoValue::Str(mls_metrics.precision.as_str().to_string()),
+        );
+        state.vars.insert(
+            "mls_infer_queue_depth".to_string(),
+            DemoValue::Int(mls_metrics.infer_queue_depth as i64),
+        );
+        state.vars.insert(
+            "mls_train_queue_depth".to_string(),
+            DemoValue::Int(mls_metrics.train_queue_depth as i64),
+        );
+        state.vars.insert(
+            "mls_drop_rate".to_string(),
+            DemoValue::Float(mls_metrics.drop_rate as f64),
+        );
+        state.vars.insert(
+            "mls_step_time_ms".to_string(),
+            DemoValue::Float(mls_metrics.step_time_ms as f64),
+        );
+        state.vars.insert(
+            "mls_active_workloads".to_string(),
+            DemoValue::Str(mls_metrics.active_workloads.join(",")),
+        );
 
         let Item::Function(entry_fn) = &self.module.items[self.entry_item_index];
         self.exec_block(&entry_fn.body, &mut state);
@@ -889,6 +1022,7 @@ impl<'src> TlscriptShowcaseProgram<'src> {
             distance_blur_mode: state.distance_blur_mode,
             msaa_samples: state.msaa_samples,
             gms_scaler: state.gms_scaler,
+            mls: state.mls,
             force_full_fbx_sphere: state.force_full_fbx_sphere,
             camera_move_speed: state.camera_move_speed,
             camera_look_sensitivity: state.camera_look_sensitivity,
@@ -1130,6 +1264,8 @@ struct EvalState<'lookup> {
     msaa_samples: Option<u32>,
     gms_scaler: TlscriptGmsScalerOverride,
     gms_metrics: TlscriptGmsMetricSnapshot,
+    mls: TlscriptMlsOverride,
+    mls_metrics: TlscriptMlsMetricSnapshot,
     force_full_fbx_sphere: Option<bool>,
     camera_move_speed: Option<f32>,
     camera_look_sensitivity: Option<f32>,
@@ -1179,6 +1315,8 @@ impl<'lookup> EvalState<'lookup> {
             msaa_samples: None,
             gms_scaler: TlscriptGmsScalerOverride::default(),
             gms_metrics: TlscriptGmsMetricSnapshot::default(),
+            mls: TlscriptMlsOverride::default(),
+            mls_metrics: TlscriptMlsMetricSnapshot::default(),
             force_full_fbx_sphere: None,
             camera_move_speed: None,
             camera_look_sensitivity: None,
@@ -1499,6 +1637,27 @@ fn parse_gms_domain_from_value(value: &DemoValue) -> Option<GmsScalerDomain> {
     }
 }
 
+fn parse_mls_mode_from_value(value: &DemoValue) -> Option<MlsExecutionMode> {
+    match value {
+        DemoValue::Str(raw) => MlsExecutionMode::parse(raw),
+        _ => None,
+    }
+}
+
+fn parse_mls_backend_from_value(value: &DemoValue) -> Option<MlsBackendKind> {
+    match value {
+        DemoValue::Str(raw) => MlsBackendKind::parse(raw),
+        _ => None,
+    }
+}
+
+fn parse_mls_precision_from_value(value: &DemoValue) -> Option<MlsPrecisionMode> {
+    match value {
+        DemoValue::Str(raw) => MlsPrecisionMode::parse(raw),
+        _ => None,
+    }
+}
+
 fn apply_builtin_patch_call(
     name: &str,
     args: &[DemoValue],
@@ -1601,6 +1760,128 @@ fn apply_builtin_patch_call(
                 None => state.warn("gms_set_guardrail expects 'balanced'|'aggressive'|'relaxed'"),
             },
             _ => state.warn("gms_set_guardrail expects 1 arg"),
+        },
+        MLS_SET_MODE_BUILTIN_NAME => match args {
+            [value] => match parse_mls_mode_from_value(value) {
+                Some(mode) => state.mls.mode = Some(mode),
+                None => state.warn("mls_set_mode expects 'off'|'auto'|'on'"),
+            },
+            _ => state.warn("mls_set_mode expects 1 arg"),
+        },
+        MLS_SET_BACKEND_BUILTIN_NAME => match args {
+            [value] => match parse_mls_backend_from_value(value) {
+                Some(backend) => state.mls.backend = Some(backend),
+                None => {
+                    state.warn("mls_set_backend expects auto|amd|nvidia|apple|rockchip|cpu")
+                }
+            },
+            _ => state.warn("mls_set_backend expects 1 arg"),
+        },
+        MLS_SET_PRECISION_BUILTIN_NAME => match args {
+            [value] => match parse_mls_precision_from_value(value) {
+                Some(precision) => state.mls.precision = Some(precision),
+                None => state.warn("mls_set_precision expects auto|fp32|fp16|bf16|int8"),
+            },
+            _ => state.warn("mls_set_precision expects 1 arg"),
+        },
+        MLS_SET_BUDGET_BUILTIN_NAME => match args {
+            [DemoValue::Str(workload), pct_value] => {
+                let pct = pct_value.to_i64();
+                if !(0..=100).contains(&pct) {
+                    state.warn("mls_set_budget expects pct in 0..=100");
+                    return DemoValue::Int(0);
+                }
+                if !state.mls.set_budget(workload, pct as u8) {
+                    state.warn(
+                        "mls_set_budget expects workload in {upscale|agent|physics_assist|training}",
+                    );
+                }
+            }
+            [_, _] => {
+                state.warn(
+                    "mls_set_budget expects workload in {upscale|agent|physics_assist|training}",
+                );
+            }
+            _ => state.warn("mls_set_budget expects 2 args (workload, pct)"),
+        },
+        MLS_ENABLE_WORKLOAD_BUILTIN_NAME => match args {
+            [DemoValue::Str(workload), value] => {
+                if !state.mls.set_enabled(workload, value.to_bool()) {
+                    state.warn(
+                        "mls_enable_workload expects workload in {upscale|agent|physics_assist|training}",
+                    );
+                }
+            }
+            [_, _] => {
+                state.warn(
+                    "mls_enable_workload expects workload in {upscale|agent|physics_assist|training}",
+                );
+            }
+            _ => state.warn("mls_enable_workload expects 2 args (workload, bool)"),
+        },
+        MLS_BIND_MODEL_BUILTIN_NAME => match args {
+            [slot_value, DemoValue::Str(path)] => {
+                let slot = slot_value.to_i64().max(0) as u32;
+                state.mls.model_bindings.push((slot, path.clone()));
+            }
+            [_, _] => state.warn("mls_bind_model expects (slot, path_or_ref)"),
+            _ => state.warn("mls_bind_model expects 2 args"),
+        },
+        MLS_RUN_BUILTIN_NAME => match args {
+            [slot_value] => {
+                let slot = slot_value.to_i64().max(0) as u32;
+                state.mls.run_slots.push(slot);
+            }
+            _ => state.warn("mls_run expects 1 arg (slot)"),
+        },
+        MLS_TRAIN_STEP_BUILTIN_NAME => match args {
+            [slot_value, steps_value] => {
+                let slot = slot_value.to_i64().max(0) as u32;
+                let steps = steps_value.to_i64().max(1) as u32;
+                state.mls.train_steps.push((slot, steps));
+            }
+            _ => state.warn("mls_train_step expects 2 args (slot, steps)"),
+        },
+        MLS_GET_METRIC_BUILTIN_NAME => match args {
+            [DemoValue::Str(metric)] => {
+                let key = metric.trim().to_ascii_lowercase();
+                let value = match key.as_str() {
+                    "backend" => return DemoValue::Str(state.mls_metrics.backend.as_str().to_string()),
+                    "device" => return DemoValue::Str(state.mls_metrics.device.clone()),
+                    "precision" => {
+                        return DemoValue::Str(state.mls_metrics.precision.as_str().to_string())
+                    }
+                    "fallback_reason" => {
+                        return DemoValue::Str(
+                            state
+                                .mls_metrics
+                                .fallback_reason
+                                .clone()
+                                .unwrap_or_else(|| "none".to_string()),
+                        )
+                    }
+                    "infer_queue_depth" | "queue_depth" => state.mls_metrics.infer_queue_depth as f64,
+                    "train_queue_depth" => state.mls_metrics.train_queue_depth as f64,
+                    "drop_rate" => state.mls_metrics.drop_rate as f64,
+                    "step_time_ms" => state.mls_metrics.step_time_ms as f64,
+                    "upscale_budget_pct" => state.mls.upscale_budget_pct.unwrap_or(0) as f64,
+                    "agent_budget_pct" => state.mls.agent_budget_pct.unwrap_or(0) as f64,
+                    "physics_assist_budget_pct" => {
+                        state.mls.physics_assist_budget_pct.unwrap_or(0) as f64
+                    }
+                    "training_budget_pct" => state.mls.training_budget_pct.unwrap_or(0) as f64,
+                    "active_workloads" => state.mls_metrics.active_workloads.len() as f64,
+                    _ => {
+                        state.warn(format!(
+                            "mls_get_metric unknown key '{metric}' (expected backend/device/precision/fallback_reason/queue/depth/drop_rate/step_time_ms/*_budget_pct/active_workloads)"
+                        ));
+                        0.0
+                    }
+                };
+                return DemoValue::Float(value);
+            }
+            [_] => state.warn("mls_get_metric expects a string metric key"),
+            _ => state.warn("mls_get_metric expects 1 arg"),
         },
         "set_gfx_profile" => match args {
             [value] => apply_gfx_profile_from_value(state, value),
@@ -3135,6 +3416,7 @@ mod tests {
                 contact_manifolds: 7,
             },
             TlscriptGmsMetricSnapshot::default(),
+            TlscriptMlsMetricSnapshot::default(),
         );
         assert_eq!(out.patch.spawn_per_tick, Some(35));
     }
@@ -3244,6 +3526,7 @@ mod tests {
                 lane_queue_depth: 2,
                 ai_ml_drop_rate: 0.18,
             },
+            TlscriptMlsMetricSnapshot::default(),
         );
         assert_eq!(out.patch.spawn_per_tick, Some(99));
         assert_eq!(out.gms_scaler.mode, Some(GmsScalerMode::Fixed));
@@ -3254,6 +3537,61 @@ mod tests {
             out.gms_scaler.guardrail,
             Some(GmsGuardrailProfile::Aggressive)
         );
+    }
+
+    #[test]
+    fn supports_mls_builtins_and_metric_queries() {
+        let src = concat!(
+            "@export\n",
+            "def showcase_tick(frame: int, live_balls: int, spawned_this_tick: int):\n",
+            "    mls_set_mode(\"on\")\n",
+            "    mls_set_backend(\"nvidia\")\n",
+            "    mls_set_precision(\"fp16\")\n",
+            "    mls_set_budget(\"upscale\", 55)\n",
+            "    mls_enable_workload(\"training\", true)\n",
+            "    mls_bind_model(3, \"models/demo.pak#agent\")\n",
+            "    mls_run(3)\n",
+            "    mls_train_step(3, 8)\n",
+            "    set_spawn_per_tick(17)\n",
+        );
+        let outcome = compile_tlscript_showcase(src, Default::default());
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        let program = outcome.program.as_ref().expect("program");
+        let out = program.evaluate_frame_with_controls_and_tile_lookup_and_contacts(
+            TlscriptShowcaseFrameInput {
+                frame_index: 0,
+                live_balls: 0,
+                spawned_this_tick: 0,
+                key_f_down: false,
+            },
+            TlscriptShowcaseControlInput::default(),
+            None,
+            TlscriptShowcaseContactSnapshot::default(),
+            TlscriptGmsMetricSnapshot::default(),
+            TlscriptMlsMetricSnapshot {
+                backend: MlsBackendKind::Cpu,
+                device: "cpu".to_string(),
+                active_workloads: vec!["upscale".to_string(), "agent".to_string()],
+                infer_queue_depth: 1,
+                train_queue_depth: 0,
+                drop_rate: 0.15,
+                fallback_reason: None,
+                precision: MlsPrecisionMode::Fp32,
+                step_time_ms: 0.42,
+            },
+        );
+        assert_eq!(out.patch.spawn_per_tick, Some(17));
+        assert_eq!(out.mls.mode, Some(MlsExecutionMode::On));
+        assert_eq!(out.mls.backend, Some(MlsBackendKind::Nvidia));
+        assert_eq!(out.mls.precision, Some(MlsPrecisionMode::Fp16));
+        assert_eq!(out.mls.upscale_budget_pct, Some(55));
+        assert_eq!(out.mls.training_enabled, Some(true));
+        assert_eq!(
+            out.mls.model_bindings,
+            vec![(3, "models/demo.pak#agent".to_string())]
+        );
+        assert_eq!(out.mls.run_slots, vec![3]);
+        assert_eq!(out.mls.train_steps, vec![(3, 8)]);
     }
 
     #[test]

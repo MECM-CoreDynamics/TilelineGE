@@ -19,6 +19,7 @@ pub const MODULE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod core;
 pub mod graphics;
+pub mod mls;
 pub mod physics;
 pub mod tlscript;
 
@@ -63,6 +64,12 @@ pub use graphics::vulkan_backend::{
 pub use graphics::vulkan_physics_compute::{
     VulkanPhysicsComputeBackend, VulkanPhysicsComputeCapabilities, VulkanPhysicsComputeConfig,
     VulkanPhysicsDispatchPlan,
+};
+pub use mls::{
+    MlsBackendAdapter, MlsBackendKind, MlsCapabilityMatrix, MlsDeviceProfile, MlsExecutionMode,
+    MlsFallbackReason, MlsInferenceRequest, MlsModelArtifact, MlsPrecisionMode, MlsRuntime,
+    MlsRuntimeConfig, MlsTelemetry, MlsTrainingConfig, MlsTrainingRequest,
+    MlsWorkloadBudgetProfile, MlsWorkloadKind,
 };
 pub use physics::{
     write_world_render_transforms_to_dispatcher_storage,

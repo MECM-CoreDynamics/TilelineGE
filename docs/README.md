@@ -25,6 +25,8 @@ feature lists.
 - `../LICENSE-STRATEGY.md`: open-core / commercial-layer policy direction
 - `tileline-v0.5.0-roadmap.md`: current major roadmap (`Heimdall Update`)
 - `tileline-v0.5.5-roadmap.md`: MPS SIMD + standalone extraction direction
+- `tileline-v0.6.0-roadmap.md`: MLS runtime/training stack direction
+- `tileline-v0.6.5-roadmap.md`: GGUF + NVFP4 expansion on top of MLS
 - `runtime-tlapp-console.md`: live runtime control surface inside TLApp
 - `paradoxpe-foundation.md`: physics architecture and data flow
 - `runtime-bridge-flow.md`: bridge/runtime ownership model
@@ -41,6 +43,8 @@ feature lists.
 - `tileline-beta-roadmap.md`: phased beta roadmap, integration milestones, and deferred scope
 - `tileline-v0.4.5-roadmap.md`: v0.4.5 roadmap for first-class 2D side-view foundation (chunked tile world + dig/place + flat-2D ParadoxPE)
 - `tileline-v0.5.0-roadmap.md`: v0.5.0 roadmap for render optimization, effects/textures, ParadoxPE + MPS revision, and Rayon/Bevy/WGPU independence
+- `tileline-v0.6.0-roadmap.md`: v0.6.0 roadmap for MLS as a first-class runtime/training subsystem
+- `tileline-v0.6.5-roadmap.md`: v0.6.5 roadmap for GGUF model support and NVFP4-class low-precision MLS execution
 - `tileline-v0.3.0-foundation.md`: v0.3.0 foundation scope for runtime FSR policy and decentralized NPS topology
 - `engine-architecture-api-core.md`: architecture/API-core map for crate boundaries, runtime lifecycle, and integration surfaces
 - `tlscript-v0.4.5-guide.md`: strict `v0.4.5` TLScript guide used as canonical source for PDF release docs

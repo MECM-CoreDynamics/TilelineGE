@@ -19,10 +19,10 @@ use std::path::{Path, PathBuf};
 
 use crate::scene::BounceTankRuntimePatch;
 use crate::tlscript_showcase::{
-    compile_tlscript_showcase, TlscriptGmsMetricSnapshot, TlscriptOverlayTileLookup,
-    TlscriptShowcaseConfig, TlscriptShowcaseContactSnapshot, TlscriptShowcaseControlInput,
-    TlscriptShowcaseFrameInput, TlscriptShowcaseFrameOutput, TlscriptShowcaseProgram,
-    TlscriptTileLookup,
+    compile_tlscript_showcase, TlscriptGmsMetricSnapshot, TlscriptMlsMetricSnapshot,
+    TlscriptOverlayTileLookup, TlscriptShowcaseConfig, TlscriptShowcaseContactSnapshot,
+    TlscriptShowcaseControlInput, TlscriptShowcaseFrameInput, TlscriptShowcaseFrameOutput,
+    TlscriptShowcaseProgram, TlscriptTileLookup,
 };
 use crate::tlsprite::{
     compile_tlsprite_with_extra_roots, TlspriteDiagnosticLevel, TlspriteProgram,
@@ -103,6 +103,7 @@ impl TljointSceneBundle {
             None,
             TlscriptShowcaseContactSnapshot::default(),
             TlscriptGmsMetricSnapshot::default(),
+            TlscriptMlsMetricSnapshot::default(),
         )
     }
 
@@ -119,6 +120,7 @@ impl TljointSceneBundle {
             tile_lookup,
             TlscriptShowcaseContactSnapshot::default(),
             TlscriptGmsMetricSnapshot::default(),
+            TlscriptMlsMetricSnapshot::default(),
         )
     }
 
@@ -130,6 +132,7 @@ impl TljointSceneBundle {
         tile_lookup: Option<&dyn TlscriptTileLookup>,
         contact_snapshot: TlscriptShowcaseContactSnapshot,
         gms_metrics: TlscriptGmsMetricSnapshot,
+        mls_metrics: TlscriptMlsMetricSnapshot,
     ) -> TlscriptShowcaseFrameOutput {
         let mut merged = empty_frame_output();
         for (index, script) in self.scripts.iter().enumerate() {
@@ -144,6 +147,7 @@ impl TljointSceneBundle {
                 Some(&overlay_lookup),
                 contact_snapshot,
                 gms_metrics,
+                mls_metrics.clone(),
             );
             merge_frame_output(&mut merged, out, index);
         }
@@ -556,6 +560,7 @@ fn empty_frame_output() -> TlscriptShowcaseFrameOutput {
         distance_blur_mode: None,
         msaa_samples: None,
         gms_scaler: Default::default(),
+        mls: Default::default(),
         force_full_fbx_sphere: None,
         camera_move_speed: None,
         camera_look_sensitivity: None,
@@ -643,6 +648,51 @@ fn merge_frame_output(
     }
     if next.gms_scaler.ui_budget_pct.is_some() {
         merged.gms_scaler.ui_budget_pct = next.gms_scaler.ui_budget_pct;
+    }
+    if next.mls.mode.is_some() {
+        merged.mls.mode = next.mls.mode;
+    }
+    if next.mls.backend.is_some() {
+        merged.mls.backend = next.mls.backend;
+    }
+    if next.mls.precision.is_some() {
+        merged.mls.precision = next.mls.precision;
+    }
+    if next.mls.upscale_budget_pct.is_some() {
+        merged.mls.upscale_budget_pct = next.mls.upscale_budget_pct;
+    }
+    if next.mls.agent_budget_pct.is_some() {
+        merged.mls.agent_budget_pct = next.mls.agent_budget_pct;
+    }
+    if next.mls.physics_assist_budget_pct.is_some() {
+        merged.mls.physics_assist_budget_pct = next.mls.physics_assist_budget_pct;
+    }
+    if next.mls.training_budget_pct.is_some() {
+        merged.mls.training_budget_pct = next.mls.training_budget_pct;
+    }
+    if next.mls.upscale_enabled.is_some() {
+        merged.mls.upscale_enabled = next.mls.upscale_enabled;
+    }
+    if next.mls.agent_enabled.is_some() {
+        merged.mls.agent_enabled = next.mls.agent_enabled;
+    }
+    if next.mls.physics_assist_enabled.is_some() {
+        merged.mls.physics_assist_enabled = next.mls.physics_assist_enabled;
+    }
+    if next.mls.training_enabled.is_some() {
+        merged.mls.training_enabled = next.mls.training_enabled;
+    }
+    if !next.mls.model_bindings.is_empty() {
+        merged
+            .mls
+            .model_bindings
+            .append(&mut next.mls.model_bindings);
+    }
+    if !next.mls.run_slots.is_empty() {
+        merged.mls.run_slots.append(&mut next.mls.run_slots);
+    }
+    if !next.mls.train_steps.is_empty() {
+        merged.mls.train_steps.append(&mut next.mls.train_steps);
     }
     if next.force_full_fbx_sphere.is_some() {
         merged.force_full_fbx_sphere = next.force_full_fbx_sphere;

@@ -144,6 +144,12 @@ pub use tile_world_2d::{
     TileVisibleInstance2d, TileVisibleSet2d, TileWorld2dConfig, TileWorldFrameTelemetry,
     TILE_ID_EMPTY,
 };
+pub use tl_core::{
+    MlsBackendAdapter, MlsBackendKind, MlsCapabilityMatrix, MlsDeviceProfile, MlsExecutionMode,
+    MlsFallbackReason, MlsInferenceRequest, MlsModelArtifact, MlsPrecisionMode, MlsRuntime,
+    MlsRuntimeConfig, MlsTelemetry, MlsTrainingConfig, MlsTrainingRequest,
+    MlsWorkloadBudgetProfile, MlsWorkloadKind,
+};
 pub use tlapp_app::run_from_env as run_tlapp_from_env;
 #[cfg(target_os = "android")]
 pub use tlapp_app::run_with_android_app as run_tlapp_with_android_app;
@@ -166,11 +172,11 @@ pub use tlscript_parallel::{
 };
 pub use tlscript_showcase::{
     compile_tlscript_showcase, TlscriptCoordinateSpace, TlscriptGfxProfile,
-    TlscriptGmsMetricSnapshot, TlscriptGmsScalerOverride, TlscriptOverlayTileLookup,
-    TlscriptPerformancePreset, TlscriptShowcaseCompileOutcome, TlscriptShowcaseConfig,
-    TlscriptShowcaseContactSnapshot, TlscriptShowcaseControlInput, TlscriptShowcaseFrameInput,
-    TlscriptShowcaseFrameOutput, TlscriptShowcaseProgram, TlscriptTileFill, TlscriptTileLookup,
-    TlscriptToggleMode,
+    TlscriptGmsMetricSnapshot, TlscriptGmsScalerOverride, TlscriptMlsMetricSnapshot,
+    TlscriptMlsOverride, TlscriptOverlayTileLookup, TlscriptPerformancePreset,
+    TlscriptShowcaseCompileOutcome, TlscriptShowcaseConfig, TlscriptShowcaseContactSnapshot,
+    TlscriptShowcaseControlInput, TlscriptShowcaseFrameInput, TlscriptShowcaseFrameOutput,
+    TlscriptShowcaseProgram, TlscriptTileFill, TlscriptTileLookup, TlscriptToggleMode,
 };
 pub use tlsprite::{
     compile_tlsprite, compile_tlsprite_pack, compile_tlsprite_with_extra_roots, load_tlsprite_pack,

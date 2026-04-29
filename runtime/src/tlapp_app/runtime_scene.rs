@@ -579,6 +579,239 @@ impl TlAppRuntime {
         ))
     }
 
+    pub(super) fn apply_script_mls_overrides(&mut self, overrides: crate::TlscriptMlsOverride) {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return;
+        };
+
+        if self.mls_cli_override_mode.is_none() {
+            if let Some(mode) = overrides.mode {
+                bridge.set_mls_mode(mode);
+            }
+        }
+        if self.mls_cli_override_backend.is_none() {
+            if let Some(backend) = overrides.backend {
+                bridge.set_mls_backend(backend);
+            }
+        }
+        if self.mls_cli_override_precision.is_none() {
+            if let Some(precision) = overrides.precision {
+                bridge.set_mls_precision(precision);
+            }
+        }
+        if self.mls_cli_override_upscale_budget_pct.is_none() {
+            if let Some(pct) = overrides.upscale_budget_pct {
+                bridge.set_mls_budget(MlsWorkloadKind::Upscale, pct);
+            }
+        }
+        if self.mls_cli_override_agent_budget_pct.is_none() {
+            if let Some(pct) = overrides.agent_budget_pct {
+                bridge.set_mls_budget(MlsWorkloadKind::Agent, pct);
+            }
+        }
+        if self.mls_cli_override_physics_assist_budget_pct.is_none() {
+            if let Some(pct) = overrides.physics_assist_budget_pct {
+                bridge.set_mls_budget(MlsWorkloadKind::PhysicsAssist, pct);
+            }
+        }
+        if self.mls_cli_override_training_budget_pct.is_none() {
+            if let Some(pct) = overrides.training_budget_pct {
+                bridge.set_mls_budget(MlsWorkloadKind::Training, pct);
+            }
+        }
+        if self.mls_cli_override_upscale_enabled.is_none() {
+            if let Some(enabled) = overrides.upscale_enabled {
+                bridge.set_mls_workload_enabled(MlsWorkloadKind::Upscale, enabled);
+            }
+        }
+        if self.mls_cli_override_agent_enabled.is_none() {
+            if let Some(enabled) = overrides.agent_enabled {
+                bridge.set_mls_workload_enabled(MlsWorkloadKind::Agent, enabled);
+            }
+        }
+        if self.mls_cli_override_physics_assist_enabled.is_none() {
+            if let Some(enabled) = overrides.physics_assist_enabled {
+                bridge.set_mls_workload_enabled(MlsWorkloadKind::PhysicsAssist, enabled);
+            }
+        }
+        if self.mls_cli_override_training_enabled.is_none() {
+            if let Some(enabled) = overrides.training_enabled {
+                bridge.set_mls_workload_enabled(MlsWorkloadKind::Training, enabled);
+            }
+        }
+        for (slot, source) in overrides.model_bindings {
+            let _ = bridge.bind_mls_model(slot, source);
+        }
+        for slot in overrides.run_slots {
+            let _ = bridge.run_mls_slot(slot);
+        }
+        for (slot, steps) in overrides.train_steps {
+            let _ = bridge.train_mls_slot(slot, steps);
+        }
+        self.runtime_bridge_metrics = bridge.metrics();
+    }
+
+    pub(super) fn mls_status_line(&self) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_ref() else {
+            return Err(
+                "mls.status unavailable: parallel bridge is disabled (pipeline=legacy)".to_string(),
+            );
+        };
+        Ok(bridge.mls_status_line())
+    }
+
+    pub(super) fn set_mls_mode_cli_override(
+        &mut self,
+        mode: MlsExecutionMode,
+    ) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return Err(
+                "mls.mode unavailable: parallel bridge is disabled (pipeline=legacy)".to_string(),
+            );
+        };
+        self.mls_cli_override_mode = Some(mode);
+        bridge.set_mls_mode(mode);
+        self.runtime_bridge_metrics = bridge.metrics();
+        Ok(format!(
+            "mls mode override set to '{}' (CLI precedence active)",
+            mode.as_str()
+        ))
+    }
+
+    pub(super) fn set_mls_backend_cli_override(
+        &mut self,
+        backend: MlsBackendKind,
+    ) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return Err(
+                "mls.backend unavailable: parallel bridge is disabled (pipeline=legacy)"
+                    .to_string(),
+            );
+        };
+        self.mls_cli_override_backend = Some(backend);
+        bridge.set_mls_backend(backend);
+        self.runtime_bridge_metrics = bridge.metrics();
+        Ok(format!(
+            "mls backend override set to '{}' (CLI precedence active)",
+            backend.as_str()
+        ))
+    }
+
+    pub(super) fn set_mls_precision_cli_override(
+        &mut self,
+        precision: MlsPrecisionMode,
+    ) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return Err(
+                "mls.precision unavailable: parallel bridge is disabled (pipeline=legacy)"
+                    .to_string(),
+            );
+        };
+        self.mls_cli_override_precision = Some(precision);
+        bridge.set_mls_precision(precision);
+        self.runtime_bridge_metrics = bridge.metrics();
+        Ok(format!(
+            "mls precision override set to '{}' (CLI precedence active)",
+            precision.as_str()
+        ))
+    }
+
+    pub(super) fn set_mls_budget_cli_override(
+        &mut self,
+        workload: MlsWorkloadKind,
+        pct: u8,
+    ) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return Err(
+                "mls.budget unavailable: parallel bridge is disabled (pipeline=legacy)".to_string(),
+            );
+        };
+        let clamped = pct.min(100);
+        match workload {
+            MlsWorkloadKind::Upscale => self.mls_cli_override_upscale_budget_pct = Some(clamped),
+            MlsWorkloadKind::Agent => self.mls_cli_override_agent_budget_pct = Some(clamped),
+            MlsWorkloadKind::PhysicsAssist => {
+                self.mls_cli_override_physics_assist_budget_pct = Some(clamped)
+            }
+            MlsWorkloadKind::Training => self.mls_cli_override_training_budget_pct = Some(clamped),
+        }
+        bridge.set_mls_budget(workload, clamped);
+        self.runtime_bridge_metrics = bridge.metrics();
+        Ok(format!(
+            "mls budget override: {}={} (CLI precedence active)",
+            workload.as_str(),
+            clamped
+        ))
+    }
+
+    pub(super) fn set_mls_workload_cli_override(
+        &mut self,
+        workload: MlsWorkloadKind,
+        enabled: bool,
+    ) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return Err(
+                "mls.workload unavailable: parallel bridge is disabled (pipeline=legacy)"
+                    .to_string(),
+            );
+        };
+        match workload {
+            MlsWorkloadKind::Upscale => self.mls_cli_override_upscale_enabled = Some(enabled),
+            MlsWorkloadKind::Agent => self.mls_cli_override_agent_enabled = Some(enabled),
+            MlsWorkloadKind::PhysicsAssist => {
+                self.mls_cli_override_physics_assist_enabled = Some(enabled)
+            }
+            MlsWorkloadKind::Training => self.mls_cli_override_training_enabled = Some(enabled),
+        }
+        bridge.set_mls_workload_enabled(workload, enabled);
+        self.runtime_bridge_metrics = bridge.metrics();
+        Ok(format!(
+            "mls workload override: {}={} (CLI precedence active)",
+            workload.as_str(),
+            if enabled { "on" } else { "off" }
+        ))
+    }
+
+    pub(super) fn bind_mls_model_cli(&mut self, slot: u32, source: &str) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return Err(
+                "mls.model.bind unavailable: parallel bridge is disabled (pipeline=legacy)"
+                    .to_string(),
+            );
+        };
+        let note = bridge.bind_mls_model(slot, source.to_string())?;
+        self.runtime_bridge_metrics = bridge.metrics();
+        Ok(note)
+    }
+
+    pub(super) fn train_mls_slot_cli(&mut self, slot: u32, steps: u32) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return Err(
+                "mls.train unavailable: parallel bridge is disabled (pipeline=legacy)".to_string(),
+            );
+        };
+        let note = bridge.train_mls_slot(slot, steps)?;
+        self.runtime_bridge_metrics = bridge.metrics();
+        Ok(note)
+    }
+
+    pub(super) fn checkpoint_mls_slot_cli(
+        &mut self,
+        slot: u32,
+        save: bool,
+        name: &str,
+    ) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return Err(
+                "mls.checkpoint unavailable: parallel bridge is disabled (pipeline=legacy)"
+                    .to_string(),
+            );
+        };
+        let note = bridge.checkpoint_mls_slot(slot, save, name)?;
+        self.runtime_bridge_metrics = bridge.metrics();
+        Ok(note)
+    }
+
     pub(super) fn apply_performance_contract_preset(
         &mut self,
         scenario: PerformanceContractScenario,

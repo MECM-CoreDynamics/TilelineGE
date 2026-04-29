@@ -267,6 +267,22 @@ impl TlAppRuntime {
             lane_queue_depth: self.runtime_bridge_metrics.lane_queue_depth,
             ai_ml_drop_rate: self.runtime_bridge_metrics.ai_ml_drop_rate,
         };
+        let mls_metrics = TlscriptMlsMetricSnapshot {
+            backend: self.runtime_bridge_metrics.mls_backend,
+            device: self.runtime_bridge_metrics.mls_device.clone(),
+            active_workloads: self
+                .runtime_bridge_metrics
+                .mls_active_workloads
+                .iter()
+                .map(|workload| workload.as_str().to_string())
+                .collect(),
+            infer_queue_depth: self.runtime_bridge_metrics.mls_infer_queue_depth,
+            train_queue_depth: self.runtime_bridge_metrics.mls_train_queue_depth,
+            drop_rate: self.runtime_bridge_metrics.mls_drop_rate,
+            fallback_reason: self.runtime_bridge_metrics.mls_fallback_reason.clone(),
+            precision: self.runtime_bridge_metrics.mls_precision,
+            step_time_ms: self.runtime_bridge_metrics.mls_step_time_ms,
+        };
         let tile_lookup = |x: i32, y: i32| self.tile_world_2d.tile(TileCoord2d::new(x, y));
         let mut frame_eval = self.script_runtime.evaluate_frame(
             TlscriptShowcaseFrameInput {
@@ -279,6 +295,7 @@ impl TlAppRuntime {
             Some(&tile_lookup),
             contact_snapshot,
             gms_metrics,
+            mls_metrics,
         );
         if !self.console.script_statements.is_empty() {
             merge_showcase_output(
@@ -319,6 +336,7 @@ impl TlAppRuntime {
             };
         }
         self.apply_script_gms_scaler_overrides(frame_eval.gms_scaler);
+        self.apply_script_mls_overrides(frame_eval.mls.clone());
 
         if let Some(preset) = frame_eval.performance_preset {
             let scenario = match preset {
