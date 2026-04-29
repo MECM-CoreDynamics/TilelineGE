@@ -16,6 +16,7 @@
 
 #![cfg(target_os = "linux")]
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::{CStr, CString};
 use std::fmt::{Display, Formatter};
@@ -38,6 +39,11 @@ use crate::graphics::multigpu::sync::{GpuQueueLane, MultiGpuFrameSyncConfig, Syn
 const ENGINE_NAME: &[u8] = b"Tileline\0";
 const APPLICATION_NAME: &[u8] = b"Tileline TLCore Vulkan Backend\0";
 const SNAPSHOT_LIGHT_CAPACITY: usize = 32;
+
+/// Sprite atlas tile dimensions (pixels per side). Matches the wgpu renderer.
+pub const SPRITE_ATLAS_TILE_SIZE: u32 = 64;
+/// Number of array layers in the sprite atlas texture. Slots 0-127 are sprite/glyph slots.
+pub const SPRITE_ATLAS_LAYER_COUNT: u32 = 128;
 
 /// Linux display-system preference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +429,13 @@ struct SampledTextureArrayResources {
     sampler: vk::Sampler,
 }
 
+/// One dynamically-uploaded mesh in a named slot (primitive_code 2+).
+struct VulkanMeshSlot {
+    vertex_buffer: PersistentlyMappedBuffer,
+    index_buffer: PersistentlyMappedBuffer,
+    index_count: u32,
+}
+
 struct ScenePipelineResources {
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
@@ -457,6 +470,7 @@ pub struct VulkanBackend {
     swapchain: SwapchainState,
     render_pass: vk::RenderPass,
     scene_pipeline: ScenePipelineResources,
+    mesh_slots: HashMap<u8, VulkanMeshSlot>,
     frame_resources: Vec<FrameResources>,
     current_frame_slot: usize,
     descriptor_indexing_supported: bool,
@@ -590,6 +604,7 @@ impl VulkanBackend {
             swapchain,
             render_pass,
             scene_pipeline,
+            mesh_slots: HashMap::new(),
             frame_resources,
             current_frame_slot: 0,
             descriptor_indexing_supported,
@@ -666,6 +681,194 @@ impl VulkanBackend {
     /// Current swapchain extent in pixels.
     pub fn extent(&self) -> vk::Extent2D {
         self.swapchain.extent
+    }
+
+    /// Upload raw RGBA8 pixels into one sprite atlas layer slot.
+    ///
+    /// `slot` must be less than `SPRITE_ATLAS_LAYER_COUNT` (128).
+    /// `rgba_pixels` must be exactly `SPRITE_ATLAS_TILE_SIZE * SPRITE_ATLAS_TILE_SIZE * 4` bytes.
+    pub fn upload_texture_slot(
+        &mut self,
+        slot: u16,
+        rgba_pixels: &[u8],
+    ) -> Result<(), VulkanBackendError> {
+        const EXPECTED: usize =
+            (SPRITE_ATLAS_TILE_SIZE * SPRITE_ATLAS_TILE_SIZE * 4) as usize;
+        if slot as u32 >= SPRITE_ATLAS_LAYER_COUNT {
+            return Err(VulkanBackendError::InvalidConfig(
+                "texture slot index exceeds atlas layer count",
+            ));
+        }
+        if rgba_pixels.len() != EXPECTED {
+            return Err(VulkanBackendError::InvalidConfig(
+                "texture slot pixel buffer has wrong size",
+            ));
+        }
+        unsafe { self.upload_texture_slot_raw(slot, rgba_pixels) }
+    }
+
+    unsafe fn upload_texture_slot_raw(
+        &mut self,
+        slot: u16,
+        rgba_pixels: &[u8],
+    ) -> Result<(), VulkanBackendError> {
+        let staging = create_static_buffer(
+            &self.instance,
+            &self.device,
+            self.physical_device,
+            rgba_pixels,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+        )?;
+
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(self.queue_selection.graphics_family_index)
+            .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+        let command_pool = self.device.create_command_pool(&pool_info, None)?;
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let command_buffer = self.device.allocate_command_buffers(&alloc_info)?[0];
+        let begin_info = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        self.device.begin_command_buffer(command_buffer, &begin_info)?;
+
+        let subresource = vk::ImageSubresourceRange::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_mip_level(0)
+            .level_count(1)
+            .base_array_layer(slot as u32)
+            .layer_count(1);
+        let to_transfer = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.scene_pipeline.texture_array.image)
+            .subresource_range(subresource)
+            .src_access_mask(vk::AccessFlags::SHADER_READ)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
+        self.device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_transfer],
+        );
+
+        let region = vk::BufferImageCopy::default()
+            .buffer_offset(0)
+            .buffer_row_length(0)
+            .buffer_image_height(0)
+            .image_subresource(
+                vk::ImageSubresourceLayers::default()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .mip_level(0)
+                    .base_array_layer(slot as u32)
+                    .layer_count(1),
+            )
+            .image_extent(vk::Extent3D {
+                width: SPRITE_ATLAS_TILE_SIZE,
+                height: SPRITE_ATLAS_TILE_SIZE,
+                depth: 1,
+            });
+        self.device.cmd_copy_buffer_to_image(
+            command_buffer,
+            staging.buffer,
+            self.scene_pipeline.texture_array.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &[region],
+        );
+
+        let to_shader = vk::ImageMemoryBarrier::default()
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .image(self.scene_pipeline.texture_array.image)
+            .subresource_range(subresource)
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ);
+        self.device.cmd_pipeline_barrier(
+            command_buffer,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[to_shader],
+        );
+
+        self.device.end_command_buffer(command_buffer)?;
+        let command_buffers = [command_buffer];
+        let submit = vk::SubmitInfo::default().command_buffers(&command_buffers);
+        let fence = self.device.create_fence(&vk::FenceCreateInfo::default(), None)?;
+        self.device.queue_submit(self.graphics_queue, &[submit], fence)?;
+        self.device.wait_for_fences(&[fence], true, u64::MAX)?;
+        self.device.destroy_fence(fence, None);
+        self.device.free_command_buffers(command_pool, &[command_buffer]);
+        self.device.destroy_command_pool(command_pool, None);
+        destroy_mapped_buffer(&self.device, staging);
+
+        Ok(())
+    }
+
+    /// Upload raw position + index data into a named mesh slot.
+    ///
+    /// `primitive_code = slot + 2` in the draw frame (0 = sphere builtin, 1 = cube builtin).
+    /// Replaces any previously uploaded mesh for the same slot.
+    pub fn upload_mesh_slot(
+        &mut self,
+        slot: u8,
+        positions: &[[f32; 3]],
+        indices: &[u32],
+    ) -> Result<(), VulkanBackendError> {
+        if positions.is_empty() || indices.is_empty() {
+            return Err(VulkanBackendError::InvalidConfig(
+                "mesh slot positions and indices must not be empty",
+            ));
+        }
+        let vertex_buffer = unsafe {
+            create_static_buffer(
+                &self.instance,
+                &self.device,
+                self.physical_device,
+                slice_as_bytes(positions),
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+            )?
+        };
+        let index_buffer = unsafe {
+            create_static_buffer(
+                &self.instance,
+                &self.device,
+                self.physical_device,
+                slice_as_bytes(indices),
+                vk::BufferUsageFlags::INDEX_BUFFER,
+            )?
+        };
+        let new_slot = VulkanMeshSlot {
+            vertex_buffer,
+            index_buffer,
+            index_count: indices.len() as u32,
+        };
+        if let Some(old) = self.mesh_slots.insert(slot, new_slot) {
+            unsafe {
+                destroy_mapped_buffer(&self.device, old.vertex_buffer);
+                destroy_mapped_buffer(&self.device, old.index_buffer);
+            }
+        }
+        Ok(())
+    }
+
+    /// Upload the built-in icosahedron sphere mesh into a named slot.
+    pub fn upload_builtin_sphere_mesh_slot(&mut self, slot: u8) -> Result<(), VulkanBackendError> {
+        let vertices = unit_icosa_sphere_vertices();
+        let indices_u16 = unit_icosa_sphere_indices();
+        let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
+        let indices_u32: Vec<u32> = indices_u16.iter().map(|&i| u32::from(i)).collect();
+        self.upload_mesh_slot(slot, &positions, &indices_u32)
     }
 
     /// Resize the swapchain-dependent resources.
@@ -895,6 +1098,7 @@ impl VulkanBackend {
                 frame.command_buffer,
                 frame,
                 &self.scene_pipeline,
+                &self.mesh_slots,
                 snapshot_state,
             )?;
 
@@ -969,6 +1173,11 @@ impl Drop for VulkanBackend {
                 self.device.destroy_semaphore(frame.render_finished, None);
                 self.device.destroy_semaphore(frame.image_available, None);
                 self.device.destroy_command_pool(frame.command_pool, None);
+            }
+
+            for (_, slot) in self.mesh_slots.drain() {
+                destroy_mapped_buffer(&self.device, slot.vertex_buffer);
+                destroy_mapped_buffer(&self.device, slot.index_buffer);
             }
 
             destroy_mapped_buffer_ref(&self.device, &self.scene_pipeline.vertex_buffer);
@@ -2300,29 +2509,17 @@ unsafe fn create_dummy_texture_array_resources(
     graphics_queue_family_index: u32,
     graphics_queue: vk::Queue,
 ) -> Result<SampledTextureArrayResources, VulkanBackendError> {
-    const TEX_WIDTH: u32 = 2;
-    const TEX_HEIGHT: u32 = 2;
-    const TEX_LAYERS: u32 = 4;
-    const BYTES_PER_PIXEL: usize = 4;
+    const TEX_WIDTH: u32 = SPRITE_ATLAS_TILE_SIZE;
+    const TEX_HEIGHT: u32 = SPRITE_ATLAS_TILE_SIZE;
+    const TEX_LAYERS: u32 = SPRITE_ATLAS_LAYER_COUNT;
 
-    let texels: [[u8; TEX_WIDTH as usize * TEX_HEIGHT as usize * BYTES_PER_PIXEL];
-        TEX_LAYERS as usize] = [
-        [
-            255, 255, 255, 255, 220, 220, 255, 255, 220, 220, 255, 255, 255, 255, 255, 255,
-        ],
-        [
-            255, 128, 128, 255, 220, 72, 72, 255, 220, 72, 72, 255, 255, 128, 128, 255,
-        ],
-        [
-            128, 255, 160, 255, 72, 220, 96, 255, 72, 220, 96, 255, 128, 255, 160, 255,
-        ],
-        [
-            128, 196, 255, 255, 72, 120, 220, 255, 72, 120, 220, 255, 128, 196, 255, 255,
-        ],
-    ];
-    let mut staging_bytes = Vec::with_capacity((TEX_WIDTH * TEX_HEIGHT * TEX_LAYERS * 4) as usize);
-    for layer in texels {
-        staging_bytes.extend_from_slice(&layer);
+    let layer_bytes = (TEX_WIDTH * TEX_HEIGHT * 4) as usize;
+    let total_bytes = layer_bytes * TEX_LAYERS as usize;
+    // All slots start as opaque mid-gray so unbound slots render as a visible solid
+    // rather than garbage or transparent holes.
+    let mut staging_bytes = vec![128u8; total_bytes];
+    for chunk in staging_bytes.chunks_exact_mut(4) {
+        chunk[3] = 255; // alpha = fully opaque
     }
 
     let staging = create_static_buffer(
@@ -2407,7 +2604,7 @@ unsafe fn create_dummy_texture_array_resources(
         .map(|layer| {
             vk::BufferImageCopy::default()
                 .buffer_offset(
-                    (layer as usize * TEX_WIDTH as usize * TEX_HEIGHT as usize * BYTES_PER_PIXEL)
+                    (layer as usize * TEX_WIDTH as usize * TEX_HEIGHT as usize * 4)
                         as u64,
                 )
                 .buffer_row_length(0)
@@ -2503,6 +2700,7 @@ unsafe fn record_frame_commands(
     command_buffer: vk::CommandBuffer,
     frame: &FrameResources,
     scene_pipeline: &ScenePipelineResources,
+    mesh_slots: &HashMap<u8, VulkanMeshSlot>,
     snapshot_state: VulkanSnapshotSlotState,
 ) -> Result<(), VulkanBackendError> {
     let begin_info = vk::CommandBufferBeginInfo::default();
@@ -2583,8 +2781,8 @@ unsafe fn record_frame_commands(
             device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
             last_pipeline = pipeline;
         }
-        let (vertex_buffer, index_buffer, index_count) =
-            mesh_resources_for_primitive(scene_pipeline, range.primitive_code);
+        let (vertex_buffer, index_buffer, index_count, index_type) =
+            mesh_resources_for_primitive(scene_pipeline, mesh_slots, range.primitive_code);
         if vertex_buffer.buffer != last_vertex_buffer {
             device.cmd_bind_vertex_buffers(
                 command_buffer,
@@ -2599,7 +2797,7 @@ unsafe fn record_frame_commands(
                 command_buffer,
                 index_buffer.buffer,
                 0,
-                vk::IndexType::UINT16,
+                index_type,
             );
             last_index_buffer = index_buffer.buffer;
         }
@@ -2618,21 +2816,42 @@ unsafe fn record_frame_commands(
     Ok(())
 }
 
-fn mesh_resources_for_primitive(
-    scene_pipeline: &ScenePipelineResources,
+fn mesh_resources_for_primitive<'a>(
+    scene_pipeline: &'a ScenePipelineResources,
+    mesh_slots: &'a HashMap<u8, VulkanMeshSlot>,
     primitive_code: u32,
-) -> (&PersistentlyMappedBuffer, &PersistentlyMappedBuffer, u32) {
+) -> (&'a PersistentlyMappedBuffer, &'a PersistentlyMappedBuffer, u32, vk::IndexType) {
     match primitive_code {
         0 => (
             &scene_pipeline.sphere_vertex_buffer,
             &scene_pipeline.sphere_index_buffer,
             scene_pipeline.sphere_index_count,
+            vk::IndexType::UINT16,
         ),
-        _ => (
+        1 => (
             &scene_pipeline.vertex_buffer,
             &scene_pipeline.index_buffer,
             scene_pipeline.index_count,
+            vk::IndexType::UINT16,
         ),
+        code => {
+            let slot = code.saturating_sub(2) as u8;
+            if let Some(mesh) = mesh_slots.get(&slot) {
+                (
+                    &mesh.vertex_buffer,
+                    &mesh.index_buffer,
+                    mesh.index_count,
+                    vk::IndexType::UINT32,
+                )
+            } else {
+                (
+                    &scene_pipeline.vertex_buffer,
+                    &scene_pipeline.index_buffer,
+                    scene_pipeline.index_count,
+                    vk::IndexType::UINT16,
+                )
+            }
+        }
     }
 }
 

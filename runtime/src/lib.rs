@@ -32,6 +32,7 @@
 
 mod app_runner;
 mod draw_path;
+mod fbx_mesh;
 mod frame_loop;
 mod mas;
 #[cfg(target_os = "macos")]

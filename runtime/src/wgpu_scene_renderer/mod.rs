@@ -5,14 +5,14 @@
 //! - transparent 3D batches
 //! - sprite overlays (including telemetry HUD sprites)
 
-use std::{collections::BTreeMap, fs, io::Cursor, path::Path};
+use std::{collections::BTreeMap, fs, path::Path};
 
-use fbx::Property as FbxProperty;
 use font8x8::{UnicodeFonts, BASIC_FONTS};
 use nalgebra::{Isometry3, Matrix4, Perspective3, Point3, Vector3};
 use wgpu::util::DeviceExt;
 
 use crate::draw_path::{DrawLane, RuntimeDrawFrame};
+use crate::fbx_mesh;
 use crate::scene::{
     RayTracingMode, SceneLight, SceneLightKind, SpriteInstance, SpriteKind, MAX_SCENE_LIGHTS,
 };
@@ -27,7 +27,6 @@ pub const DEFAULT_MSAA_SAMPLE_COUNT: u32 = 4;
 const MAX_SHADOW_LIGHTS: usize = 4;
 /// Resolution of each shadow map (square). 1024 gives good quality for a flashlight at scene scale.
 const SHADOW_MAP_SIZE: u32 = 1024;
-const DEFAULT_SPHERE_FBX_BYTES: &[u8] = include_bytes!("../../../docs/demos/tlapp/sphere.fbx");
 // Hysteresis avoids rapid mesh-mode flapping when instance counts hover around thresholds.
 const SPHERE_LOD_ENABLE_THRESHOLD: usize = 2_500;
 const SPHERE_LOD_DISABLE_THRESHOLD: usize = 1_800;
@@ -1009,11 +1008,16 @@ impl WgpuSceneRenderer {
         slot: u8,
         bytes: &[u8],
     ) -> Result<(), String> {
-        let mesh_data = parse_first_mesh_from_fbx(bytes)?;
+        let mesh_data = fbx_mesh::parse_first_mesh_from_fbx(bytes)?;
+        let vertices: Vec<GpuVertex3d> = mesh_data
+            .positions
+            .into_iter()
+            .map(|p| GpuVertex3d { position: p })
+            .collect();
         let mesh = create_mesh_u32(
             device,
             &format!("runtime-scene-fbx-slot-{slot}"),
-            &mesh_data.vertices,
+            &vertices,
             &mesh_data.indices,
         );
         self.custom_mesh_slots.insert(slot, mesh);
@@ -2435,13 +2439,15 @@ fn create_box_mesh(device: &wgpu::Device) -> GpuMesh {
 }
 
 fn create_sphere_mesh(device: &wgpu::Device) -> GpuMesh {
-    match parse_first_mesh_from_fbx(DEFAULT_SPHERE_FBX_BYTES) {
-        Ok(mesh_data) => create_mesh_u32(
-            device,
-            "runtime-scene-sphere-fbx",
-            &mesh_data.vertices,
-            &mesh_data.indices,
-        ),
+    match fbx_mesh::parse_first_mesh_from_fbx(fbx_mesh::DEFAULT_SPHERE_FBX_BYTES) {
+        Ok(mesh_data) => {
+            let vertices: Vec<GpuVertex3d> = mesh_data
+                .positions
+                .into_iter()
+                .map(|p| GpuVertex3d { position: p })
+                .collect();
+            create_mesh_u32(device, "runtime-scene-sphere-fbx", &vertices, &mesh_data.indices)
+        }
         Err(_) => create_octa_sphere_mesh(device),
     }
 }
@@ -2505,206 +2511,6 @@ fn create_icosa_sphere_mesh(device: &wgpu::Device) -> GpuMesh {
         8, 1,
     ];
     create_mesh_u16(device, "runtime-scene-sphere-icosa", &vertices, &indices)
-}
-
-#[derive(Debug, Clone)]
-struct ParsedFbxMesh {
-    vertices: Vec<GpuVertex3d>,
-    indices: Vec<u32>,
-}
-
-fn parse_first_mesh_from_fbx(bytes: &[u8]) -> Result<ParsedFbxMesh, String> {
-    let file = fbx::File::read_from(Cursor::new(bytes)).map_err(|err| format!("{err}"))?;
-    let objects = file
-        .children
-        .iter()
-        .find(|node| node.name == "Objects")
-        .ok_or_else(|| "FBX objects node was not found".to_string())?;
-
-    for geometry in objects
-        .children
-        .iter()
-        .filter(|node| node.name == "Geometry")
-    {
-        let kind = geometry
-            .properties
-            .get(2)
-            .and_then(fbx_property_as_string)
-            .unwrap_or_default();
-        if kind != "Mesh" {
-            continue;
-        }
-
-        let vertices_f64 = geometry
-            .children
-            .iter()
-            .find(|node| node.name == "Vertices")
-            .and_then(|node| node.properties.first())
-            .and_then(fbx_property_as_f64_slice)
-            .ok_or_else(|| "FBX mesh does not contain vertices".to_string())?;
-        let polygon_vertex_index = geometry
-            .children
-            .iter()
-            .find(|node| node.name == "PolygonVertexIndex")
-            .and_then(|node| node.properties.first())
-            .and_then(fbx_property_as_i32_slice)
-            .ok_or_else(|| "FBX mesh does not contain polygon vertex indices".to_string())?;
-
-        let mut vertices = fbx_vertices_to_gpu(vertices_f64)?;
-        let indices = fbx_polygon_indices_to_triangles(polygon_vertex_index, vertices.len())?;
-        if indices.is_empty() {
-            return Err("FBX mesh did not produce triangle indices".to_string());
-        }
-        normalize_vertices_to_unit_box(vertices.as_mut_slice());
-        return Ok(ParsedFbxMesh { vertices, indices });
-    }
-
-    Err("No FBX mesh geometry node found".to_string())
-}
-
-fn fbx_vertices_to_gpu(vertices_f64: &[f64]) -> Result<Vec<GpuVertex3d>, String> {
-    if vertices_f64.len() < 9 {
-        return Err("FBX vertices array is too small".to_string());
-    }
-    if vertices_f64.len() % 3 != 0 {
-        return Err("FBX vertices array is not 3-component aligned".to_string());
-    }
-
-    let mut vertices = Vec::with_capacity(vertices_f64.len() / 3);
-    for chunk in vertices_f64.chunks_exact(3) {
-        vertices.push(GpuVertex3d {
-            position: [chunk[0] as f32, chunk[1] as f32, chunk[2] as f32],
-        });
-    }
-    Ok(vertices)
-}
-
-/// Normalize imported FBX vertices into a centered unit box (`[-0.5, 0.5]` per axis).
-///
-/// This keeps mesh-slot scaling predictable so runtime X/Y/Z scale controls can shape panels
-/// consistently even when source FBX files use arbitrary pivots or authoring units.
-fn normalize_vertices_to_unit_box(vertices: &mut [GpuVertex3d]) {
-    if vertices.is_empty() {
-        return;
-    }
-
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
-    for v in vertices.iter() {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(v.position[axis]);
-            max[axis] = max[axis].max(v.position[axis]);
-        }
-    }
-
-    let center = [
-        (min[0] + max[0]) * 0.5,
-        (min[1] + max[1]) * 0.5,
-        (min[2] + max[2]) * 0.5,
-    ];
-    let extent = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
-    let inv_extent = [
-        if extent[0].abs() > 1e-6 {
-            1.0 / extent[0]
-        } else {
-            0.0
-        },
-        if extent[1].abs() > 1e-6 {
-            1.0 / extent[1]
-        } else {
-            0.0
-        },
-        if extent[2].abs() > 1e-6 {
-            1.0 / extent[2]
-        } else {
-            0.0
-        },
-    ];
-
-    for v in vertices.iter_mut() {
-        for axis in 0..3 {
-            if inv_extent[axis] > 0.0 {
-                v.position[axis] = (v.position[axis] - center[axis]) * inv_extent[axis];
-            } else {
-                v.position[axis] = 0.0;
-            }
-        }
-    }
-}
-
-fn fbx_polygon_indices_to_triangles(
-    polygon_vertex_index: &[i32],
-    vertex_count: usize,
-) -> Result<Vec<u32>, String> {
-    let mut triangles_u32 = Vec::<u32>::new();
-    let mut polygon = Vec::<u32>::with_capacity(8);
-
-    for &raw_index in polygon_vertex_index {
-        let (resolved, is_polygon_end) = if raw_index < 0 {
-            let corrected = raw_index
-                .checked_neg()
-                .and_then(|v| v.checked_sub(1))
-                .ok_or_else(|| "FBX polygon index underflow".to_string())?;
-            (corrected, true)
-        } else {
-            (raw_index, false)
-        };
-
-        let resolved_u32: u32 = resolved
-            .try_into()
-            .map_err(|_| "FBX polygon index is negative".to_string())?;
-        if resolved_u32 as usize >= vertex_count {
-            return Err("FBX polygon index exceeds vertex count".to_string());
-        }
-        polygon.push(resolved_u32);
-
-        if is_polygon_end {
-            triangulate_polygon_fan(&polygon, &mut triangles_u32);
-            polygon.clear();
-        }
-    }
-
-    if !polygon.is_empty() {
-        triangulate_polygon_fan(&polygon, &mut triangles_u32);
-    }
-    if triangles_u32.is_empty() {
-        return Err("FBX polygon list did not contain triangles".to_string());
-    }
-
-    Ok(triangles_u32)
-}
-
-fn triangulate_polygon_fan(polygon: &[u32], triangles_out: &mut Vec<u32>) {
-    if polygon.len() < 3 {
-        return;
-    }
-    let first = polygon[0];
-    for i in 1..polygon.len() - 1 {
-        triangles_out.push(first);
-        triangles_out.push(polygon[i]);
-        triangles_out.push(polygon[i + 1]);
-    }
-}
-
-fn fbx_property_as_string(property: &FbxProperty) -> Option<&str> {
-    match property {
-        FbxProperty::String(value) => Some(value.as_str()),
-        _ => None,
-    }
-}
-
-fn fbx_property_as_f64_slice(property: &FbxProperty) -> Option<&[f64]> {
-    match property {
-        FbxProperty::F64Array(values) => Some(values.as_slice()),
-        _ => None,
-    }
-}
-
-fn fbx_property_as_i32_slice(property: &FbxProperty) -> Option<&[i32]> {
-    match property {
-        FbxProperty::I32Array(values) => Some(values.as_slice()),
-        _ => None,
-    }
 }
 
 fn create_mesh_u16(
@@ -3610,13 +3416,13 @@ mod tests {
 
     #[test]
     fn embedded_sphere_fbx_is_parsed_into_indexed_triangles() {
-        let mesh = parse_first_mesh_from_fbx(DEFAULT_SPHERE_FBX_BYTES)
+        let mesh = fbx_mesh::parse_first_mesh_from_fbx(fbx_mesh::DEFAULT_SPHERE_FBX_BYTES)
             .expect("embedded sphere.fbx should parse");
-        assert!(!mesh.vertices.is_empty());
+        assert!(!mesh.positions.is_empty());
         assert!(!mesh.indices.is_empty());
         assert_eq!(mesh.indices.len() % 3, 0);
         let max_index = mesh.indices.iter().copied().max().unwrap_or(0) as usize;
-        assert!(max_index < mesh.vertices.len());
+        assert!(max_index < mesh.positions.len());
     }
 
     #[test]

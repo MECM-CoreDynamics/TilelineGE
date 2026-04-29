@@ -15,6 +15,7 @@
 
 use std::error::Error;
 use std::fmt::{Display, Formatter};
+use std::fs;
 use std::mem::size_of;
 use std::path::Path;
 use std::sync::Arc;
@@ -28,6 +29,9 @@ use tl_core::{
 use wgpu::Backend;
 use winit::window::Window;
 
+use crate::fbx_mesh;
+use crate::tlsprite::decode_sprite_texture_to_rgba;
+
 use crate::draw_path::RuntimeDrawFrame;
 use crate::scene::RayTracingMode;
 use crate::upscaler::{resolve_fsr_status, FsrConfig, FsrStatus};
@@ -38,6 +42,8 @@ const SECONDARY_GPU_INSTANCE_THRESHOLD: usize = 4_096;
 const SECONDARY_GPU_TRANSPARENT_THRESHOLD: usize = 768;
 const SECONDARY_GPU_LIGHT_THRESHOLD: usize = 6;
 const RT_DYNAMIC_CAP: u32 = 16_384;
+const SPRITE_ATLAS_TILE_SIZE: u32 = tl_core::SPRITE_ATLAS_TILE_SIZE;
+const TEXT_GLYPH_SLOT_BASE: u16 = 128;
 
 /// Runtime-facing configuration for the Vulkan scene renderer adapter.
 #[derive(Debug, Clone)]
@@ -242,22 +248,61 @@ impl VulkanSceneRenderer {
         self.force_full_fbx_sphere
     }
 
-    /// Placeholder FBX mesh binding hook for the Vulkan migration path.
-    pub fn bind_fbx_mesh_slot_from_path(&mut self, _slot: u8, _path: &Path) -> Result<(), String> {
-        Ok(())
+    /// Bind an FBX mesh from disk into a runtime mesh slot.
+    ///
+    /// `primitive_code = slot + 2` in the draw frame (0 = sphere builtin, 1 = cube builtin).
+    pub fn bind_fbx_mesh_slot_from_path(&mut self, slot: u8, path: &Path) -> Result<(), String> {
+        let bytes = fs::read(path)
+            .map_err(|err| format!("failed to read FBX '{}': {err}", path.display()))?;
+        let mesh_data = fbx_mesh::parse_first_mesh_from_fbx(&bytes)?;
+        self.backend
+            .upload_mesh_slot(slot, &mesh_data.positions, &mesh_data.indices)
+            .map_err(|err| err.to_string())
     }
 
-    /// Placeholder sprite texture binding hook for the Vulkan migration path.
+    /// Bind a 2D sprite source (`.png` / `.svg`) into one atlas slot.
+    ///
+    /// Slots `[TEXT_GLYPH_SLOT_BASE..]` are reserved for text glyph lanes.
     pub fn bind_sprite_texture_slot_from_path(
         &mut self,
-        _slot: u16,
-        _path: &Path,
+        slot: u16,
+        path: &Path,
     ) -> Result<(), String> {
-        Ok(())
+        if slot >= TEXT_GLYPH_SLOT_BASE {
+            return Err(format!(
+                "slot {slot} is reserved for text glyph atlas lanes (>= {TEXT_GLYPH_SLOT_BASE})"
+            ));
+        }
+        let pixels =
+            decode_sprite_texture_to_rgba(path, SPRITE_ATLAS_TILE_SIZE, SPRITE_ATLAS_TILE_SIZE)?;
+        self.bind_sprite_texture_slot_from_rgba(slot, &pixels)
     }
 
-    /// Placeholder built-in sphere slot binding hook for the Vulkan migration path.
-    pub fn bind_builtin_sphere_mesh_slot(&mut self, _slot: u8, _high_quality: bool) {}
+    /// Bind raw RGBA8 pixels into a sprite atlas slot.
+    pub fn bind_sprite_texture_slot_from_rgba(
+        &mut self,
+        slot: u16,
+        rgba_pixels: &[u8],
+    ) -> Result<(), String> {
+        self.backend
+            .upload_texture_slot(slot, rgba_pixels)
+            .map_err(|err| err.to_string())
+    }
+
+    /// Bind a built-in sphere mesh (high FBX quality or low icosa) into a runtime slot.
+    pub fn bind_builtin_sphere_mesh_slot(&mut self, slot: u8, high_quality: bool) {
+        if high_quality {
+            if let Ok(mesh) =
+                fbx_mesh::parse_first_mesh_from_fbx(fbx_mesh::DEFAULT_SPHERE_FBX_BYTES)
+            {
+                let _ = self
+                    .backend
+                    .upload_mesh_slot(slot, &mesh.positions, &mesh.indices);
+                return;
+            }
+        }
+        let _ = self.backend.upload_builtin_sphere_mesh_slot(slot);
+    }
 
     /// Estimate the amount of cross-adapter state that would have to move for this frame.
     pub fn estimate_cross_adapter_bytes(draw: &RuntimeDrawFrame) -> u64 {
