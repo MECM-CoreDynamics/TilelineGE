@@ -341,7 +341,8 @@ fn build_profile(index: usize, adapter: &Adapter) -> GpuAdapterProfile {
         &limits,
         supports_mappable_primary_buffers,
     );
-    let unit_perf_score = score_breakdown.final_score as f64 / estimated_compute_units.max(1) as f64;
+    let unit_perf_score =
+        score_breakdown.final_score as f64 / estimated_compute_units.max(1) as f64;
     let thermal_headroom = estimate_thermal_headroom(vendor_family, memory_topology, &name_lower);
 
     GpuAdapterProfile {

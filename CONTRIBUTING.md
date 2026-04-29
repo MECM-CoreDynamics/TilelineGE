@@ -19,6 +19,10 @@ By submitting contributions, you agree that:
 - contributions do not create employment, partnership, equity, or revenue-share rights unless
   separately agreed in writing
 
+This repository represents the **open-core layer** of Tileline. Commercial tooling, hosted
+services, premium packs, or other proprietary "larger work" layers may exist separately, but
+contributions made here remain part of the open `MPL-2.0` codebase.
+
 If you need different legal/commercial terms for your contributions, please contact maintainers
 before opening a PR.
 

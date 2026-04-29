@@ -69,10 +69,7 @@ pub struct VulkanPhysicsComputeBackend {
 }
 
 impl VulkanPhysicsComputeBackend {
-    pub fn from_backend(
-        backend: &VulkanBackend,
-        config: VulkanPhysicsComputeConfig,
-    ) -> Self {
+    pub fn from_backend(backend: &VulkanBackend, config: VulkanPhysicsComputeConfig) -> Self {
         Self::from_device_profile(backend.primary_device_profile(), config)
     }
 
@@ -123,8 +120,8 @@ impl VulkanPhysicsComputeBackend {
             return None;
         }
         let local_size_x = self.config.preferred_local_size_x.max(32);
-        let workgroup_count_x = ((request.body_count as u32).saturating_add(local_size_x - 1))
-            / local_size_x;
+        let workgroup_count_x =
+            ((request.body_count as u32).saturating_add(local_size_x - 1)) / local_size_x;
         Some(VulkanPhysicsDispatchPlan {
             stage: request.stage,
             local_size_x,
@@ -202,9 +199,7 @@ mod tests {
     use ash::vk;
 
     use super::*;
-    use crate::graphics::vulkan_backend::{
-        VulkanDeviceExtensionSupport, VulkanQueueSelection,
-    };
+    use crate::graphics::vulkan_backend::{VulkanDeviceExtensionSupport, VulkanQueueSelection};
 
     fn test_profile() -> VulkanPhysicalDeviceProfile {
         VulkanPhysicalDeviceProfile {

@@ -3402,7 +3402,6 @@ dependencies = [
 name = "paradoxpe"
 version = "0.4.5"
 dependencies = [
- "mps",
  "nalgebra",
 ]
 

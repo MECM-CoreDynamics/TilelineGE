@@ -22,6 +22,7 @@ feature lists.
 ## Start Here
 
 - `../README.md`: project overview, positioning, and quick start
+- `../LICENSE-STRATEGY.md`: open-core / commercial-layer policy direction
 - `tileline-v0.5.0-roadmap.md`: current major roadmap (`Heimdall Update`)
 - `tileline-v0.5.5-roadmap.md`: MPS SIMD + standalone extraction direction
 - `runtime-tlapp-console.md`: live runtime control surface inside TLApp

@@ -474,7 +474,9 @@ impl TlAppRuntime {
 
     pub(super) fn gms_status_line(&self) -> Result<String, String> {
         let Some(bridge) = self.runtime_bridge.as_ref() else {
-            return Err("gms.status unavailable: parallel bridge is disabled (pipeline=legacy)".to_string());
+            return Err(
+                "gms.status unavailable: parallel bridge is disabled (pipeline=legacy)".to_string(),
+            );
         };
         bridge
             .gms_status_line()
@@ -486,7 +488,9 @@ impl TlAppRuntime {
         mode: GmsScalerMode,
     ) -> Result<String, String> {
         let Some(bridge) = self.runtime_bridge.as_mut() else {
-            return Err("gms.mode unavailable: parallel bridge is disabled (pipeline=legacy)".to_string());
+            return Err(
+                "gms.mode unavailable: parallel bridge is disabled (pipeline=legacy)".to_string(),
+            );
         };
         if bridge.path() != RuntimeBridgePath::GmsPath {
             return Err("gms.mode unavailable: active bridge path is not GMS".to_string());
@@ -529,7 +533,9 @@ impl TlAppRuntime {
         pct: u8,
     ) -> Result<String, String> {
         let Some(bridge) = self.runtime_bridge.as_mut() else {
-            return Err("gms.budget unavailable: parallel bridge is disabled (pipeline=legacy)".to_string());
+            return Err(
+                "gms.budget unavailable: parallel bridge is disabled (pipeline=legacy)".to_string(),
+            );
         };
         if bridge.path() != RuntimeBridgePath::GmsPath {
             return Err("gms.budget unavailable: active bridge path is not GMS".to_string());

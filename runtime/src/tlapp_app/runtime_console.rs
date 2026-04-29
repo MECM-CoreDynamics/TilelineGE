@@ -860,7 +860,7 @@ impl TlAppRuntime {
         evaluate_performance_contract(
             self.scene.live_ball_count(),
             self.fps_tracker.snapshot(),
-            self.tick_hz,
+            self.actual_tick_ema_hz.max(self.actual_tick_hz),
             self.frame_time_jitter_ema_ms,
             self.runtime_bridge_telemetry.physics_lag_frames,
         )
@@ -872,7 +872,7 @@ impl TlAppRuntime {
     ) -> PerformanceContractEvaluation {
         let live_balls = self.scene.live_ball_count();
         let fps = self.fps_tracker.snapshot();
-        let tick_hz = self.tick_hz;
+        let tick_hz = self.actual_tick_ema_hz.max(self.actual_tick_hz);
         let jitter_ms = self.frame_time_jitter_ema_ms;
         let lag_frames = self.runtime_bridge_telemetry.physics_lag_frames;
         if let Some(scenario) = scenario {
@@ -1282,10 +1282,11 @@ impl TlAppRuntime {
             }
             "sim.status" => {
                 self.console_feedback(format!(
-                    "sim mode={} paused={} step_budget={} tick_hz={:.1} max_substeps={} manual_substeps={:?}",
+                    "sim mode={} paused={} step_budget={} tick_hz={:.1}/{:.1} max_substeps={} manual_substeps={:?}",
                     self.scene_mode().as_str(),
                     self.simulation_paused,
                     self.simulation_step_budget,
+                    self.actual_tick_ema_hz.max(self.actual_tick_hz),
                     self.tick_hz,
                     self.max_substeps,
                     self.manual_max_substeps
@@ -1651,10 +1652,11 @@ impl TlAppRuntime {
                     self.present_mode,
                 ));
                 self.console_feedback(format!(
-                    "  timing | fps inst={:.1} ema={:.1} avg={:.1} tick={:.0}Hz stddev={:.2}ms jitter={:.2}ms lag={} phys_us={}",
+                    "  timing | fps inst={:.1} ema={:.1} avg={:.1} tick={:.0}/{:.0}Hz stddev={:.2}ms jitter={:.2}ms lag={} phys_us={}",
                     fps.instant_fps,
                     fps.ema_fps,
                     fps.avg_fps,
+                    self.actual_tick_ema_hz.max(self.actual_tick_hz),
                     self.tick_hz,
                     fps.frame_time_stddev_ms,
                     self.frame_time_jitter_ema_ms,

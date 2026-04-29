@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use nalgebra::{Isometry3, Matrix4, Perspective3, Point3, Vector3};
 use tl_core::{
-    FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FrameTextureRecord,
-    RenderStateSnapshot, VulkanBackend, VulkanBackendConfig, VulkanBackendError,
-    VulkanFrameExecutionTelemetry, VulkanMultiGpuFramePlan,
+    FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
+    FrameTextureRecord, RenderStateSnapshot, VulkanBackend, VulkanBackendConfig,
+    VulkanBackendError, VulkanFrameExecutionTelemetry, VulkanMultiGpuFramePlan,
 };
 use wgpu::Backend;
 use winit::window::Window;
@@ -95,6 +95,7 @@ pub struct VulkanSceneRenderer {
     material_snapshot_scratch: Vec<FrameMaterialRecord>,
     texture_snapshot_scratch: Vec<FrameTextureRecord>,
     light_snapshot_scratch: Vec<FrameLightRecord>,
+    primitive_range_scratch: Vec<FramePrimitiveRange>,
     prefer_secondary_gpu: bool,
     camera_eye: [f32; 3],
     camera_target: [f32; 3],
@@ -123,6 +124,7 @@ impl VulkanSceneRenderer {
             material_snapshot_scratch: Vec::with_capacity(scratch_capacity.max(256)),
             texture_snapshot_scratch: Vec::with_capacity(scratch_capacity.max(128)),
             light_snapshot_scratch: Vec::with_capacity(32),
+            primitive_range_scratch: Vec::with_capacity(scratch_capacity.max(64)),
             prefer_secondary_gpu: config.prefer_secondary_gpu,
             camera_eye: [0.0, 12.0, 36.0],
             camera_target: [0.0, 0.0, 0.0],
@@ -179,18 +181,7 @@ impl VulkanSceneRenderer {
 
     /// Project a world-space point to NDC using the cached runtime camera.
     pub fn world_to_ndc(&self, world_pos: [f32; 3]) -> Option<[f32; 3]> {
-        let aspect = (self.surface_width.max(1) as f32) / (self.surface_height.max(1) as f32);
-        let proj = Perspective3::new(aspect.max(0.1), 60f32.to_radians(), 0.1, 500.0);
-        let view = Isometry3::look_at_rh(
-            &Point3::new(self.camera_eye[0], self.camera_eye[1], self.camera_eye[2]),
-            &Point3::new(
-                self.camera_target[0],
-                self.camera_target[1],
-                self.camera_target[2],
-            ),
-            &Vector3::new(0.0, 1.0, 0.0),
-        );
-        let view_proj: Matrix4<f32> = proj.to_homogeneous() * view.to_homogeneous();
+        let view_proj = self.camera_view_proj_matrix();
         let clip =
             view_proj * Point3::new(world_pos[0], world_pos[1], world_pos[2]).to_homogeneous();
         if clip.w <= 0.0 {
@@ -317,12 +308,14 @@ impl VulkanSceneRenderer {
             material_snapshot_scratch,
             texture_snapshot_scratch,
             light_snapshot_scratch,
+            primitive_range_scratch,
         ) = (
             &mut self.backend,
             &mut self.transform_snapshot_scratch,
             &mut self.material_snapshot_scratch,
             &mut self.texture_snapshot_scratch,
             &mut self.light_snapshot_scratch,
+            &mut self.primitive_range_scratch,
         );
         let (snapshot, snapshot_stats): (RenderStateSnapshot<'_>, VulkanSnapshotBuildStats) =
             build_vulkan_render_snapshot(
@@ -333,6 +326,7 @@ impl VulkanSceneRenderer {
                 material_snapshot_scratch,
                 texture_snapshot_scratch,
                 light_snapshot_scratch,
+                primitive_range_scratch,
             );
         let execution = backend.render_n_with_plan(snapshot, &plan)?;
         self.last_upload_stats = WgpuSceneRendererUploadStats {
@@ -363,18 +357,7 @@ impl VulkanSceneRenderer {
     }
 
     fn camera_view_proj(&self) -> [[f32; 4]; 4] {
-        let aspect = (self.surface_width.max(1) as f32) / (self.surface_height.max(1) as f32);
-        let proj = Perspective3::new(aspect.max(0.1), 60f32.to_radians(), 0.1, 500.0);
-        let view = Isometry3::look_at_rh(
-            &Point3::new(self.camera_eye[0], self.camera_eye[1], self.camera_eye[2]),
-            &Point3::new(
-                self.camera_target[0],
-                self.camera_target[1],
-                self.camera_target[2],
-            ),
-            &Vector3::new(0.0, 1.0, 0.0),
-        );
-        let matrix: Matrix4<f32> = proj.to_homogeneous() * view.to_homogeneous();
+        let matrix = self.camera_view_proj_matrix();
         [
             [
                 matrix[(0, 0)],
@@ -402,6 +385,27 @@ impl VulkanSceneRenderer {
             ],
         ]
     }
+
+    fn camera_view_proj_matrix(&self) -> Matrix4<f32> {
+        let aspect = (self.surface_width.max(1) as f32) / (self.surface_height.max(1) as f32);
+        let proj = Perspective3::new(aspect.max(0.1), 60f32.to_radians(), 0.1, 500.0);
+        let view = Isometry3::look_at_rh(
+            &Point3::new(self.camera_eye[0], self.camera_eye[1], self.camera_eye[2]),
+            &Point3::new(
+                self.camera_target[0],
+                self.camera_target[1],
+                self.camera_target[2],
+            ),
+            &Vector3::new(0.0, 1.0, 0.0),
+        );
+        vulkan_clip_correction_matrix() * proj.to_homogeneous() * view.to_homogeneous()
+    }
+}
+
+fn vulkan_clip_correction_matrix() -> Matrix4<f32> {
+    Matrix4::new(
+        1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.0, 1.0,
+    )
 }
 
 fn resolve_rt_status(mode: RayTracingMode, supports_ray_query: bool) -> SceneRayTracingStatus {

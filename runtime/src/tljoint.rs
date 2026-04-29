@@ -19,12 +19,14 @@ use std::path::{Path, PathBuf};
 
 use crate::scene::BounceTankRuntimePatch;
 use crate::tlscript_showcase::{
-    compile_tlscript_showcase, TlscriptOverlayTileLookup, TlscriptShowcaseConfig,
-    TlscriptShowcaseContactSnapshot, TlscriptShowcaseControlInput, TlscriptShowcaseFrameInput,
-    TlscriptShowcaseFrameOutput, TlscriptShowcaseProgram, TlscriptTileLookup,
-    TlscriptGmsMetricSnapshot,
+    compile_tlscript_showcase, TlscriptGmsMetricSnapshot, TlscriptOverlayTileLookup,
+    TlscriptShowcaseConfig, TlscriptShowcaseContactSnapshot, TlscriptShowcaseControlInput,
+    TlscriptShowcaseFrameInput, TlscriptShowcaseFrameOutput, TlscriptShowcaseProgram,
+    TlscriptTileLookup,
 };
-use crate::tlsprite::{compile_tlsprite, TlspriteDiagnosticLevel, TlspriteProgram};
+use crate::tlsprite::{
+    compile_tlsprite_with_extra_roots, TlspriteDiagnosticLevel, TlspriteProgram,
+};
 
 /// Diagnostic level for `.tljoint` parsing/compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,7 +424,11 @@ pub fn compile_tljoint_scene_from_path(
                 continue;
             }
         };
-        let compiled = compile_tlsprite(&source);
+        let mut extra_roots = Vec::new();
+        if let Some(parent) = sprite_path.parent() {
+            extra_roots.push(parent.to_path_buf());
+        }
+        let compiled = compile_tlsprite_with_extra_roots(&source, &extra_roots);
         for diagnostic in &compiled.diagnostics {
             diagnostics.push(TljointDiagnostic {
                 level: match diagnostic.level {

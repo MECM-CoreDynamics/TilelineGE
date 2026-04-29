@@ -118,13 +118,8 @@ pub struct PhysicsComputeDispatchRequest {
 /// Outcome of one compute dispatch request.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PhysicsComputeDispatchResult {
-    Executed {
-        gpu_time_us: u64,
-        workgroups: u32,
-    },
-    Fallback {
-        reason: Cow<'static, str>,
-    },
+    Executed { gpu_time_us: u64, workgroups: u32 },
+    Fallback { reason: Cow<'static, str> },
 }
 
 /// Frame/step-local compute telemetry exported by `PhysicsWorld`.
@@ -170,12 +165,7 @@ impl PhysicsComputeStats {
         self.last_reason = Some(reason.into());
     }
 
-    pub fn note_executed(
-        &mut self,
-        stage: PhysicsComputeStage,
-        gpu_time_us: u64,
-        workgroups: u32,
-    ) {
+    pub fn note_executed(&mut self, stage: PhysicsComputeStage, gpu_time_us: u64, workgroups: u32) {
         self.attempted_dispatches = self.attempted_dispatches.saturating_add(1);
         self.executed_dispatches = self.executed_dispatches.saturating_add(1);
         self.last_stage = Some(stage);

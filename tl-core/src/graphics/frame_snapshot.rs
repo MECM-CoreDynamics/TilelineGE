@@ -47,11 +47,27 @@ pub struct FrameLightRecord {
     pub shadow: [f32; 4],
 }
 
+/// Transparent flag for one primitive draw range inside a frame snapshot.
+pub const FRAME_PRIMITIVE_RANGE_TRANSPARENT: u32 = 1 << 0;
+
+/// CPU-side primitive run metadata for raw backends that issue multiple mesh draws per snapshot.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FramePrimitiveRange {
+    pub primitive_code: u32,
+    pub first_instance: u32,
+    pub instance_count: u32,
+    pub flags: u32,
+}
+
 /// Render-visible snapshot prepared by MPS / scene-build and consumed by render backends.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderStateSnapshot<'a> {
     pub frame_id: u64,
     pub camera_view_proj: [[f32; 4]; 4],
+    pub opaque_instance_count: u32,
+    pub transparent_instance_count: u32,
+    pub primitive_ranges: &'a [FramePrimitiveRange],
     pub transforms: &'a [FrameInstanceTransform],
     pub materials: &'a [FrameMaterialRecord],
     pub textures: &'a [FrameTextureRecord],

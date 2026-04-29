@@ -20,6 +20,7 @@ pub mod handle;
 pub mod joint;
 pub mod narrowphase;
 pub mod parallel;
+pub mod render;
 pub mod sleep;
 pub mod snapshot;
 pub mod solver;
@@ -52,6 +53,7 @@ pub use joint::{
     JointConstraintSolver, JointKind, JointSolverConfig, JointSolverStats,
 };
 pub use narrowphase::{NarrowphaseConfig, NarrowphasePipeline, NarrowphaseStats};
+pub use render::{RenderTransformSample, RenderTransformTarget};
 pub use sleep::{SleepConfig, SleepIslandManager, SleepStats};
 pub use snapshot::{
     BodyStateFrame, InterpolatedBodyPose, PhysicsInterpolationBuffer, PhysicsSnapshot,

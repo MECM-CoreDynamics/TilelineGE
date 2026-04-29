@@ -154,6 +154,40 @@ public-facing places:
 That line fits the repo better than simply calling it “a game engine,” because it highlights the
 real differentiator instead of underselling the architecture.
 
+## Licensing Model
+
+Tileline is currently licensed under `MPL-2.0`, and the most realistic long-term model for this
+project is **open core + proprietary larger works**, not "close the engine later."
+
+### What Should Stay Open
+
+- `mps/`, `paradoxpe/`, `nps/`, and `tl-core/`
+- core runtime/content contracts
+- format specifications and baseline loaders:
+  - `.tlscript`
+  - `.tlsprite`
+  - `.tljoint`
+  - `.tlpfile`
+  - `.pak`
+
+These pieces are the trust layer of Tileline. They are where external validation, performance
+work, and architectural credibility matter most.
+
+### What Can Be Commercial
+
+- studio/editor tooling
+- premium renderer/tooling packs
+- hosted telemetry/build/deployment services
+- enterprise/platform integration layers
+- premium templates, samples, and content bundles
+
+The practical rule is:
+
+> keep the runtime contracts open, and monetize advanced tooling, hosted services, and premium
+> workflow layers around them.
+
+For the fuller policy, see [LICENSE-STRATEGY.md](LICENSE-STRATEGY.md).
+
 ## Repository Layout
 
 ```text
@@ -256,6 +290,7 @@ Start here:
 - `docs/runtime-tlpfile-gui.md`: `.tlpfile` runtime/project shell
 - `docs/paradoxpe-foundation.md`: physics architecture notes
 - `docs/nps-protocol.md`: networking/runtime transport notes
+- `LICENSE-STRATEGY.md`: open-core / proprietary-layer policy direction
 - `MPS-BENCHMARK.md`: benchmark notes and comparative performance thinking
 
 ## Roadmap Direction

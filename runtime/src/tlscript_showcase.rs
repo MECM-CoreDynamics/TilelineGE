@@ -850,9 +850,10 @@ impl<'src> TlscriptShowcaseProgram<'src> {
             DemoValue::Float(gms_metrics.ai_ml_drop_rate as f64),
         );
         if let Some(mode) = gms_metrics.mode {
-            state
-                .vars
-                .insert("gms_mode".to_string(), DemoValue::Str(mode.as_str().to_string()));
+            state.vars.insert(
+                "gms_mode".to_string(),
+                DemoValue::Str(mode.as_str().to_string()),
+            );
         }
         if let Some(target_fps) = gms_metrics.target_fps {
             state.vars.insert(
@@ -3249,7 +3250,10 @@ mod tests {
         assert_eq!(out.gms_scaler.target_fps, Some(72));
         assert_eq!(out.gms_scaler.physics_budget_pct, Some(45));
         assert_eq!(out.gms_scaler.ai_ml_budget_pct, Some(12));
-        assert_eq!(out.gms_scaler.guardrail, Some(GmsGuardrailProfile::Aggressive));
+        assert_eq!(
+            out.gms_scaler.guardrail,
+            Some(GmsGuardrailProfile::Aggressive)
+        );
     }
 
     #[test]

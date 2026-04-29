@@ -15,6 +15,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use tl_core::write_world_render_transforms_to_dispatcher_storage;
 
 /// Completion handle for an async physics step.
 ///
@@ -74,7 +75,8 @@ impl PhysicsMpsRunner {
                 .expect("failed to create bare-metal MPS task dispatcher"),
         );
         let transforms = dispatcher.transforms();
-        world.write_render_transforms_to_dispatcher_storage(
+        write_world_render_transforms_to_dispatcher_storage(
+            &world,
             transforms.as_ref(),
             transforms.render_read_slot(),
         );
@@ -104,7 +106,8 @@ impl PhysicsMpsRunner {
         let mut guard = self.world.lock().unwrap();
         *guard = new_world;
         let transforms = self.dispatcher.transforms();
-        guard.write_render_transforms_to_dispatcher_storage(
+        write_world_render_transforms_to_dispatcher_storage(
+            &guard,
             transforms.as_ref(),
             transforms.render_read_slot(),
         );
@@ -173,7 +176,8 @@ impl PhysicsMpsRunner {
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut world = integration_world.lock().unwrap();
                 let completed_substeps = world.step_with_execution_plan(plan);
-                world.write_render_transforms_to_dispatcher_storage(
+                write_world_render_transforms_to_dispatcher_storage(
+                    &world,
                     ctx.transforms.as_ref(),
                     ctx.physics_write_slot,
                 );

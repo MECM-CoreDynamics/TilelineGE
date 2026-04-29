@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 
 use tl_core::{
-    FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FrameTextureRecord,
-    RenderStateSnapshot,
+    FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
+    FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 
 use crate::draw_path::{DrawBatch3d, DrawLane, RuntimeDrawFrame};
@@ -26,6 +26,7 @@ pub struct VulkanSnapshotBuildStats {
     pub opaque_instances: usize,
     pub transparent_instances: usize,
     pub mesh_instances: usize,
+    pub primitive_ranges: usize,
     pub material_records: usize,
     pub texture_records: usize,
     pub light_records: usize,
@@ -41,21 +42,25 @@ pub fn build_vulkan_render_snapshot<'a>(
     material_scratch: &'a mut Vec<FrameMaterialRecord>,
     texture_scratch: &'a mut Vec<FrameTextureRecord>,
     light_scratch: &'a mut Vec<FrameLightRecord>,
+    primitive_range_scratch: &'a mut Vec<FramePrimitiveRange>,
 ) -> (RenderStateSnapshot<'a>, VulkanSnapshotBuildStats) {
     transform_scratch.clear();
     material_scratch.clear();
     texture_scratch.clear();
     light_scratch.clear();
+    primitive_range_scratch.clear();
     transform_scratch.reserve(draw.stats.opaque_instances + draw.stats.transparent_instances);
     material_scratch.reserve(draw.stats.opaque_batches + draw.stats.transparent_batches);
     texture_scratch.reserve(draw.stats.opaque_batches + draw.stats.transparent_batches);
     light_scratch.reserve(draw.stats.light_instances);
+    primitive_range_scratch.reserve(draw.stats.opaque_batches + draw.stats.transparent_batches);
 
     let mut stats = VulkanSnapshotBuildStats::default();
     let mut material_map = BTreeMap::new();
     let mut texture_map = BTreeMap::new();
 
     for batch in &draw.opaque_batches {
+        let first_instance = transform_scratch.len();
         append_batch_instances(
             batch,
             transform_scratch,
@@ -65,8 +70,18 @@ pub fn build_vulkan_render_snapshot<'a>(
             &mut texture_map,
             &mut stats,
         );
+        let count = transform_scratch.len().saturating_sub(first_instance);
+        if count > 0 {
+            primitive_range_scratch.push(FramePrimitiveRange {
+                primitive_code: batch.key.primitive_code as u32,
+                first_instance: first_instance as u32,
+                instance_count: count as u32,
+                flags: 0,
+            });
+        }
     }
     for batch in &draw.transparent_batches {
+        let first_instance = transform_scratch.len();
         append_batch_instances(
             batch,
             transform_scratch,
@@ -76,12 +91,22 @@ pub fn build_vulkan_render_snapshot<'a>(
             &mut texture_map,
             &mut stats,
         );
+        let count = transform_scratch.len().saturating_sub(first_instance);
+        if count > 0 {
+            primitive_range_scratch.push(FramePrimitiveRange {
+                primitive_code: batch.key.primitive_code as u32,
+                first_instance: first_instance as u32,
+                instance_count: count as u32,
+                flags: FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+            });
+        }
     }
     for light in &draw.lights {
         light_scratch.push(pack_light(light));
     }
 
     stats.total_instances = transform_scratch.len();
+    stats.primitive_ranges = primitive_range_scratch.len();
     stats.material_records = material_scratch.len();
     stats.texture_records = texture_scratch.len();
     stats.light_records = light_scratch.len();
@@ -89,6 +114,9 @@ pub fn build_vulkan_render_snapshot<'a>(
         RenderStateSnapshot {
             frame_id,
             camera_view_proj,
+            opaque_instance_count: stats.opaque_instances as u32,
+            transparent_instance_count: stats.transparent_instances as u32,
+            primitive_ranges: primitive_range_scratch.as_slice(),
             transforms: transform_scratch.as_slice(),
             materials: material_scratch.as_slice(),
             textures: texture_scratch.as_slice(),
@@ -294,6 +322,7 @@ mod tests {
         let mut material_scratch = Vec::new();
         let mut texture_scratch = Vec::new();
         let mut light_scratch = Vec::new();
+        let mut primitive_range_scratch = Vec::new();
         let (snapshot, stats) = build_vulkan_render_snapshot(
             42,
             [[1.0, 0.0, 0.0, 0.0]; 4],
@@ -302,9 +331,12 @@ mod tests {
             &mut material_scratch,
             &mut texture_scratch,
             &mut light_scratch,
+            &mut primitive_range_scratch,
         );
         assert_eq!(snapshot.frame_id, 42);
         assert_eq!(snapshot.camera_view_proj[0], [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(snapshot.opaque_instance_count, 1);
+        assert_eq!(snapshot.transparent_instance_count, 1);
         assert_eq!(snapshot.transforms.len(), 2);
         assert_eq!(snapshot.materials.len(), 1);
         assert_eq!(snapshot.textures.len(), 1);
@@ -313,6 +345,7 @@ mod tests {
         assert_eq!(stats.opaque_instances, 1);
         assert_eq!(stats.transparent_instances, 1);
         assert_eq!(stats.mesh_instances, 1);
+        assert_eq!(stats.primitive_ranges, 2);
         assert_eq!(stats.material_records, 1);
         assert_eq!(stats.texture_records, 1);
         assert_eq!(stats.light_records, 0);
@@ -323,6 +356,18 @@ mod tests {
         assert_eq!(snapshot.textures[0].texture_slot, 2);
         assert_ne!(snapshot.transforms[1].flags & FLAG_TRANSPARENT, 0);
         assert_ne!(snapshot.transforms[1].flags & FLAG_MESH, 0);
+        assert_eq!(snapshot.primitive_ranges.len(), 2);
+        assert_eq!(snapshot.primitive_ranges[0].primitive_code, 0);
+        assert_eq!(snapshot.primitive_ranges[0].first_instance, 0);
+        assert_eq!(snapshot.primitive_ranges[0].instance_count, 1);
+        assert_eq!(snapshot.primitive_ranges[0].flags, 0);
+        assert_eq!(snapshot.primitive_ranges[1].primitive_code, 3);
+        assert_eq!(snapshot.primitive_ranges[1].first_instance, 1);
+        assert_eq!(snapshot.primitive_ranges[1].instance_count, 1);
+        assert_eq!(
+            snapshot.primitive_ranges[1].flags,
+            FRAME_PRIMITIVE_RANGE_TRANSPARENT
+        );
     }
 
     #[test]
@@ -374,6 +419,7 @@ mod tests {
         let mut material_scratch = Vec::new();
         let mut texture_scratch = Vec::new();
         let mut light_scratch = Vec::new();
+        let mut primitive_range_scratch = Vec::new();
         let (snapshot, stats) = build_vulkan_render_snapshot(
             7,
             [[1.0, 0.0, 0.0, 0.0]; 4],
@@ -382,10 +428,15 @@ mod tests {
             &mut material_scratch,
             &mut texture_scratch,
             &mut light_scratch,
+            &mut primitive_range_scratch,
         );
 
         assert_eq!(stats.material_records, 2);
         assert_eq!(stats.texture_records, 2);
+        assert_eq!(stats.primitive_ranges, 1);
+        assert_eq!(snapshot.opaque_instance_count, 2);
+        assert_eq!(snapshot.transparent_instance_count, 0);
+        assert_eq!(snapshot.primitive_ranges.len(), 1);
         assert_eq!(snapshot.materials.len(), 2);
         assert_eq!(snapshot.textures.len(), 2);
         assert_eq!(snapshot.transforms[0].material_index, 0);

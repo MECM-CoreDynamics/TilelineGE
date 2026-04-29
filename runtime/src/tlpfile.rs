@@ -392,8 +392,7 @@ pub fn parse_tlpfile(source: &str) -> TlpfileParseOutcome {
                     Ok(_) => diagnostics.push(TlpfileDiagnostic {
                         level: TlpfileDiagnosticLevel::Error,
                         line: line_no,
-                        message: "gms_scaler.min_physics_budget_pct must be in 0..=100"
-                            .to_string(),
+                        message: "gms_scaler.min_physics_budget_pct must be in 0..=100".to_string(),
                     }),
                     Err(_) => diagnostics.push(TlpfileDiagnostic {
                         level: TlpfileDiagnosticLevel::Error,

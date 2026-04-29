@@ -6,10 +6,6 @@
 
 use std::time::{Duration, Instant};
 
-use mps::{
-    DispatcherDoubleBufferedTransforms, DispatcherTransformSample, DoubleBufferedTransformStorage,
-    TransformSample,
-};
 use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::abi::ParadoxScriptHostAbi;
@@ -32,6 +28,7 @@ use crate::joint::{
 };
 use crate::narrowphase::{NarrowphaseConfig, NarrowphasePipeline};
 use crate::parallel::ParallelExecutionMode;
+use crate::render::{RenderTransformSample, RenderTransformTarget};
 use crate::sleep::{SleepConfig, SleepIslandManager};
 use crate::snapshot::{BodyStateFrame, PhysicsInterpolationBuffer, PhysicsSnapshot};
 use crate::solver::{ContactSolver, ContactSolverConfig};
@@ -1063,46 +1060,17 @@ impl PhysicsWorld {
         }
     }
 
-    /// Export the latest body transforms into MPS-owned double-buffered storage.
-    pub fn write_render_transforms_to_storage(
-        &self,
-        storage: &DoubleBufferedTransformStorage,
-        slot: usize,
-    ) -> usize {
+    /// Export the latest body transforms into a render-visible target.
+    pub fn write_render_transforms<T: RenderTransformTarget>(&self, target: &T) -> usize {
         let read = self.bodies.read_domain();
-        let body_len = read.handles.len().min(storage.capacity());
+        let body_len = read.handles.len().min(target.capacity());
         for index in 0..body_len {
             let position = read.positions[index];
             let rotation = read.rotations[index];
             let q = rotation.quaternion();
-            storage.write_transform_to_slot(
-                slot,
+            target.write_transform(
                 index,
-                TransformSample {
-                    position: [position.x, position.y, position.z],
-                    rotation: [q.i, q.j, q.k, q.w],
-                },
-            );
-        }
-        body_len
-    }
-
-    /// Export the latest body transforms into the bare-metal dispatcher buffers.
-    pub fn write_render_transforms_to_dispatcher_storage(
-        &self,
-        storage: &DispatcherDoubleBufferedTransforms,
-        slot: usize,
-    ) -> usize {
-        let read = self.bodies.read_domain();
-        let body_len = read.handles.len().min(storage.capacity());
-        for index in 0..body_len {
-            let position = read.positions[index];
-            let rotation = read.rotations[index];
-            let q = rotation.quaternion();
-            storage.write_transform_to_slot(
-                slot,
-                index,
-                DispatcherTransformSample {
+                RenderTransformSample {
                     position: [position.x, position.y, position.z],
                     rotation: [q.i, q.j, q.k, q.w],
                 },

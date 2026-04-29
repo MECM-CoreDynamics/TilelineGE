@@ -19,6 +19,7 @@ pub const MODULE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod core;
 pub mod graphics;
+pub mod physics;
 pub mod tlscript;
 
 pub use core::bridge::{
@@ -32,8 +33,8 @@ pub use core::mgs_bridge::{
 };
 pub use gms::{AdaptiveBufferDecision, AdaptiveFrameTelemetry};
 pub use graphics::frame_snapshot::{
-    FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FrameTextureRecord,
-    RenderStateSnapshot,
+    FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
+    FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 #[cfg(target_os = "macos")]
 pub use graphics::metal_backend::{
@@ -62,6 +63,11 @@ pub use graphics::vulkan_backend::{
 pub use graphics::vulkan_physics_compute::{
     VulkanPhysicsComputeBackend, VulkanPhysicsComputeCapabilities, VulkanPhysicsComputeConfig,
     VulkanPhysicsDispatchPlan,
+};
+pub use physics::{
+    write_world_render_transforms_to_dispatcher_storage,
+    write_world_render_transforms_to_thread_pool_storage, MpsDispatcherRenderTransformTarget,
+    MpsThreadPoolRenderTransformTarget,
 };
 pub use tlscript::{
     annotate_typed_ir_with_parallel_hooks, lower_to_typed_ir, lower_to_typed_ir_with_config,

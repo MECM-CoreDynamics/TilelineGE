@@ -30,8 +30,8 @@ use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::Window;
 
 use crate::graphics::frame_snapshot::{
-    FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FrameTextureRecord,
-    RenderStateSnapshot,
+    FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
+    FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 use crate::graphics::multigpu::sync::{GpuQueueLane, MultiGpuFrameSyncConfig, SyncBackendHint};
 
@@ -226,14 +226,17 @@ struct SpirvShaderArtifact {
 }
 
 /// Snapshot metadata exposed for debugging / telemetry.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct VulkanSnapshotSlotState {
     pub frame_id: u64,
     pub instance_count: u32,
+    pub opaque_instance_count: u32,
+    pub transparent_instance_count: u32,
     pub material_count: u32,
     pub texture_count: u32,
     pub light_count: u32,
     pub byte_len: usize,
+    pub primitive_ranges: Vec<FramePrimitiveRange>,
 }
 
 /// Submit/present telemetry for one recorded frame.
@@ -340,11 +343,19 @@ struct SwapchainState {
     loader: swapchain::Device,
     swapchain: vk::SwapchainKHR,
     format: vk::Format,
+    depth_format: vk::Format,
     extent: vk::Extent2D,
     present_mode: vk::PresentModeKHR,
     _images: Vec<vk::Image>,
     image_views: Vec<vk::ImageView>,
+    depth_attachments: Vec<DepthAttachment>,
     framebuffers: Vec<vk::Framebuffer>,
+}
+
+struct DepthAttachment {
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    view: vk::ImageView,
 }
 
 struct PersistentlyMappedBuffer {
@@ -416,10 +427,14 @@ struct ScenePipelineResources {
     descriptor_set_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     pipeline_layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
+    opaque_pipeline: vk::Pipeline,
+    transparent_pipeline: vk::Pipeline,
     vertex_buffer: PersistentlyMappedBuffer,
     index_buffer: PersistentlyMappedBuffer,
     index_count: u32,
+    sphere_vertex_buffer: PersistentlyMappedBuffer,
+    sphere_index_buffer: PersistentlyMappedBuffer,
+    sphere_index_count: u32,
     texture_array: SampledTextureArrayResources,
 }
 
@@ -522,8 +537,17 @@ impl VulkanBackend {
                 config.present_mode,
             )?
         };
-        let render_pass = unsafe { create_render_pass(&device, swapchain.format)? };
-        unsafe { create_framebuffers(&device, render_pass, &mut swapchain)? };
+        let render_pass =
+            unsafe { create_render_pass(&device, swapchain.format, swapchain.depth_format)? };
+        unsafe {
+            create_framebuffers(
+                &instance,
+                &device,
+                physical_device,
+                render_pass,
+                &mut swapchain,
+            )?
+        };
         let scene_pipeline = unsafe {
             create_scene_pipeline_resources(
                 &instance,
@@ -667,16 +691,30 @@ impl VulkanBackend {
                 new_size,
                 self.config.present_mode,
             )?;
-            create_framebuffers(&self.device, self.render_pass, &mut self.swapchain)?;
+            create_framebuffers(
+                &self.instance,
+                &self.device,
+                self.physical_device,
+                self.render_pass,
+                &mut self.swapchain,
+            )?;
             self.device
-                .destroy_pipeline(self.scene_pipeline.pipeline, None);
+                .destroy_pipeline(self.scene_pipeline.opaque_pipeline, None);
             self.device
-                .destroy_pipeline_layout(self.scene_pipeline.pipeline_layout, None);
-            self.scene_pipeline.pipeline = create_scene_pipeline(
+                .destroy_pipeline(self.scene_pipeline.transparent_pipeline, None);
+            self.scene_pipeline.opaque_pipeline = create_scene_pipeline(
                 &self.device,
                 self.render_pass,
                 self.swapchain.extent,
                 self.scene_pipeline.pipeline_layout,
+                false,
+            )?;
+            self.scene_pipeline.transparent_pipeline = create_scene_pipeline(
+                &self.device,
+                self.render_pass,
+                self.swapchain.extent,
+                self.scene_pipeline.pipeline_layout,
+                true,
             )?;
         }
 
@@ -780,12 +818,15 @@ impl VulkanBackend {
         slot.snapshot_slot.last_state = VulkanSnapshotSlotState {
             frame_id: snapshot.frame_id,
             instance_count: snapshot.transforms.len() as u32,
+            opaque_instance_count: snapshot.opaque_instance_count,
+            transparent_instance_count: snapshot.transparent_instance_count,
             material_count: snapshot.materials.len() as u32,
             texture_count: snapshot.textures.len() as u32,
             light_count: snapshot.lights.len() as u32,
             byte_len,
+            primitive_ranges: snapshot.primitive_ranges.to_vec(),
         };
-        Ok(slot.snapshot_slot.last_state)
+        Ok(slot.snapshot_slot.last_state.clone())
     }
 
     /// Record and submit one `Render N` frame.
@@ -932,6 +973,8 @@ impl Drop for VulkanBackend {
 
             destroy_mapped_buffer_ref(&self.device, &self.scene_pipeline.vertex_buffer);
             destroy_mapped_buffer_ref(&self.device, &self.scene_pipeline.index_buffer);
+            destroy_mapped_buffer_ref(&self.device, &self.scene_pipeline.sphere_vertex_buffer);
+            destroy_mapped_buffer_ref(&self.device, &self.scene_pipeline.sphere_index_buffer);
             self.device
                 .destroy_sampler(self.scene_pipeline.texture_array.sampler, None);
             self.device
@@ -941,7 +984,9 @@ impl Drop for VulkanBackend {
             self.device
                 .free_memory(self.scene_pipeline.texture_array.image_memory, None);
             self.device
-                .destroy_pipeline(self.scene_pipeline.pipeline, None);
+                .destroy_pipeline(self.scene_pipeline.opaque_pipeline, None);
+            self.device
+                .destroy_pipeline(self.scene_pipeline.transparent_pipeline, None);
             self.device
                 .destroy_pipeline_layout(self.scene_pipeline.pipeline_layout, None);
             self.device
@@ -1350,6 +1395,7 @@ unsafe fn create_swapchain_state(
     let present_modes =
         surface_loader.get_physical_device_surface_present_modes(physical_device, surface)?;
     let format = choose_surface_format(&formats);
+    let depth_format = choose_depth_format(instance, physical_device)?;
     let extent = choose_extent(capabilities, window_size);
     let present_mode = choose_present_mode(&present_modes, present_preference);
     let mut image_count = capabilities.min_image_count.saturating_add(1);
@@ -1410,10 +1456,12 @@ unsafe fn create_swapchain_state(
         loader,
         swapchain,
         format: format.format,
+        depth_format,
         extent,
         present_mode,
         _images: images,
         image_views,
+        depth_attachments: Vec::new(),
         framebuffers: Vec::new(),
     })
 }
@@ -1427,6 +1475,30 @@ fn choose_surface_format(formats: &[vk::SurfaceFormatKHR]) -> vk::SurfaceFormatK
                 && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
         })
         .unwrap_or(formats[0])
+}
+
+fn choose_depth_format(
+    instance: &Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Result<vk::Format, VulkanBackendError> {
+    let candidates = [
+        vk::Format::D32_SFLOAT,
+        vk::Format::D32_SFLOAT_S8_UINT,
+        vk::Format::D24_UNORM_S8_UINT,
+    ];
+    for candidate in candidates {
+        let properties =
+            unsafe { instance.get_physical_device_format_properties(physical_device, candidate) };
+        if properties
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
+        {
+            return Ok(candidate);
+        }
+    }
+    Err(VulkanBackendError::InvalidConfig(
+        "no supported Vulkan depth format found",
+    ))
 }
 
 fn choose_present_mode(
@@ -1478,6 +1550,7 @@ fn choose_extent(
 unsafe fn create_render_pass(
     device: &Device,
     color_format: vk::Format,
+    depth_format: vk::Format,
 ) -> Result<vk::RenderPass, VulkanBackendError> {
     let color_attachment = vk::AttachmentDescription::default()
         .format(color_format)
@@ -1486,20 +1559,42 @@ unsafe fn create_render_pass(
         .store_op(vk::AttachmentStoreOp::STORE)
         .initial_layout(vk::ImageLayout::UNDEFINED)
         .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
+    let depth_attachment = vk::AttachmentDescription::default()
+        .format(depth_format)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .load_op(vk::AttachmentLoadOp::CLEAR)
+        .store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     let color_ref = vk::AttachmentReference::default()
         .attachment(0)
         .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+    let depth_ref = vk::AttachmentReference::default()
+        .attachment(1)
+        .layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     let color_refs = [color_ref];
     let subpass = vk::SubpassDescription::default()
         .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(&color_refs);
+        .color_attachments(&color_refs)
+        .depth_stencil_attachment(&depth_ref);
     let dependency = vk::SubpassDependency::default()
         .src_subpass(vk::SUBPASS_EXTERNAL)
         .dst_subpass(0)
-        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
-    let attachments = [color_attachment];
+        .src_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        )
+        .dst_stage_mask(
+            vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
+                | vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+        )
+        .dst_access_mask(
+            vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        );
+    let attachments = [color_attachment, depth_attachment];
     let subpasses = [subpass];
     let dependencies = [dependency];
     let render_pass_info = vk::RenderPassCreateInfo::default()
@@ -1510,15 +1605,30 @@ unsafe fn create_render_pass(
 }
 
 unsafe fn create_framebuffers(
+    instance: &Instance,
     device: &Device,
+    physical_device: vk::PhysicalDevice,
     render_pass: vk::RenderPass,
     swapchain: &mut SwapchainState,
 ) -> Result<(), VulkanBackendError> {
+    destroy_depth_attachments(device, swapchain);
+    swapchain.depth_attachments = (0..swapchain.image_views.len())
+        .map(|_| {
+            create_depth_attachment(
+                instance,
+                device,
+                physical_device,
+                swapchain.depth_format,
+                swapchain.extent,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     swapchain.framebuffers = swapchain
         .image_views
         .iter()
-        .map(|image_view| {
-            let attachments = [*image_view];
+        .zip(swapchain.depth_attachments.iter())
+        .map(|(image_view, depth)| {
+            let attachments = [*image_view, depth.view];
             let framebuffer_info = vk::FramebufferCreateInfo::default()
                 .render_pass(render_pass)
                 .attachments(&attachments)
@@ -1529,6 +1639,72 @@ unsafe fn create_framebuffers(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(())
+}
+
+unsafe fn create_depth_attachment(
+    instance: &Instance,
+    device: &Device,
+    physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+    extent: vk::Extent2D,
+) -> Result<DepthAttachment, VulkanBackendError> {
+    let image_info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(format)
+        .extent(vk::Extent3D {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+        })
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .tiling(vk::ImageTiling::OPTIMAL)
+        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .initial_layout(vk::ImageLayout::UNDEFINED);
+    let image = device.create_image(&image_info, None)?;
+    let memory_requirements = device.get_image_memory_requirements(image);
+    let memory_type_index = find_memory_type(
+        instance,
+        physical_device,
+        memory_requirements.memory_type_bits,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )
+    .ok_or(VulkanBackendError::InvalidConfig(
+        "no compatible Vulkan memory type for depth attachment",
+    ))?;
+    let alloc_info = vk::MemoryAllocateInfo::default()
+        .allocation_size(memory_requirements.size)
+        .memory_type_index(memory_type_index);
+    let memory = device.allocate_memory(&alloc_info, None)?;
+    device.bind_image_memory(image, memory, 0)?;
+    let aspect_mask = if matches!(
+        format,
+        vk::Format::D32_SFLOAT_S8_UINT | vk::Format::D24_UNORM_S8_UINT
+    ) {
+        vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL
+    } else {
+        vk::ImageAspectFlags::DEPTH
+    };
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .subresource_range(
+            vk::ImageSubresourceRange::default()
+                .aspect_mask(aspect_mask)
+                .base_mip_level(0)
+                .level_count(1)
+                .base_array_layer(0)
+                .layer_count(1),
+        );
+    let view = device.create_image_view(&view_info, None)?;
+    Ok(DepthAttachment {
+        image,
+        memory,
+        view,
+    })
 }
 
 unsafe fn create_frame_resources(
@@ -1703,7 +1879,7 @@ unsafe fn create_snapshot_slot(
         device,
         physical_device,
         byte_len as vk::DeviceSize,
-        vk::BufferUsageFlags::STORAGE_BUFFER,
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::VERTEX_BUFFER,
         vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
     )?;
     Ok(SnapshotSlot {
@@ -1791,6 +1967,8 @@ unsafe fn create_scene_pipeline_resources(
 
     let cube_vertices = unit_cube_vertices();
     let cube_indices = unit_cube_indices();
+    let sphere_vertices = unit_icosa_sphere_vertices();
+    let sphere_indices = unit_icosa_sphere_indices();
     let vertex_buffer = create_static_buffer(
         instance,
         device,
@@ -1805,6 +1983,20 @@ unsafe fn create_scene_pipeline_resources(
         slice_as_bytes(cube_indices.as_slice()),
         vk::BufferUsageFlags::INDEX_BUFFER,
     )?;
+    let sphere_vertex_buffer = create_static_buffer(
+        instance,
+        device,
+        physical_device,
+        slice_as_bytes(sphere_vertices.as_slice()),
+        vk::BufferUsageFlags::VERTEX_BUFFER,
+    )?;
+    let sphere_index_buffer = create_static_buffer(
+        instance,
+        device,
+        physical_device,
+        slice_as_bytes(sphere_indices.as_slice()),
+        vk::BufferUsageFlags::INDEX_BUFFER,
+    )?;
     let texture_array = create_dummy_texture_array_resources(
         instance,
         device,
@@ -1812,16 +2004,23 @@ unsafe fn create_scene_pipeline_resources(
         graphics_queue_family_index,
         graphics_queue,
     )?;
-    let pipeline = create_scene_pipeline(device, render_pass, extent, pipeline_layout)?;
+    let opaque_pipeline =
+        create_scene_pipeline(device, render_pass, extent, pipeline_layout, false)?;
+    let transparent_pipeline =
+        create_scene_pipeline(device, render_pass, extent, pipeline_layout, true)?;
 
     Ok(ScenePipelineResources {
         descriptor_set_layout,
         descriptor_pool,
         pipeline_layout,
-        pipeline,
+        opaque_pipeline,
+        transparent_pipeline,
         vertex_buffer,
         index_buffer,
         index_count: cube_indices.len() as u32,
+        sphere_vertex_buffer,
+        sphere_index_buffer,
+        sphere_index_count: sphere_indices.len() as u32,
         texture_array,
     })
 }
@@ -1909,6 +2108,7 @@ unsafe fn create_scene_pipeline(
     render_pass: vk::RenderPass,
     extent: vk::Extent2D,
     pipeline_layout: vk::PipelineLayout,
+    transparent: bool,
 ) -> Result<vk::Pipeline, VulkanBackendError> {
     let [vertex_artifact, fragment_artifact] = build_scene_shader_spirv_artifacts()?;
     let vertex_module = create_shader_module(device, &vertex_artifact.words)?;
@@ -2018,9 +2218,27 @@ unsafe fn create_scene_pipeline(
         .line_width(1.0);
     let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    let color_blend_attachment = [vk::PipelineColorBlendAttachmentState::default()
-        .blend_enable(false)
-        .color_write_mask(vk::ColorComponentFlags::RGBA)];
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(true)
+        .depth_write_enable(!transparent)
+        .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+        .depth_bounds_test_enable(false)
+        .stencil_test_enable(false);
+    let color_blend_attachment = if transparent {
+        [vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(true)
+            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE)
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD)
+            .color_write_mask(vk::ColorComponentFlags::RGBA)]
+    } else {
+        [vk::PipelineColorBlendAttachmentState::default()
+            .blend_enable(false)
+            .color_write_mask(vk::ColorComponentFlags::RGBA)]
+    };
     let color_blending =
         vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachment);
     let pipeline_info = [vk::GraphicsPipelineCreateInfo::default()
@@ -2030,6 +2248,7 @@ unsafe fn create_scene_pipeline(
         .viewport_state(&viewport_state)
         .rasterization_state(&rasterizer)
         .multisample_state(&multisampling)
+        .depth_stencil_state(&depth_stencil)
         .color_blend_state(&color_blending)
         .layout(pipeline_layout)
         .render_pass(render_pass)
@@ -2289,11 +2508,19 @@ unsafe fn record_frame_commands(
     let begin_info = vk::CommandBufferBeginInfo::default();
     device.begin_command_buffer(command_buffer, &begin_info)?;
 
-    let clear_values = [vk::ClearValue {
-        color: vk::ClearColorValue {
-            float32: [0.07, 0.09, 0.12, 1.0],
+    let clear_values = [
+        vk::ClearValue {
+            color: vk::ClearColorValue {
+                float32: [0.07, 0.09, 0.12, 1.0],
+            },
         },
-    }];
+        vk::ClearValue {
+            depth_stencil: vk::ClearDepthStencilValue {
+                depth: 1.0,
+                stencil: 0,
+            },
+        },
+    ];
     let render_area = vk::Rect2D::default().extent(extent);
     let render_pass_info = vk::RenderPassBeginInfo::default()
         .render_pass(render_pass)
@@ -2311,11 +2538,6 @@ unsafe fn record_frame_commands(
         frame.snapshot_slot.mapped.buffer,
     ];
     let vertex_offsets = [0, frame.snapshot_slot.transforms_offset as vk::DeviceSize];
-    device.cmd_bind_pipeline(
-        command_buffer,
-        vk::PipelineBindPoint::GRAPHICS,
-        scene_pipeline.pipeline,
-    );
     device.cmd_bind_descriptor_sets(
         command_buffer,
         vk::PipelineBindPoint::GRAPHICS,
@@ -2344,20 +2566,74 @@ unsafe fn record_frame_commands(
         0,
         vk::IndexType::UINT16,
     );
-    if snapshot_state.instance_count > 0 {
+    let mut last_pipeline = vk::Pipeline::null();
+    let mut last_vertex_buffer = vk::Buffer::null();
+    let mut last_index_buffer = vk::Buffer::null();
+    for range in &snapshot_state.primitive_ranges {
+        if range.instance_count == 0 {
+            continue;
+        }
+        let transparent = range.flags & FRAME_PRIMITIVE_RANGE_TRANSPARENT != 0;
+        let pipeline = if transparent {
+            scene_pipeline.transparent_pipeline
+        } else {
+            scene_pipeline.opaque_pipeline
+        };
+        if pipeline != last_pipeline {
+            device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
+            last_pipeline = pipeline;
+        }
+        let (vertex_buffer, index_buffer, index_count) =
+            mesh_resources_for_primitive(scene_pipeline, range.primitive_code);
+        if vertex_buffer.buffer != last_vertex_buffer {
+            device.cmd_bind_vertex_buffers(
+                command_buffer,
+                0,
+                &[vertex_buffer.buffer, frame.snapshot_slot.mapped.buffer],
+                &vertex_offsets,
+            );
+            last_vertex_buffer = vertex_buffer.buffer;
+        }
+        if index_buffer.buffer != last_index_buffer {
+            device.cmd_bind_index_buffer(
+                command_buffer,
+                index_buffer.buffer,
+                0,
+                vk::IndexType::UINT16,
+            );
+            last_index_buffer = index_buffer.buffer;
+        }
         device.cmd_draw_indexed(
             command_buffer,
-            scene_pipeline.index_count,
-            snapshot_state.instance_count,
+            index_count,
+            range.instance_count,
             0,
             0,
-            0,
+            range.first_instance,
         );
     }
 
     device.cmd_end_render_pass(command_buffer);
     device.end_command_buffer(command_buffer)?;
     Ok(())
+}
+
+fn mesh_resources_for_primitive(
+    scene_pipeline: &ScenePipelineResources,
+    primitive_code: u32,
+) -> (&PersistentlyMappedBuffer, &PersistentlyMappedBuffer, u32) {
+    match primitive_code {
+        0 => (
+            &scene_pipeline.sphere_vertex_buffer,
+            &scene_pipeline.sphere_index_buffer,
+            scene_pipeline.sphere_index_count,
+        ),
+        _ => (
+            &scene_pipeline.vertex_buffer,
+            &scene_pipeline.index_buffer,
+            scene_pipeline.index_count,
+        ),
+    }
 }
 
 unsafe fn record_secondary_queue_probe(
@@ -2396,10 +2672,19 @@ unsafe fn destroy_framebuffers(device: &Device, swapchain: &mut SwapchainState) 
     }
 }
 
+unsafe fn destroy_depth_attachments(device: &Device, swapchain: &mut SwapchainState) {
+    for depth in swapchain.depth_attachments.drain(..) {
+        device.destroy_image_view(depth.view, None);
+        device.destroy_image(depth.image, None);
+        device.free_memory(depth.memory, None);
+    }
+}
+
 unsafe fn destroy_image_views(device: &Device, swapchain: &mut SwapchainState) {
     for image_view in swapchain.image_views.drain(..) {
         device.destroy_image_view(image_view, None);
     }
+    destroy_depth_attachments(device, swapchain);
 }
 
 unsafe fn destroy_snapshot_slot(device: &Device, snapshot_slot: SnapshotSlot) {
@@ -2448,6 +2733,42 @@ fn unit_cube_vertices() -> [SceneVertex; 8] {
         SceneVertex {
             position: [-0.5, 0.5, 0.5],
         },
+    ]
+}
+
+fn unit_icosa_sphere_vertices() -> [SceneVertex; 12] {
+    let t = (1.0 + 5.0_f32.sqrt()) * 0.5;
+    let mut vertices = [
+        [-1.0, t, 0.0],
+        [1.0, t, 0.0],
+        [-1.0, -t, 0.0],
+        [1.0, -t, 0.0],
+        [0.0, -1.0, t],
+        [0.0, 1.0, t],
+        [0.0, -1.0, -t],
+        [0.0, 1.0, -t],
+        [t, 0.0, -1.0],
+        [t, 0.0, 1.0],
+        [-t, 0.0, -1.0],
+        [-t, 0.0, 1.0],
+    ];
+    for position in &mut vertices {
+        let length =
+            (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
+                .sqrt()
+                .max(1e-6);
+        position[0] /= length * 2.0;
+        position[1] /= length * 2.0;
+        position[2] /= length * 2.0;
+    }
+    vertices.map(|position| SceneVertex { position })
+}
+
+fn unit_icosa_sphere_indices() -> [u16; 60] {
+    [
+        0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7,
+        1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9,
+        8, 1,
     ]
 }
 

@@ -15,9 +15,9 @@ use std::sync::Arc;
 
 use nalgebra::{Isometry3, Matrix4, Perspective3, Point3, Vector3};
 use tl_core::{
-    FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FrameTextureRecord,
-    MetalBackend, MetalBackendConfig, MetalBackendError, MetalFrameExecutionTelemetry,
-    RenderStateSnapshot,
+    FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
+    FrameTextureRecord, MetalBackend, MetalBackendConfig, MetalBackendError,
+    MetalFrameExecutionTelemetry, RenderStateSnapshot,
 };
 use wgpu::Backend;
 use winit::window::Window;
@@ -82,6 +82,7 @@ pub struct MetalSceneRenderer {
     material_snapshot_scratch: Vec<FrameMaterialRecord>,
     texture_snapshot_scratch: Vec<FrameTextureRecord>,
     light_snapshot_scratch: Vec<FrameLightRecord>,
+    primitive_range_scratch: Vec<FramePrimitiveRange>,
     camera_eye: [f32; 3],
     camera_target: [f32; 3],
     surface_width: u32,
@@ -109,6 +110,7 @@ impl MetalSceneRenderer {
             material_snapshot_scratch: Vec::with_capacity(scratch_capacity.max(256)),
             texture_snapshot_scratch: Vec::with_capacity(scratch_capacity.max(128)),
             light_snapshot_scratch: Vec::with_capacity(32),
+            primitive_range_scratch: Vec::with_capacity(scratch_capacity.max(64)),
             camera_eye: [0.0, 12.0, 36.0],
             camera_target: [0.0, 0.0, 0.0],
             surface_width: 1,
@@ -281,12 +283,14 @@ impl MetalSceneRenderer {
             material_snapshot_scratch,
             texture_snapshot_scratch,
             light_snapshot_scratch,
+            primitive_range_scratch,
         ) = (
             &mut self.backend,
             &mut self.transform_snapshot_scratch,
             &mut self.material_snapshot_scratch,
             &mut self.texture_snapshot_scratch,
             &mut self.light_snapshot_scratch,
+            &mut self.primitive_range_scratch,
         );
         let (snapshot, snapshot_stats): (RenderStateSnapshot<'_>, VulkanSnapshotBuildStats) =
             build_vulkan_render_snapshot(
@@ -297,6 +301,7 @@ impl MetalSceneRenderer {
                 material_snapshot_scratch,
                 texture_snapshot_scratch,
                 light_snapshot_scratch,
+                primitive_range_scratch,
             );
         let execution = backend.render_n(snapshot)?;
 

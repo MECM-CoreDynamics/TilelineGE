@@ -357,7 +357,11 @@ impl TlspriteHotReloader {
                 };
             }
         };
-        let outcome = compile_tlsprite(&source);
+        let mut roots = Vec::new();
+        if let Some(parent) = self.path.parent() {
+            roots.push(parent.to_path_buf());
+        }
+        let outcome = compile_tlsprite_with_extra_roots(&source, &roots);
         let warning_count = outcome
             .diagnostics
             .iter()
@@ -681,7 +685,11 @@ impl TlspriteProgramCache {
             return Ok(out);
         }
 
-        let outcome = compile_tlsprite(source);
+        let mut roots = Vec::new();
+        if let Some(parent) = path.parent() {
+            roots.push(parent.to_path_buf());
+        }
+        let outcome = compile_tlsprite_with_extra_roots(source, &roots);
         let Some(program) = outcome.program else {
             return Err(outcome);
         };

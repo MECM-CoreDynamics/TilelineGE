@@ -415,10 +415,7 @@ impl RuntimeBridgeOrchestrator {
             "lane_queue_depth" | "queue_depth" => Some(self.gms_last_lane_queue_depth as f64),
             "ai_ml_drop_rate" | "aiml_drop_rate" => {
                 let requested = self.gms_ai_ml_requested_jobs.max(1);
-                Some(
-                    1.0 - (self.gms_ai_ml_kept_jobs as f64 / requested as f64)
-                        .clamp(0.0, 1.0),
-                )
+                Some(1.0 - (self.gms_ai_ml_kept_jobs as f64 / requested as f64).clamp(0.0, 1.0))
             }
             "target_fps" => Some(self.gms_scaler.target_fps as f64),
             _ => None,
@@ -675,7 +672,8 @@ impl RuntimeBridgeOrchestrator {
         let mut new_object = requested_object;
         let render_current = requested_sampled.saturating_add(requested_object);
         if matches!(self.gms_scaler.mode, GmsScalerMode::Fixed)
-            || (matches!(self.gms_scaler.mode, GmsScalerMode::Adaptive) && render_current > render_cap)
+            || (matches!(self.gms_scaler.mode, GmsScalerMode::Adaptive)
+                && render_current > render_cap)
         {
             if render_current > render_cap && render_current > 0 {
                 let ratio = render_cap as f64 / render_current as f64;
