@@ -11,6 +11,8 @@
 //! submission timelines and bounded waits to avoid long CPU stalls.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gms::{
@@ -87,6 +89,99 @@ impl GpuSubmissionWaiter for WgpuSubmissionWaiter<'_> {
             Ok(_) => GpuSubmissionWaitStatus::Pending,
             Err(PollError::Timeout) => GpuSubmissionWaitStatus::TimedOut,
             Err(PollError::WrongSubmissionIndex(_, _)) => GpuSubmissionWaitStatus::Invalid,
+        }
+    }
+}
+
+/// Atomic frame-completion tracker shared between the Vulkan renderer and the synchronizer.
+///
+/// The Vulkan renderer calls `advance_to` when a submission completes on the GPU.
+/// `SerialSubmissionWaiter` reads the counter to decide if a `Serial(frame_id)` handle is ready.
+///
+/// This is the CPU-side equivalent of a Vulkan timeline semaphore signal: the renderer signals
+/// frame N complete, and the synchronizer waits until the counter reaches N.
+#[derive(Debug, Clone, Default)]
+pub struct SerialFrameCompletionTracker {
+    completed: Arc<AtomicU64>,
+}
+
+impl SerialFrameCompletionTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Signal that all submissions up to and including `frame_id` have completed on the GPU.
+    ///
+    /// Must only be called from the renderer thread (or under external synchronization).
+    /// `frame_id` should be monotonically increasing; out-of-order advances are ignored.
+    pub fn advance_to(&self, frame_id: u64) {
+        self.completed.fetch_max(frame_id, Ordering::Release);
+    }
+
+    /// Return the highest frame ID that has been signalled as complete.
+    pub fn last_completed(&self) -> u64 {
+        self.completed.load(Ordering::Acquire)
+    }
+
+    /// Build a `SerialSubmissionWaiter` that reads from this tracker.
+    pub fn make_waiter(&self) -> SerialSubmissionWaiter {
+        SerialSubmissionWaiter {
+            completed: Arc::clone(&self.completed),
+        }
+    }
+}
+
+/// Waiter for `GpuSubmissionHandle::Serial` handles produced by the raw Vulkan backend.
+///
+/// Polls an atomic frame-completion counter rather than a `wgpu::Device`. Suitable for use
+/// as the primary/secondary waiter when the Vulkan renderer owns its own command submission.
+pub struct SerialSubmissionWaiter {
+    completed: Arc<AtomicU64>,
+}
+
+impl GpuSubmissionWaiter for SerialSubmissionWaiter {
+    fn wait_submission(
+        &self,
+        submission: &GpuSubmissionHandle,
+        timeout: Option<Duration>,
+    ) -> GpuSubmissionWaitStatus {
+        let GpuSubmissionHandle::Serial(frame_id) = submission else {
+            return GpuSubmissionWaitStatus::Invalid;
+        };
+        let frame_id = *frame_id;
+
+        // Non-blocking fast path — used by the non-blocking reconcile poll.
+        let timeout = match timeout {
+            None => {
+                return if self.completed.load(Ordering::Acquire) >= frame_id {
+                    GpuSubmissionWaitStatus::Ready
+                } else {
+                    GpuSubmissionWaitStatus::Pending
+                };
+            }
+            Some(t) => t,
+        };
+
+        if self.completed.load(Ordering::Acquire) >= frame_id {
+            return GpuSubmissionWaitStatus::Ready;
+        }
+
+        if timeout.is_zero() {
+            return GpuSubmissionWaitStatus::Pending;
+        }
+
+        // Bounded spin: give the GPU side a chance to advance the counter within the budget.
+        // This mirrors the bounded wgpu poll in `WgpuSubmissionWaiter` — never parks the CPU
+        // for longer than the caller's compose-wait budget.
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.completed.load(Ordering::Acquire) >= frame_id {
+                return GpuSubmissionWaitStatus::Ready;
+            }
+            if Instant::now() >= deadline {
+                return GpuSubmissionWaitStatus::TimedOut;
+            }
+            std::hint::spin_loop();
         }
     }
 }
@@ -801,5 +896,106 @@ mod tests {
         let second = sync.admit_frame(2, true, true);
         assert!(!second.accepted);
         assert!(second.should_spill_secondary);
+    }
+
+    // SerialSubmissionWaiter tests
+
+    #[test]
+    fn serial_waiter_returns_pending_when_frame_not_yet_signalled() {
+        let tracker = SerialFrameCompletionTracker::new();
+        let waiter = tracker.make_waiter();
+        let handle = GpuSubmissionHandle::Serial(5);
+
+        assert_eq!(
+            waiter.wait_submission(&handle, Some(Duration::ZERO)),
+            GpuSubmissionWaitStatus::Pending
+        );
+    }
+
+    #[test]
+    fn serial_waiter_returns_ready_after_advance() {
+        let tracker = SerialFrameCompletionTracker::new();
+        let waiter = tracker.make_waiter();
+
+        tracker.advance_to(3);
+
+        assert_eq!(
+            waiter.wait_submission(&GpuSubmissionHandle::Serial(1), Some(Duration::ZERO)),
+            GpuSubmissionWaitStatus::Ready,
+            "earlier frame must be ready once tracker has advanced past it"
+        );
+        assert_eq!(
+            waiter.wait_submission(&GpuSubmissionHandle::Serial(3), Some(Duration::ZERO)),
+            GpuSubmissionWaitStatus::Ready,
+            "exact signalled frame must be ready"
+        );
+        assert_eq!(
+            waiter.wait_submission(&GpuSubmissionHandle::Serial(4), Some(Duration::ZERO)),
+            GpuSubmissionWaitStatus::Pending,
+            "frame beyond signalled point must still be pending"
+        );
+    }
+
+    #[test]
+    fn serial_waiter_times_out_when_frame_not_signalled_within_budget() {
+        let tracker = SerialFrameCompletionTracker::new();
+        let waiter = tracker.make_waiter();
+        let handle = GpuSubmissionHandle::Serial(99);
+
+        let result = waiter.wait_submission(&handle, Some(Duration::from_micros(200)));
+        assert_eq!(
+            result,
+            GpuSubmissionWaitStatus::TimedOut,
+            "must time out when frame is never signalled within budget"
+        );
+    }
+
+    #[test]
+    fn serial_waiter_returns_ready_when_advance_races_before_timeout() {
+        let tracker = SerialFrameCompletionTracker::new();
+        let waiter = tracker.make_waiter();
+        let handle = GpuSubmissionHandle::Serial(1);
+
+        // Signal immediately from another thread with a small delay.
+        let tracker_clone = tracker.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_micros(100));
+            tracker_clone.advance_to(1);
+        });
+
+        let result = waiter.wait_submission(&handle, Some(Duration::from_millis(50)));
+        assert_eq!(
+            result,
+            GpuSubmissionWaitStatus::Ready,
+            "waiter must observe advance signalled from another thread within budget"
+        );
+    }
+
+    #[test]
+    fn serial_tracker_advance_is_monotonic() {
+        let tracker = SerialFrameCompletionTracker::new();
+        tracker.advance_to(10);
+        tracker.advance_to(5); // out-of-order — must be ignored
+        assert_eq!(tracker.last_completed(), 10);
+        tracker.advance_to(11);
+        assert_eq!(tracker.last_completed(), 11);
+    }
+
+    #[test]
+    fn serial_waiter_handles_none_timeout_as_nonblocking() {
+        let tracker = SerialFrameCompletionTracker::new();
+        let waiter = tracker.make_waiter();
+        let handle = GpuSubmissionHandle::Serial(1);
+
+        // None timeout: return immediately without blocking.
+        assert_eq!(
+            waiter.wait_submission(&handle, None),
+            GpuSubmissionWaitStatus::Pending
+        );
+        tracker.advance_to(1);
+        assert_eq!(
+            waiter.wait_submission(&handle, None),
+            GpuSubmissionWaitStatus::Ready
+        );
     }
 }

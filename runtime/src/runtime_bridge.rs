@@ -958,4 +958,198 @@ mod tests {
             .unwrap_or_default()
             .contains("clipped postfx"));
     }
+
+    // E3 calibration gate tests
+
+    fn make_gms_orchestrator() -> RuntimeBridgeOrchestrator {
+        RuntimeBridgeOrchestrator::new_for_scheduler(
+            GraphicsSchedulerPath::Gms,
+            "RTX 4090",
+            RuntimeBridgeConfig::default(),
+            1920,
+            1080,
+        )
+    }
+
+    fn make_estimate(physics: u32, ai_ml: u32, postfx: u32, frame_ms: f64) -> SceneWorkloadEstimate {
+        SceneWorkloadEstimate {
+            single_gpu: WorkloadRequest::default(),
+            multi_gpu: MultiGpuWorkloadRequest {
+                sampled_processing_jobs: 100,
+                object_updates: 100,
+                physics_jobs: physics,
+                ai_ml_jobs: ai_ml,
+                post_fx_jobs: postfx,
+                ui_jobs: 20,
+                target_frame_budget_ms: frame_ms,
+                ..MultiGpuWorkloadRequest::default()
+            },
+            complexity_score: 5_500.0,
+            estimated_frame_bytes: 8 * 1024 * 1024,
+        }
+    }
+
+    #[test]
+    fn gms_adaptive_mode_never_reduces_physics_jobs() {
+        let mut orchestrator = make_gms_orchestrator();
+        orchestrator.set_gms_mode(GmsScalerMode::Adaptive);
+        // Simulate a heavily loaded queue to maximize pressure.
+        orchestrator.gms_last_lane_queue_depth = 10;
+
+        let estimate = make_estimate(800, 300, 300, 40.0); // 40ms at 60fps target = 2.4× pressure
+        let scaled = orchestrator.apply_gms_scaler(estimate);
+
+        assert_eq!(
+            scaled.multi_gpu.physics_jobs, estimate.multi_gpu.physics_jobs,
+            "adaptive mode must never reduce physics jobs regardless of pressure"
+        );
+    }
+
+    #[test]
+    fn gms_fixed_mode_physics_cap_respects_min_physics_budget() {
+        let mut orchestrator = make_gms_orchestrator();
+        orchestrator.set_gms_mode(GmsScalerMode::Fixed);
+        // Set a very low physics budget percentage so min_physics_budget_pct kicks in.
+        orchestrator.set_gms_budget(GmsScalerDomain::Physics, 5);
+
+        let total_jobs: u32 = 100 + 100 + 800 + 300 + 300 + 20;
+        let min_physics_pct = orchestrator.gms_scaler.min_physics_budget_pct as f64 / 100.0;
+        let min_physics_cap = (total_jobs as f64 * min_physics_pct).round() as u32;
+
+        let estimate = make_estimate(800, 300, 300, 16.67);
+        let scaled = orchestrator.apply_gms_scaler(estimate);
+
+        assert!(
+            scaled.multi_gpu.physics_jobs >= min_physics_cap.min(estimate.multi_gpu.physics_jobs),
+            "fixed mode physics output must respect min_physics_budget_pct floor (expected >= {min_physics_cap}, got {})",
+            scaled.multi_gpu.physics_jobs
+        );
+    }
+
+    #[test]
+    fn gms_scaler_is_deterministic_under_fixed_inputs() {
+        let estimate = make_estimate(400, 200, 250, 25.0);
+
+        let mut a = make_gms_orchestrator();
+        a.set_gms_mode(GmsScalerMode::Adaptive);
+        let out_a = a.apply_gms_scaler(estimate.clone());
+
+        let mut b = make_gms_orchestrator();
+        b.set_gms_mode(GmsScalerMode::Adaptive);
+        let out_b = b.apply_gms_scaler(estimate.clone());
+
+        assert_eq!(
+            out_a.multi_gpu.physics_jobs, out_b.multi_gpu.physics_jobs,
+            "physics output must be deterministic"
+        );
+        assert_eq!(
+            out_a.multi_gpu.ai_ml_jobs, out_b.multi_gpu.ai_ml_jobs,
+            "ai_ml output must be deterministic"
+        );
+        assert_eq!(
+            out_a.multi_gpu.post_fx_jobs, out_b.multi_gpu.post_fx_jobs,
+            "postfx output must be deterministic"
+        );
+    }
+
+    #[test]
+    fn gms_guardrail_profiles_cut_in_correct_order() {
+        // Same high pressure — Aggressive must cut postfx more than Balanced, Balanced more than Relaxed.
+        let estimate = make_estimate(300, 200, 300, 35.0); // ~2× pressure
+
+        let mut aggressive = make_gms_orchestrator();
+        aggressive.set_gms_mode(GmsScalerMode::Adaptive);
+        aggressive.set_gms_guardrail(GmsGuardrailProfile::Aggressive);
+        let out_aggressive = aggressive.apply_gms_scaler(estimate.clone());
+
+        let mut balanced = make_gms_orchestrator();
+        balanced.set_gms_mode(GmsScalerMode::Adaptive);
+        balanced.set_gms_guardrail(GmsGuardrailProfile::Balanced);
+        let out_balanced = balanced.apply_gms_scaler(estimate.clone());
+
+        let mut relaxed = make_gms_orchestrator();
+        relaxed.set_gms_mode(GmsScalerMode::Adaptive);
+        relaxed.set_gms_guardrail(GmsGuardrailProfile::Relaxed);
+        let out_relaxed = relaxed.apply_gms_scaler(estimate.clone());
+
+        assert!(
+            out_aggressive.multi_gpu.post_fx_jobs <= out_balanced.multi_gpu.post_fx_jobs,
+            "aggressive must cut postfx at least as much as balanced (aggressive={}, balanced={})",
+            out_aggressive.multi_gpu.post_fx_jobs,
+            out_balanced.multi_gpu.post_fx_jobs
+        );
+        assert!(
+            out_balanced.multi_gpu.post_fx_jobs <= out_relaxed.multi_gpu.post_fx_jobs,
+            "balanced must cut postfx at least as much as relaxed (balanced={}, relaxed={})",
+            out_balanced.multi_gpu.post_fx_jobs,
+            out_relaxed.multi_gpu.post_fx_jobs
+        );
+    }
+
+    #[test]
+    fn gms_complexity_ema_converges_toward_target_score() {
+        let mut orchestrator = make_gms_orchestrator();
+        orchestrator.set_gms_mode(GmsScalerMode::Adaptive);
+
+        let target_complexity = 8_000.0_f64;
+        let estimate = SceneWorkloadEstimate {
+            single_gpu: WorkloadRequest::default(),
+            multi_gpu: MultiGpuWorkloadRequest {
+                sampled_processing_jobs: 100,
+                object_updates: 100,
+                physics_jobs: 200,
+                ai_ml_jobs: 100,
+                post_fx_jobs: 100,
+                ui_jobs: 10,
+                target_frame_budget_ms: 16.67,
+                ..MultiGpuWorkloadRequest::default()
+            },
+            complexity_score: target_complexity,
+            estimated_frame_bytes: 4 * 1024 * 1024,
+        };
+
+        for _ in 0..30 {
+            orchestrator.apply_gms_scaler(estimate.clone());
+        }
+
+        // After 30 frames at 0.18 EMA coefficient, EMA should exceed 98% of target.
+        // 1 - (1 - 0.18)^30 ≈ 0.995
+        let expected_min = target_complexity * 0.98;
+        assert!(
+            orchestrator.gms_complexity_ema >= expected_min,
+            "EMA must converge toward target after 30 frames (got {:.1}, expected >= {expected_min:.1})",
+            orchestrator.gms_complexity_ema
+        );
+    }
+
+    #[test]
+    fn gms_ai_ml_drop_rate_reflects_clipping_ratio() {
+        let mut orchestrator = make_gms_orchestrator();
+        orchestrator.set_gms_mode(GmsScalerMode::Adaptive);
+        orchestrator.set_gms_guardrail(GmsGuardrailProfile::Aggressive);
+        orchestrator.gms_last_lane_queue_depth = 8; // force high pressure
+
+        let estimate = make_estimate(300, 500, 300, 40.0); // heavy ai_ml under pressure
+        for _ in 0..10 {
+            orchestrator.apply_gms_scaler(estimate.clone());
+        }
+
+        let requested = orchestrator.gms_ai_ml_requested_jobs.max(1);
+        let kept = orchestrator.gms_ai_ml_kept_jobs;
+        let drop_rate = 1.0 - (kept as f64 / requested as f64).clamp(0.0, 1.0);
+
+        let metric = orchestrator
+            .gms_metric("ai_ml_drop_rate")
+            .expect("metric must be present");
+
+        assert!(
+            (metric - drop_rate).abs() < 1e-9,
+            "gms_metric('ai_ml_drop_rate') must match internal ratio"
+        );
+        // Under aggressive profile and high pressure, we expect some ai/ml dropping.
+        assert!(
+            drop_rate > 0.0,
+            "expected ai/ml drop > 0 under aggressive profile + high pressure"
+        );
+    }
 }
