@@ -49,9 +49,15 @@ Make `broadphase | narrowphase | solver | integrate` parallel-by-default in ship
     `integrate|broadphase|narrowphase|solver`.
   - Console `status` / `perf.report` now include the same C0 gate telemetry fields.
 
-- [ ] C0-S7: Add C0 gate tests.
-  - Unit tests for mode transitions (`Parallel`, `SerialSmallWorkload`, `SerialSingleWorker`, etc.).
-  - Stress test (`30k`) that fails if hidden serial hot-phase ownership appears without telemetry reason.
+- [x] C0-S7: Add C0 gate tests.
+  - Unit tests for mode transitions (`Parallel`, `SerialSmallWorkload`, `SerialSingleWorker`, etc.)
+    in `paradoxpe/src/parallel.rs`.
+  - `c0_serial_phases_always_carry_a_fallback_reason`: 256-body scene, every serial phase must have
+    an explicit reason string.
+  - `c0_no_phase_reports_serial_unimplemented_at_shipping_scale`: 512-body scene, 4 steps — no phase
+    may use `SerialUnimplemented` (hidden hot-path serial ownership).
+  - `c0_stress_30k_no_hidden_serial_ownership`: 30k-body full stress gate, marked `#[ignore]` for
+    explicit CI/validation runs.
 
 ## Exit Criteria
 

@@ -133,6 +133,7 @@ Runtime status output includes live scaler telemetry:
 - `gms_budgets`
 - `gms_util`
 - `gms_q`
+- `physics_lag_frames`
 - `gms_ai_ml_drop`
 - `gms_reason`
 
@@ -192,8 +193,10 @@ Useful script-side runtime queries and controls:
 - `gms_get_metric(name)`:
   - `sm_cu_utilization`
   - `lane_queue_depth`
+  - `physics_lag_frames`
   - `ai_ml_drop_rate`
   - `target_fps`
+  - `fallback_reason`
   - `render_budget_pct|physics_budget_pct|ai_ml_budget_pct|postfx_budget_pct|ui_budget_pct`
 - `mls_set_mode(mode)` (`off|auto|on`)
 - `mls_set_backend(name)` (`auto|amd|nvidia|apple|rockchip|cpu`)

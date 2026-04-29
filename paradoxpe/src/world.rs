@@ -1809,4 +1809,119 @@ mod tests {
         assert!((slot.desc.material.restitution - 0.85).abs() < 1e-6);
         assert!((slot.desc.material.friction - 0.12).abs() < 1e-6);
     }
+
+    // C0-S7: phase telemetry gate tests
+
+    fn spawn_sphere(world: &mut PhysicsWorld, x: f32, y: f32) -> BodyHandle {
+        let body = world.spawn_body(BodyDesc {
+            position: Vector3::new(x, y, 0.0),
+            ..BodyDesc::default()
+        });
+        world
+            .spawn_collider(ColliderDesc::attached(
+                body,
+                ColliderShape::Sphere { radius: 0.3 },
+            ))
+            .expect("collider");
+        body
+    }
+
+    #[test]
+    fn c0_serial_phases_always_carry_a_fallback_reason() {
+        let mut world = PhysicsWorld::new(PhysicsWorldConfig::default());
+        for i in 0..256usize {
+            let x = (i % 16) as f32 * 0.7;
+            let y = (i / 16) as f32 * 0.7;
+            spawn_sphere(&mut world, x, y);
+        }
+        world.step(1.0 / 60.0);
+        let t = &world.last_step_timings;
+        if t.integrate_mode.is_serial() {
+            assert!(
+                t.integrate_serial_fallback_reason.is_some(),
+                "integrate ran serial with no fallback reason"
+            );
+        }
+        if t.broadphase_mode.is_serial() {
+            assert!(
+                t.broadphase_serial_fallback_reason.is_some(),
+                "broadphase ran serial with no fallback reason"
+            );
+        }
+        if t.narrowphase_mode.is_serial() {
+            assert!(
+                t.narrowphase_serial_fallback_reason.is_some(),
+                "narrowphase ran serial with no fallback reason"
+            );
+        }
+        if t.solver_mode.is_serial() {
+            assert!(
+                t.solver_serial_fallback_reason.is_some(),
+                "solver ran serial with no fallback reason"
+            );
+        }
+    }
+
+    #[test]
+    fn c0_no_phase_reports_serial_unimplemented_at_shipping_scale() {
+        let mut world = PhysicsWorld::new(PhysicsWorldConfig::default());
+        for i in 0..512usize {
+            let x = (i % 32) as f32 * 0.6;
+            let y = (i / 32) as f32 * 0.6;
+            spawn_sphere(&mut world, x, y);
+        }
+        for _ in 0..4 {
+            world.step(1.0 / 60.0);
+            let t = &world.last_step_timings;
+            assert_ne!(
+                t.integrate_mode,
+                ParallelExecutionMode::SerialUnimplemented,
+                "integrate has SerialUnimplemented — hidden serial hot-path ownership"
+            );
+            assert_ne!(
+                t.broadphase_mode,
+                ParallelExecutionMode::SerialUnimplemented,
+                "broadphase has SerialUnimplemented — hidden serial hot-path ownership"
+            );
+            assert_ne!(
+                t.narrowphase_mode,
+                ParallelExecutionMode::SerialUnimplemented,
+                "narrowphase has SerialUnimplemented — hidden serial hot-path ownership"
+            );
+            assert_ne!(
+                t.solver_mode,
+                ParallelExecutionMode::SerialUnimplemented,
+                "solver has SerialUnimplemented — hidden serial hot-path ownership"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn c0_stress_30k_no_hidden_serial_ownership() {
+        let mut world = PhysicsWorld::new(PhysicsWorldConfig::default());
+        for i in 0..30_000usize {
+            let x = (i % 200) as f32 * 0.55;
+            let y = (i / 200) as f32 * 0.55;
+            spawn_sphere(&mut world, x, y);
+        }
+        for _ in 0..3 {
+            world.step(1.0 / 60.0);
+            let t = &world.last_step_timings;
+            assert_ne!(t.integrate_mode, ParallelExecutionMode::SerialUnimplemented);
+            assert_ne!(t.broadphase_mode, ParallelExecutionMode::SerialUnimplemented);
+            assert_ne!(t.narrowphase_mode, ParallelExecutionMode::SerialUnimplemented);
+            assert_ne!(t.solver_mode, ParallelExecutionMode::SerialUnimplemented);
+            for (phase, mode, reason) in [
+                ("integrate", t.integrate_mode, t.integrate_serial_fallback_reason),
+                ("broadphase", t.broadphase_mode, t.broadphase_serial_fallback_reason),
+                ("narrowphase", t.narrowphase_mode, t.narrowphase_serial_fallback_reason),
+                ("solver", t.solver_mode, t.solver_serial_fallback_reason),
+            ] {
+                if mode.is_serial() {
+                    assert!(reason.is_some(), "{phase} ran serial with no fallback reason");
+                }
+            }
+        }
+    }
 }

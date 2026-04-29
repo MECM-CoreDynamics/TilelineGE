@@ -774,13 +774,21 @@ impl RuntimeBridgeOrchestrator {
             };
             let pressure_scale = (1.0 / pressure).clamp(0.35, 1.0);
             postfx_cap = ((postfx_cap as f64) * pressure_scale * postfx_scale).round() as u32;
-            ai_ml_cap = ((ai_ml_cap as f64) * pressure_scale * ai_ml_scale).round() as u32;
+            let postfx_trimmed_first = requested_postfx > postfx_cap.max(1);
+            if !postfx_trimmed_first || pressure > 1.35 {
+                ai_ml_cap = ((ai_ml_cap as f64) * pressure_scale * ai_ml_scale).round() as u32;
+            }
             if pressure > 1.25 {
                 let ui_scale = (pressure_scale * 0.92).clamp(0.45, 1.0);
                 ui_cap = ((ui_cap as f64) * ui_scale).round() as u32;
             }
+            let clipped_lanes = if postfx_trimmed_first && pressure <= 1.35 {
+                "postfx"
+            } else {
+                "postfx+ai_ml"
+            };
             fallback_reason = Some(format!(
-                "adaptive guardrail clipped lanes (pressure={pressure:.2})"
+                "adaptive guardrail clipped {clipped_lanes} (pressure={pressure:.2})"
             ));
         }
 
@@ -861,6 +869,7 @@ pub fn runtime_bridge_path_from_scheduler(scheduler: GraphicsSchedulerPath) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gms::{MultiGpuWorkloadRequest, WorkloadRequest};
     use std::time::Duration;
 
     #[test]
@@ -904,5 +913,49 @@ mod tests {
         let second_tick = orchestrator.tick_and_plan();
         assert!(second_tick.plan.is_some());
         assert!(second_tick.used_fallback_plan);
+    }
+
+    #[test]
+    fn adaptive_gms_guardrail_trims_postfx_before_ai_ml() {
+        let mut orchestrator = RuntimeBridgeOrchestrator::new_for_scheduler(
+            GraphicsSchedulerPath::Mgs,
+            "Mali-G610",
+            RuntimeBridgeConfig::default(),
+            1280,
+            720,
+        );
+        orchestrator.set_gms_guardrail(GmsGuardrailProfile::Balanced);
+
+        let estimate = SceneWorkloadEstimate {
+            single_gpu: WorkloadRequest::default(),
+            multi_gpu: MultiGpuWorkloadRequest {
+                sampled_processing_jobs: 100,
+                object_updates: 100,
+                physics_jobs: 200,
+                ai_ml_jobs: 120,
+                post_fx_jobs: 160,
+                ui_jobs: 20,
+                target_frame_budget_ms: 20.0,
+                ..MultiGpuWorkloadRequest::default()
+            },
+            complexity_score: 5_500.0,
+            estimated_frame_bytes: 8 * 1024 * 1024,
+        };
+
+        let scaled = orchestrator.apply_gms_scaler(estimate);
+
+        assert!(
+            scaled.multi_gpu.post_fx_jobs < estimate.multi_gpu.post_fx_jobs,
+            "postfx should absorb moderate adaptive pressure first"
+        );
+        assert_eq!(
+            scaled.multi_gpu.ai_ml_jobs, estimate.multi_gpu.ai_ml_jobs,
+            "ai/ml should stay intact while postfx can absorb the spike"
+        );
+        assert!(orchestrator
+            .gms_last_fallback_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("clipped postfx"));
     }
 }

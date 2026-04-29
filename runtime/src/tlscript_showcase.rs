@@ -383,14 +383,16 @@ impl TlscriptShowcaseContactSnapshot {
 }
 
 /// Runtime-provided GMS scaler metrics exposed to `.tlscript` (`gms_get_metric`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TlscriptGmsMetricSnapshot {
     pub mode: Option<GmsScalerMode>,
     pub target_fps: Option<u32>,
     pub domain_budgets: Option<GmsDomainBudgets>,
     pub sm_cu_utilization: f32,
     pub lane_queue_depth: usize,
+    pub physics_lag_frames: u64,
     pub ai_ml_drop_rate: f32,
+    pub fallback_reason: Option<String>,
 }
 
 impl Default for TlscriptGmsMetricSnapshot {
@@ -401,7 +403,9 @@ impl Default for TlscriptGmsMetricSnapshot {
             domain_budgets: None,
             sm_cu_utilization: 0.0,
             lane_queue_depth: 0,
+            physics_lag_frames: 0,
             ai_ml_drop_rate: 0.0,
+            fallback_reason: None,
         }
     }
 }
@@ -743,7 +747,7 @@ impl<'src> TlscriptShowcaseProgram<'src> {
         let mut state = EvalState::new(self.max_eval_steps, self.max_loop_iterations, tile_lookup);
         state.contact_pairs = contact_snapshot.contact_pairs;
         state.contact_manifolds = contact_snapshot.contact_manifolds;
-        state.gms_metrics = gms_metrics;
+        state.gms_metrics = gms_metrics.clone();
         state.mls_metrics = mls_metrics.clone();
         state.vars.insert(
             "frame".to_string(),
@@ -947,9 +951,22 @@ impl<'src> TlscriptShowcaseProgram<'src> {
             DemoValue::Int(gms_metrics.lane_queue_depth as i64),
         );
         state.vars.insert(
+            "gms_physics_lag_frames".to_string(),
+            DemoValue::Int(gms_metrics.physics_lag_frames as i64),
+        );
+        state.vars.insert(
             "gms_ai_ml_drop_rate".to_string(),
             DemoValue::Float(gms_metrics.ai_ml_drop_rate as f64),
         );
+        if let Some(reason) = &gms_metrics.fallback_reason {
+            state.vars.insert(
+                "gms_fallback_reason".to_string(),
+                DemoValue::Str(reason.clone()),
+            );
+            state
+                .vars
+                .insert("gms_reason".to_string(), DemoValue::Str(reason.clone()));
+        }
         if let Some(mode) = gms_metrics.mode {
             state.vars.insert(
                 "gms_mode".to_string(),
@@ -1715,8 +1732,18 @@ fn apply_builtin_patch_call(
                 let value = match key.as_str() {
                     "sm_cu_utilization" | "utilization" => state.gms_metrics.sm_cu_utilization as f64,
                     "lane_queue_depth" | "queue_depth" => state.gms_metrics.lane_queue_depth as f64,
+                    "physics_lag_frames" | "lag_frames" => state.gms_metrics.physics_lag_frames as f64,
                     "ai_ml_drop_rate" | "aiml_drop_rate" => state.gms_metrics.ai_ml_drop_rate as f64,
                     "target_fps" => state.gms_metrics.target_fps.unwrap_or(0) as f64,
+                    "fallback_reason" | "reason" => {
+                        return DemoValue::Str(
+                            state
+                                .gms_metrics
+                                .fallback_reason
+                                .clone()
+                                .unwrap_or_else(|| "none".to_string()),
+                        )
+                    }
                     "render_budget_pct" => state
                         .gms_metrics
                         .domain_budgets
@@ -1744,7 +1771,7 @@ fn apply_builtin_patch_call(
                         .unwrap_or(0) as f64,
                     _ => {
                         state.warn(format!(
-                            "gms_get_metric unknown key '{metric}' (expected utilization/queue_depth/ai_ml_drop_rate/target_fps/*_budget_pct)"
+                            "gms_get_metric unknown key '{metric}' (expected utilization/queue_depth/physics_lag_frames/ai_ml_drop_rate/target_fps/fallback_reason/*_budget_pct)"
                         ));
                         0.0
                     }
@@ -3524,7 +3551,9 @@ mod tests {
                 domain_budgets: Some(GmsDomainBudgets::default()),
                 sm_cu_utilization: 0.72,
                 lane_queue_depth: 2,
+                physics_lag_frames: 0,
                 ai_ml_drop_rate: 0.18,
+                fallback_reason: None,
             },
             TlscriptMlsMetricSnapshot::default(),
         );
@@ -3537,6 +3566,42 @@ mod tests {
             out.gms_scaler.guardrail,
             Some(GmsGuardrailProfile::Aggressive)
         );
+    }
+
+    #[test]
+    fn exposes_gms_lag_and_fallback_reason_metrics_to_scripts() {
+        let src = concat!(
+            "@export\n",
+            "def showcase_tick(frame: int, live_balls: int, spawned_this_tick: int):\n",
+            "    if gms_get_metric(\"physics_lag_frames\") >= 3.0:\n",
+            "        set_spawn_per_tick(33)\n",
+            "    let fallback_probe: float = gms_get_metric(\"fallback_reason\")\n",
+        );
+        let outcome = compile_tlscript_showcase(src, Default::default());
+        assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+        let program = outcome.program.as_ref().expect("program");
+        let out = program.evaluate_frame_with_controls_and_tile_lookup_and_contacts(
+            TlscriptShowcaseFrameInput {
+                frame_index: 0,
+                live_balls: 0,
+                spawned_this_tick: 0,
+                key_f_down: false,
+            },
+            TlscriptShowcaseControlInput::default(),
+            None,
+            TlscriptShowcaseContactSnapshot::default(),
+            TlscriptGmsMetricSnapshot {
+                physics_lag_frames: 3,
+                fallback_reason: Some("adaptive guardrail clipped lanes".to_string()),
+                ..TlscriptGmsMetricSnapshot::default()
+            },
+            TlscriptMlsMetricSnapshot::default(),
+        );
+        assert_eq!(out.patch.spawn_per_tick, Some(33));
+        assert!(!out
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unknown key")));
     }
 
     #[test]

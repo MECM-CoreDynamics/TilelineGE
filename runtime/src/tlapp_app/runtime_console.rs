@@ -984,7 +984,9 @@ impl TlAppRuntime {
             domain_budgets: self.runtime_bridge_metrics.domain_budgets,
             sm_cu_utilization: self.runtime_bridge_metrics.sm_cu_utilization,
             lane_queue_depth: self.runtime_bridge_metrics.lane_queue_depth,
+            physics_lag_frames: self.runtime_bridge_telemetry.physics_lag_frames,
             ai_ml_drop_rate: self.runtime_bridge_metrics.ai_ml_drop_rate,
+            fallback_reason: self.runtime_bridge_metrics.fallback_reason.clone(),
         };
         let mls_metrics = TlscriptMlsMetricSnapshot {
             backend: self.runtime_bridge_metrics.mls_backend,

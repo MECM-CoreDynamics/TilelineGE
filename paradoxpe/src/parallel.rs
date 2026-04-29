@@ -292,4 +292,87 @@ mod tests {
         assert!(mode.is_parallel() || mode.is_serial());
         assert_eq!(calls.load(Ordering::Relaxed), data.len());
     }
+
+    // C0-S7: mode transition unit tests
+
+    #[test]
+    fn serial_fallback_reason_is_present_for_all_serial_variants() {
+        assert_eq!(
+            ParallelExecutionMode::SerialSingleWorker.serial_fallback_reason(),
+            Some("single_worker")
+        );
+        assert_eq!(
+            ParallelExecutionMode::SerialSmallWorkload.serial_fallback_reason(),
+            Some("small_workload")
+        );
+        assert_eq!(
+            ParallelExecutionMode::SerialUnsupportedPlan.serial_fallback_reason(),
+            Some("unsupported_plan")
+        );
+        assert_eq!(
+            ParallelExecutionMode::SerialUnimplemented.serial_fallback_reason(),
+            Some("parallel_not_implemented")
+        );
+        assert!(ParallelExecutionMode::Parallel.serial_fallback_reason().is_none());
+        assert!(ParallelExecutionMode::NotRun.serial_fallback_reason().is_none());
+    }
+
+    #[test]
+    fn for_each_index_reports_serial_for_workload_below_threshold() {
+        let calls = AtomicUsize::new(0);
+        let mode = for_each_index(3, 64, |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+        });
+        assert!(
+            mode.is_serial(),
+            "tiny workload must fall back to serial, got {mode:?}"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 3, "all items must still be visited");
+    }
+
+    #[test]
+    fn for_each_mut_indexed_reports_serial_for_empty_slice() {
+        let mut data: Vec<u32> = Vec::new();
+        let mode = for_each_mut_indexed(&mut data, 16, |_, _| {});
+        assert!(
+            mode.is_serial(),
+            "empty slice must fall back to serial, got {mode:?}"
+        );
+    }
+
+    #[test]
+    fn for_each_index_reports_parallel_for_large_workload_on_multi_worker_host() {
+        if worker_count() <= 1 {
+            return;
+        }
+        let calls = AtomicUsize::new(0);
+        let mode = for_each_index(4096, 64, |_| {
+            calls.fetch_add(1, Ordering::Relaxed);
+        });
+        assert_eq!(
+            mode,
+            ParallelExecutionMode::Parallel,
+            "large workload on multi-worker host must run parallel"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 4096);
+    }
+
+    #[test]
+    fn for_each_mut_indexed_reports_parallel_for_large_workload_on_multi_worker_host() {
+        if worker_count() <= 1 {
+            return;
+        }
+        let mut data = vec![0u64; 4096];
+        let mode = for_each_mut_indexed(&mut data, 64, |i, v| {
+            *v = i as u64 + 1;
+        });
+        assert_eq!(
+            mode,
+            ParallelExecutionMode::Parallel,
+            "large workload on multi-worker host must run parallel"
+        );
+        for (i, v) in data.iter().enumerate() {
+            assert_eq!(*v, i as u64 + 1);
+        }
+    }
 }

@@ -1608,7 +1608,7 @@ impl<'src> ScriptRuntime<'src> {
                         controls,
                         Some(&overlay_lookup),
                         contact_snapshot,
-                        gms_metrics,
+                        gms_metrics.clone(),
                         mls_metrics.clone(),
                     );
                     merge_showcase_output(&mut merged, output, index);

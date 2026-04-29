@@ -146,7 +146,7 @@ impl TljointSceneBundle {
                 controls,
                 Some(&overlay_lookup),
                 contact_snapshot,
-                gms_metrics,
+                gms_metrics.clone(),
                 mls_metrics.clone(),
             );
             merge_frame_output(&mut merged, out, index);
