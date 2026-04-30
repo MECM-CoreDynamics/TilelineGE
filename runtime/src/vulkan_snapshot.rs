@@ -17,6 +17,7 @@ use crate::scene::{SceneLight, SceneLightKind};
 
 const FLAG_TRANSPARENT: u32 = 1 << 0;
 const FLAG_MESH: u32 = 1 << 1;
+const FLAG_BOX: u32 = 1 << 2;
 const MATERIAL_FLAG_UNLIT: u32 = 1 << 0;
 
 /// Summary of one runtime-to-Vulkan snapshot build.
@@ -34,15 +35,21 @@ pub struct VulkanSnapshotBuildStats {
 
 /// Flatten a runtime draw frame into the compact per-instance snapshot consumed by
 /// `tl_core::VulkanBackend`.
+///
+/// `camera_eye` is used to sort opaque instances front-to-back so the GPU's early-Z
+/// rejects occluded fragments before the fragment shader runs. Pass `[0.0; 3]` to
+/// disable sorting.
 pub fn build_vulkan_render_snapshot<'a>(
     frame_id: u64,
     camera_view_proj: [[f32; 4]; 4],
+    camera_eye: [f32; 3],
     draw: &RuntimeDrawFrame,
     transform_scratch: &'a mut Vec<FrameInstanceTransform>,
     material_scratch: &'a mut Vec<FrameMaterialRecord>,
     texture_scratch: &'a mut Vec<FrameTextureRecord>,
     light_scratch: &'a mut Vec<FrameLightRecord>,
     primitive_range_scratch: &'a mut Vec<FramePrimitiveRange>,
+    sort_scratch: &mut Vec<(f32, u32)>,
 ) -> (RenderStateSnapshot<'a>, VulkanSnapshotBuildStats) {
     transform_scratch.clear();
     material_scratch.clear();
@@ -61,14 +68,17 @@ pub fn build_vulkan_render_snapshot<'a>(
 
     for batch in &draw.opaque_batches {
         let first_instance = transform_scratch.len();
-        append_batch_instances(
+        append_batch_instances_sorted(
             batch,
+            camera_eye,
+            SortOrder::FrontToBack,
             transform_scratch,
             material_scratch,
             texture_scratch,
             &mut material_map,
             &mut texture_map,
             &mut stats,
+            sort_scratch,
         );
         let count = transform_scratch.len().saturating_sub(first_instance);
         if count > 0 {
@@ -82,14 +92,17 @@ pub fn build_vulkan_render_snapshot<'a>(
     }
     for batch in &draw.transparent_batches {
         let first_instance = transform_scratch.len();
-        append_batch_instances(
+        append_batch_instances_sorted(
             batch,
+            camera_eye,
+            SortOrder::BackToFront,
             transform_scratch,
             material_scratch,
             texture_scratch,
             &mut material_map,
             &mut texture_map,
             &mut stats,
+            sort_scratch,
         );
         let count = transform_scratch.len().saturating_sub(first_instance);
         if count > 0 {
@@ -135,19 +148,84 @@ struct MaterialDedupKey {
     flags: u32,
 }
 
-fn append_batch_instances(
+#[derive(Clone, Copy)]
+enum SortOrder {
+    FrontToBack,
+    BackToFront,
+}
+
+fn instance_world_translation(instance: &crate::draw_path::DrawInstance3d) -> [f32; 3] {
+    // model_cols stores the column-major model matrix; the translation is the 4th column's xyz.
+    [
+        instance.model_cols[3][0],
+        instance.model_cols[3][1],
+        instance.model_cols[3][2],
+    ]
+}
+
+fn distance_squared_to(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    dx * dx + dy * dy + dz * dz
+}
+
+fn append_batch_instances_sorted(
     batch: &DrawBatch3d,
+    camera_eye: [f32; 3],
+    order: SortOrder,
     transform_scratch: &mut Vec<FrameInstanceTransform>,
     material_scratch: &mut Vec<FrameMaterialRecord>,
     texture_scratch: &mut Vec<FrameTextureRecord>,
     material_map: &mut BTreeMap<MaterialDedupKey, u32>,
     texture_map: &mut BTreeMap<u32, u32>,
     stats: &mut VulkanSnapshotBuildStats,
+    sort_scratch: &mut Vec<(f32, u32)>,
 ) {
-    for instance in &batch.instances {
-        let texture_index = *texture_map
-            .entry(instance.texture_index)
-            .or_insert_with(|| {
+    let transparent = matches!(batch.lane, DrawLane::Transparent);
+    let is_mesh = batch.key.primitive_code >= 2;
+    let is_box = batch.key.primitive_code == 1;
+    let instance_flags = (if transparent { FLAG_TRANSPARENT } else { 0 })
+        | (if is_mesh { FLAG_MESH } else { 0 })
+        | (if is_box { FLAG_BOX } else { 0 });
+
+    // Skip sorting for tiny batches and box primitives where it offers no early-Z benefit.
+    let should_sort = !is_box && batch.instances.len() >= 4;
+
+    sort_scratch.clear();
+    if should_sort {
+        sort_scratch.reserve(batch.instances.len());
+        for (idx, instance) in batch.instances.iter().enumerate() {
+            let pos = instance_world_translation(instance);
+            sort_scratch.push((distance_squared_to(pos, camera_eye), idx as u32));
+        }
+        match order {
+            SortOrder::FrontToBack => sort_scratch.sort_unstable_by(|a, b| a.0.total_cmp(&b.0)),
+            SortOrder::BackToFront => sort_scratch.sort_unstable_by(|a, b| b.0.total_cmp(&a.0)),
+        }
+    }
+
+    let mut last_material_key: Option<MaterialDedupKey> = None;
+    let mut last_material_index: u32 = 0;
+    let mut last_texture_slot: Option<u32> = None;
+    let mut last_texture_index: u32 = 0;
+
+    let total = if should_sort {
+        sort_scratch.len()
+    } else {
+        batch.instances.len()
+    };
+    for i in 0..total {
+        let instance = if should_sort {
+            &batch.instances[sort_scratch[i].1 as usize]
+        } else {
+            &batch.instances[i]
+        };
+
+        let texture_index = if Some(instance.texture_index) == last_texture_slot {
+            last_texture_index
+        } else {
+            let idx = *texture_map.entry(instance.texture_index).or_insert_with(|| {
                 let next_index = texture_scratch.len() as u32;
                 texture_scratch.push(FrameTextureRecord {
                     texture_slot: instance.texture_index,
@@ -157,22 +235,31 @@ fn append_batch_instances(
                 });
                 next_index
             });
-        let material_key = instance_material_key(batch, instance);
-        let material_index = *material_map.entry(material_key).or_insert_with(|| {
-            let next_index = material_scratch.len() as u32;
-            material_scratch.push(instance_material_record(batch, instance, texture_index));
-            next_index
-        });
+            last_texture_slot = Some(instance.texture_index);
+            last_texture_index = idx;
+            idx
+        };
 
-        let mut flags = 0_u32;
-        if matches!(batch.lane, DrawLane::Transparent) {
-            flags |= FLAG_TRANSPARENT;
+        let material_key = instance_material_key(batch, instance);
+        let material_index = if last_material_key.as_ref() == Some(&material_key) {
+            last_material_index
+        } else {
+            let idx = *material_map.entry(material_key).or_insert_with(|| {
+                let next_index = material_scratch.len() as u32;
+                material_scratch.push(instance_material_record(batch, instance, texture_index));
+                next_index
+            });
+            last_material_key = Some(material_key);
+            last_material_index = idx;
+            idx
+        };
+
+        if transparent {
             stats.transparent_instances += 1;
         } else {
             stats.opaque_instances += 1;
         }
-        if batch.key.primitive_code >= 2 {
-            flags |= FLAG_MESH;
+        if is_mesh {
             stats.mesh_instances += 1;
         }
 
@@ -181,7 +268,7 @@ fn append_batch_instances(
             color_rgba: instance.base_color_rgba,
             material_index,
             texture_index,
-            flags,
+            flags: instance_flags,
             _padding: 0,
         });
     }
@@ -323,15 +410,18 @@ mod tests {
         let mut texture_scratch = Vec::new();
         let mut light_scratch = Vec::new();
         let mut primitive_range_scratch = Vec::new();
+        let mut sort_scratch = Vec::new();
         let (snapshot, stats) = build_vulkan_render_snapshot(
             42,
             [[1.0, 0.0, 0.0, 0.0]; 4],
+            [0.0, 0.0, 0.0],
             &draw,
             &mut transform_scratch,
             &mut material_scratch,
             &mut texture_scratch,
             &mut light_scratch,
             &mut primitive_range_scratch,
+            &mut sort_scratch,
         );
         assert_eq!(snapshot.frame_id, 42);
         assert_eq!(snapshot.camera_view_proj[0], [1.0, 0.0, 0.0, 0.0]);
@@ -420,15 +510,18 @@ mod tests {
         let mut texture_scratch = Vec::new();
         let mut light_scratch = Vec::new();
         let mut primitive_range_scratch = Vec::new();
+        let mut sort_scratch = Vec::new();
         let (snapshot, stats) = build_vulkan_render_snapshot(
             7,
             [[1.0, 0.0, 0.0, 0.0]; 4],
+            [0.0, 0.0, 0.0],
             &draw,
             &mut transform_scratch,
             &mut material_scratch,
             &mut texture_scratch,
             &mut light_scratch,
             &mut primitive_range_scratch,
+            &mut sort_scratch,
         );
 
         assert_eq!(stats.material_records, 2);
@@ -445,5 +538,76 @@ mod tests {
         assert_eq!(snapshot.materials[1].texture_index, 1);
         assert_eq!(snapshot.textures[0].texture_slot, 1);
         assert_eq!(snapshot.textures[1].texture_slot, 3);
+    }
+
+    #[test]
+    fn opaque_instances_sort_front_to_back() {
+        // Three balls at increasing distance from camera at origin.
+        // The unsorted order (insertion) would be far → mid → near; the sort should reverse it.
+        let make_instance = |id: u64, x: f32| {
+            let mut model = [[0.0_f32; 4]; 4];
+            model[0][0] = 1.0;
+            model[1][1] = 1.0;
+            model[2][2] = 1.0;
+            model[3] = [x, 0.0, 0.0, 1.0];
+            DrawInstance3d {
+                instance_id: id,
+                model_cols: model,
+                base_color_rgba: [1.0; 4],
+                material_params: [0.0; 4],
+                emissive_rgb: [0.0; 3],
+                texture_index: 0,
+            }
+        };
+
+        let draw = RuntimeDrawFrame {
+            mode: RuntimeSceneMode::Spatial3d,
+            view_2d: None,
+            opaque_batches: vec![DrawBatch3d {
+                lane: DrawLane::Opaque,
+                key: DrawBatchKey { primitive_code: 0, shading_code: 0, shadow_flags: 0 },
+                instances: vec![
+                    make_instance(1, 50.0), // far
+                    make_instance(2, 20.0), // mid
+                    make_instance(3, 5.0),  // near
+                    make_instance(4, 35.0), // mid-far
+                ],
+            }],
+            transparent_batches: Vec::new(),
+            sprites: Vec::new(),
+            lights: Vec::new(),
+            stats: crate::draw_path::DrawFrameStats {
+                opaque_instances: 4,
+                transparent_instances: 0,
+                sprite_instances: 0,
+                light_instances: 0,
+                opaque_batches: 1,
+                transparent_batches: 0,
+                total_draw_calls: 1,
+            },
+        };
+
+        let mut transform_scratch = Vec::new();
+        let mut material_scratch = Vec::new();
+        let mut texture_scratch = Vec::new();
+        let mut light_scratch = Vec::new();
+        let mut primitive_range_scratch = Vec::new();
+        let mut sort_scratch = Vec::new();
+        let (snapshot, _) = build_vulkan_render_snapshot(
+            1,
+            [[1.0, 0.0, 0.0, 0.0]; 4],
+            [0.0, 0.0, 0.0],
+            &draw,
+            &mut transform_scratch,
+            &mut material_scratch,
+            &mut texture_scratch,
+            &mut light_scratch,
+            &mut primitive_range_scratch,
+            &mut sort_scratch,
+        );
+
+        // After front-to-back sort: 5 → 20 → 35 → 50 (column 3, row 0 = translation x).
+        let xs: Vec<f32> = snapshot.transforms.iter().map(|t| t.model[3][0]).collect();
+        assert_eq!(xs, vec![5.0, 20.0, 35.0, 50.0]);
     }
 }

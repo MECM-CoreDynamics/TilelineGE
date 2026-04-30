@@ -34,7 +34,7 @@ use crate::tlsprite::decode_sprite_texture_to_rgba;
 
 use crate::draw_path::RuntimeDrawFrame;
 use crate::scene::RayTracingMode;
-use crate::upscaler::{resolve_fsr_status, FsrConfig, FsrStatus};
+use crate::upscaler::{resolve_fsr_status, FsrConfig, FsrMode, FsrStatus};
 use crate::vulkan_snapshot::{build_vulkan_render_snapshot, VulkanSnapshotBuildStats};
 use crate::wgpu_scene_renderer::{SceneRayTracingStatus, WgpuSceneRendererUploadStats};
 
@@ -102,6 +102,7 @@ pub struct VulkanSceneRenderer {
     texture_snapshot_scratch: Vec<FrameTextureRecord>,
     light_snapshot_scratch: Vec<FrameLightRecord>,
     primitive_range_scratch: Vec<FramePrimitiveRange>,
+    sort_scratch: Vec<(f32, u32)>,
     prefer_secondary_gpu: bool,
     camera_eye: [f32; 3],
     camera_target: [f32; 3],
@@ -131,6 +132,7 @@ impl VulkanSceneRenderer {
             texture_snapshot_scratch: Vec::with_capacity(scratch_capacity.max(128)),
             light_snapshot_scratch: Vec::with_capacity(32),
             primitive_range_scratch: Vec::with_capacity(scratch_capacity.max(64)),
+            sort_scratch: Vec::with_capacity(scratch_capacity),
             prefer_secondary_gpu: config.prefer_secondary_gpu,
             camera_eye: [0.0, 12.0, 36.0],
             camera_target: [0.0, 0.0, 0.0],
@@ -139,7 +141,7 @@ impl VulkanSceneRenderer {
             force_full_fbx_sphere: false,
             msaa_sample_count: 1,
             fsr_config: FsrConfig::default(),
-            fsr_status: resolve_fsr_status(FsrConfig::default(), Backend::Vulkan),
+            fsr_status: resolve_fsr_status(FsrConfig { mode: FsrMode::Off, ..FsrConfig::default() }, Backend::Vulkan),
             ray_tracing_status: resolve_rt_status(RayTracingMode::Auto, false),
             last_upload_stats: WgpuSceneRendererUploadStats::default(),
             last_frame_result: None,
@@ -203,10 +205,11 @@ impl VulkanSceneRenderer {
         (world_radius / clip_w.max(0.01)) * focal
     }
 
-    /// Runtime-side FSR policy update.
+    /// Runtime-side FSR policy update. Raw Vulkan backend does not implement FSR;
+    /// the stored config is preserved for later but the effective status stays off.
     pub fn set_fsr_config(&mut self, config: FsrConfig) {
         self.fsr_config = config;
-        self.fsr_status = resolve_fsr_status(config, Backend::Vulkan);
+        self.fsr_status = resolve_fsr_status(FsrConfig { mode: FsrMode::Off, ..config }, Backend::Vulkan);
     }
 
     /// Current effective FSR status.
@@ -347,6 +350,7 @@ impl VulkanSceneRenderer {
         let plan = self.build_frame_plan(frame_id, draw);
         let cross_adapter_bytes = Self::estimate_cross_adapter_bytes(draw);
         let camera_view_proj = self.camera_view_proj();
+        let camera_eye = self.camera_eye;
         let (
             backend,
             transform_snapshot_scratch,
@@ -354,6 +358,7 @@ impl VulkanSceneRenderer {
             texture_snapshot_scratch,
             light_snapshot_scratch,
             primitive_range_scratch,
+            sort_scratch,
         ) = (
             &mut self.backend,
             &mut self.transform_snapshot_scratch,
@@ -361,17 +366,20 @@ impl VulkanSceneRenderer {
             &mut self.texture_snapshot_scratch,
             &mut self.light_snapshot_scratch,
             &mut self.primitive_range_scratch,
+            &mut self.sort_scratch,
         );
         let (snapshot, snapshot_stats): (RenderStateSnapshot<'_>, VulkanSnapshotBuildStats) =
             build_vulkan_render_snapshot(
                 frame_id,
                 camera_view_proj,
+                camera_eye,
                 draw,
                 transform_snapshot_scratch,
                 material_snapshot_scratch,
                 texture_snapshot_scratch,
                 light_snapshot_scratch,
                 primitive_range_scratch,
+                sort_scratch,
             );
         let execution = backend.render_n_with_plan(snapshot, &plan)?;
         self.last_upload_stats = WgpuSceneRendererUploadStats {
