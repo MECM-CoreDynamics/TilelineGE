@@ -531,7 +531,7 @@ impl TlAppRuntime {
                     .spawn_per_tick_cap
                     .min(if severe_jitter { 96 } else { 112 });
         }
-        if matches!(self.tick_profile, TickProfile::Max) {
+        if matches!(self.tick_profile, TickProfile::Max | TickProfile::Heimdall) {
             let min_tick_scale = if severe_jitter {
                 0.62
             } else if moderate_jitter {
@@ -636,6 +636,7 @@ impl TlAppRuntime {
                 let mobile_ceiling = match self.tick_profile {
                     TickProfile::Balanced => 120.0,
                     TickProfile::Max => 160.0,
+                    TickProfile::Heimdall => 200.0,
                 };
                 desired_hz = desired_hz.min(mobile_ceiling);
             }
@@ -740,6 +741,25 @@ impl TlAppRuntime {
                         self.fps_limit_hint * 0.60
                     };
                     ema_floor.min(cap_floor.clamp(32.0, 220.0))
+                }
+                TickProfile::Heimdall => {
+                    let ema_floor = if mobile_path {
+                        (self.fps_tracker.ema_fps().max(1.0) * 1.65).clamp(30.0, 100.0)
+                    } else {
+                        (self.fps_tracker.ema_fps().max(1.0) * 8.0).clamp(60.0, 240.0)
+                    };
+                    let cap_floor = if mobile_path {
+                        if self.uncapped_dynamic_fps_hint {
+                            self.fps_limit_hint * 0.30
+                        } else {
+                            self.fps_limit_hint * 0.38
+                        }
+                    } else if self.uncapped_dynamic_fps_hint {
+                        self.fps_limit_hint * 0.55
+                    } else {
+                        self.fps_limit_hint * 0.72
+                    };
+                    ema_floor.min(cap_floor.clamp(40.0, 280.0))
                 }
             };
             let mut floor_hz = hard_floor.min(catch_up_hz * 0.90).max(24.0);

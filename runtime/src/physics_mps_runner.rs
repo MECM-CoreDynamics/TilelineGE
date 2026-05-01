@@ -17,6 +17,61 @@ use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tl_core::write_world_render_transforms_to_dispatcher_storage;
 
+/// MPS dispatcher tuning for the physics runner.
+///
+/// Controls queue depth and per-phase dispatch plans. Use [`PhysicsMpsRunnerConfig::standard`]
+/// for normal operation and [`PhysicsMpsRunnerConfig::heimdall`] for the ultra-aggressive
+/// Heimdall profile (higher power and thermal draw; document the tradeoff to users).
+#[derive(Debug, Clone)]
+pub struct PhysicsMpsRunnerConfig {
+    /// Lock-free ring capacity for MPS task queue slots.
+    pub queue_capacity: usize,
+    /// MPS dispatch plan for the broadphase phase.
+    pub broadphase_plan: DispatcherPhasePlan,
+    /// MPS dispatch plan for the narrowphase phase.
+    pub narrowphase_plan: DispatcherPhasePlan,
+    /// MPS dispatch plan for the solver phase.
+    pub solver_plan: DispatcherPhasePlan,
+    /// MPS dispatch plan for the integrate phase.
+    pub integrate_plan: DispatcherPhasePlan,
+}
+
+impl Default for PhysicsMpsRunnerConfig {
+    fn default() -> Self {
+        Self::standard(num_cpus::get())
+    }
+}
+
+impl PhysicsMpsRunnerConfig {
+    /// Standard config for desktop/Mac builds. All phases get a minimal (1,1) plan so MPS
+    /// can track and report them. Queue capacity matches the established baseline.
+    pub fn standard(_logical_threads: usize) -> Self {
+        Self {
+            queue_capacity: 262_144,
+            broadphase_plan: DispatcherPhasePlan::new(1, 1),
+            narrowphase_plan: DispatcherPhasePlan::new(1, 1),
+            solver_plan: DispatcherPhasePlan::new(1, 1),
+            integrate_plan: DispatcherPhasePlan::new(1, 1),
+        }
+    }
+
+    /// Heimdall ultra-aggressive profile: doubled queue depth and scaled phase chunk counts
+    /// based on available logical threads.
+    ///
+    /// **Tradeoff**: higher CPU utilization ceiling, more power draw, potentially louder
+    /// cooling. Never the silent default — only activated via explicit `--tick-profile heimdall`.
+    pub fn heimdall(logical_threads: usize) -> Self {
+        let extra = (logical_threads / 8).max(1);
+        Self {
+            queue_capacity: 524_288,
+            broadphase_plan: DispatcherPhasePlan::new(extra, 1),
+            narrowphase_plan: DispatcherPhasePlan::new(extra, 1),
+            solver_plan: DispatcherPhasePlan::new(extra, 1),
+            integrate_plan: DispatcherPhasePlan::new((extra + 1).max(2), 1),
+        }
+    }
+}
+
 /// Completion handle for an async physics step.
 ///
 /// Call [`wait`] before reading or writing the `PhysicsWorld` again.
@@ -61,13 +116,20 @@ pub struct PhysicsMpsRunner {
     world: Arc<Mutex<PhysicsWorld>>,
     dispatcher: Arc<TaskDispatcher>,
     next_frame_id: AtomicU64,
+    config: PhysicsMpsRunnerConfig,
 }
 
 impl PhysicsMpsRunner {
-    /// Create a runner from an existing world. Spawns the MPS worker pool.
+    /// Create a runner from an existing world using the standard config.
     pub fn new(world: PhysicsWorld) -> Self {
+        Self::new_with_config(world, PhysicsMpsRunnerConfig::default())
+    }
+
+    /// Create a runner from an existing world with explicit tuning config.
+    pub fn new_with_config(world: PhysicsWorld, config: PhysicsMpsRunnerConfig) -> Self {
         let mut dispatcher_config = TaskDispatcherConfig::default();
-        dispatcher_config.queue_capacity = dispatcher_config.queue_capacity.max(262_144);
+        dispatcher_config.queue_capacity =
+            dispatcher_config.queue_capacity.max(config.queue_capacity);
         dispatcher_config.transform_capacity =
             dispatcher_config.transform_capacity.max(world.body_count());
         let dispatcher = Arc::new(
@@ -84,6 +146,7 @@ impl PhysicsMpsRunner {
             world: Arc::new(Mutex::new(world)),
             dispatcher,
             next_frame_id: AtomicU64::new(1),
+            config,
         }
     }
 
@@ -111,6 +174,24 @@ impl PhysicsMpsRunner {
             transforms.as_ref(),
             transforms.render_read_slot(),
         );
+    }
+
+    /// Frame ID of the physics step currently executing on the MPS dispatcher, if any.
+    ///
+    /// Compare with the render frame ID to measure Render-N / Physics-N+1 overlap depth.
+    pub fn in_flight_frame_id(&self) -> Option<u64> {
+        self.dispatcher.metrics().active_frame_id
+    }
+
+    /// Number of physics frames that have been submitted ahead of `render_frame_id`.
+    ///
+    /// A value of 1 means Physics N+1 is already in flight while Render N is being composed —
+    /// the ideal overlap state. Values > 1 indicate the physics dispatcher is running ahead;
+    /// values of 0 mean physics and render are not overlapping this frame.
+    pub fn lag_frame_count(&self, render_frame_id: u64) -> u64 {
+        self.next_frame_id
+            .load(Ordering::Relaxed)
+            .saturating_sub(render_frame_id + 1)
     }
 
     /// Snapshot runtime-visible metrics from the bare-metal dispatcher.
@@ -201,10 +282,10 @@ impl PhysicsMpsRunner {
         let callbacks = DispatcherPhaseCallbacks::default().with_integration(integration);
         let trigger = PhysicsDispatchTrigger::with_phase_plans(
             frame_id,
-            DispatcherPhasePlan::default(),
-            DispatcherPhasePlan::default(),
-            DispatcherPhasePlan::default(),
-            DispatcherPhasePlan::new(1, 1),
+            self.config.broadphase_plan,
+            self.config.narrowphase_plan,
+            self.config.solver_plan,
+            self.config.integrate_plan,
             DispatcherPhasePlan::default(),
         );
         let await_publish =

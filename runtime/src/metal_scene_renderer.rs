@@ -83,6 +83,7 @@ pub struct MetalSceneRenderer {
     texture_snapshot_scratch: Vec<FrameTextureRecord>,
     light_snapshot_scratch: Vec<FrameLightRecord>,
     primitive_range_scratch: Vec<FramePrimitiveRange>,
+    sort_scratch: Vec<(f32, u32)>,
     camera_eye: [f32; 3],
     camera_target: [f32; 3],
     surface_width: u32,
@@ -111,6 +112,7 @@ impl MetalSceneRenderer {
             texture_snapshot_scratch: Vec::with_capacity(scratch_capacity.max(128)),
             light_snapshot_scratch: Vec::with_capacity(32),
             primitive_range_scratch: Vec::with_capacity(scratch_capacity.max(64)),
+            sort_scratch: Vec::with_capacity(scratch_capacity),
             camera_eye: [0.0, 12.0, 36.0],
             camera_target: [0.0, 0.0, 0.0],
             surface_width: 1,
@@ -277,6 +279,7 @@ impl MetalSceneRenderer {
     ) -> Result<&MetalSceneRendererFrameResult, MetalSceneRendererError> {
         let estimated_snapshot_bytes = Self::estimate_snapshot_bytes(draw);
         let camera_view_proj = self.camera_view_proj();
+        let camera_eye = self.camera_eye;
         let (
             backend,
             transform_snapshot_scratch,
@@ -284,6 +287,7 @@ impl MetalSceneRenderer {
             texture_snapshot_scratch,
             light_snapshot_scratch,
             primitive_range_scratch,
+            sort_scratch,
         ) = (
             &mut self.backend,
             &mut self.transform_snapshot_scratch,
@@ -291,17 +295,20 @@ impl MetalSceneRenderer {
             &mut self.texture_snapshot_scratch,
             &mut self.light_snapshot_scratch,
             &mut self.primitive_range_scratch,
+            &mut self.sort_scratch,
         );
         let (snapshot, snapshot_stats): (RenderStateSnapshot<'_>, VulkanSnapshotBuildStats) =
             build_vulkan_render_snapshot(
                 frame_id,
                 camera_view_proj,
+                camera_eye,
                 draw,
                 transform_snapshot_scratch,
                 material_snapshot_scratch,
                 texture_snapshot_scratch,
                 light_snapshot_scratch,
                 primitive_range_scratch,
+                sort_scratch,
             );
         let execution = backend.render_n(snapshot)?;
 

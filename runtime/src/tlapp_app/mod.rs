@@ -30,7 +30,7 @@ pub use self::console::{
 };
 pub use self::fps::{FpsReport, FpsTracker, RenderDistanceStats};
 
-use crate::physics_mps_runner::{PhysicsMpsRunner, PhysicsStepToken};
+use crate::physics_mps_runner::{PhysicsMpsRunner, PhysicsMpsRunnerConfig, PhysicsStepToken};
 use crate::{
     app_runner, apply_scene_light_overrides, choose_scheduler_path_for_platform_from_adapter,
     clamp_scene_lights_for_camera, compile_tljoint_scene_from_path,
@@ -2097,6 +2097,10 @@ fn choose_aggressive_tick_hz(
         (TickProfile::Max, true, false) => 2.0,
         (TickProfile::Max, false, true) => 3.4,
         (TickProfile::Max, false, false) => 2.9,
+        (TickProfile::Heimdall, true, true) => 2.8,
+        (TickProfile::Heimdall, true, false) => 2.3,
+        (TickProfile::Heimdall, false, true) => 4.0,
+        (TickProfile::Heimdall, false, false) => 3.4,
     };
     if fps_ratio > 0.95 {
         multiplier += if mobile_path { 0.35 } else { 1.0 };
@@ -2130,6 +2134,7 @@ fn choose_aggressive_tick_hz(
             let max_damping = match profile {
                 TickProfile::Balanced => 0.45,
                 TickProfile::Max => 0.30,
+                TickProfile::Heimdall => 0.20,
             };
             target_hz *= 1.0 - pressure * max_damping;
         }
@@ -2150,6 +2155,13 @@ fn choose_aggressive_tick_hz(
                     0.93
                 }
             }
+            TickProfile::Heimdall => {
+                if mobile_path {
+                    0.88
+                } else {
+                    0.97
+                }
+            }
         };
     }
     target_hz *= match profile {
@@ -2167,6 +2179,13 @@ fn choose_aggressive_tick_hz(
                 tick_scale.clamp(0.85, 1.35)
             }
         }
+        TickProfile::Heimdall => {
+            if mobile_path {
+                tick_scale.clamp(0.70, 1.20)
+            } else {
+                tick_scale.clamp(0.95, 1.50)
+            }
+        }
     };
 
     let dynamic_min = match profile {
@@ -2182,6 +2201,13 @@ fn choose_aggressive_tick_hz(
                 policy.min_tick_hz.max(28.0)
             } else {
                 policy.min_tick_hz.max(45.0)
+            }
+        }
+        TickProfile::Heimdall => {
+            if mobile_path {
+                policy.min_tick_hz.max(30.0)
+            } else {
+                policy.min_tick_hz.max(60.0)
             }
         }
     };
@@ -2217,6 +2243,19 @@ fn choose_aggressive_tick_hz(
                 10.0
             }
         }
+        TickProfile::Heimdall => {
+            if mobile_path {
+                if parallel_ready {
+                    4.8
+                } else {
+                    4.0
+                }
+            } else if parallel_ready {
+                16.0
+            } else {
+                13.0
+            }
+        }
     };
     let thread_gain = match profile {
         TickProfile::Balanced => {
@@ -2231,6 +2270,13 @@ fn choose_aggressive_tick_hz(
                 0.82 + thread_scale * 0.28
             } else {
                 0.9 + thread_scale * 0.55
+            }
+        }
+        TickProfile::Heimdall => {
+            if mobile_path {
+                0.90 + thread_scale * 0.40
+            } else {
+                1.0 + thread_scale * 0.70
             }
         }
     };
@@ -2297,6 +2343,8 @@ fn physics_safe_tick_ceiling_hz(
         (TickProfile::Balanced, false) => 0.52,
         (TickProfile::Max, true) => 0.48,
         (TickProfile::Max, false) => 0.62,
+        (TickProfile::Heimdall, true) => 0.56,
+        (TickProfile::Heimdall, false) => 0.74,
     };
     let thread_gain = if mobile_path {
         (logical_threads as f32 / 8.0).clamp(0.75, 1.10)

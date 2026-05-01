@@ -824,7 +824,12 @@ impl TlAppRuntime {
             queue,
             config,
             size,
-            world: PhysicsMpsRunner::new(world),
+            world: PhysicsMpsRunner::new_with_config(world, {
+                match options.tick_profile {
+                    TickProfile::Heimdall => PhysicsMpsRunnerConfig::heimdall(logical_threads),
+                    _ => PhysicsMpsRunnerConfig::standard(logical_threads),
+                }
+            }),
             physics_token: None,
             last_tick: BounceTankTickMetrics {
                 spawned_this_tick: 0,

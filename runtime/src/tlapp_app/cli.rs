@@ -136,6 +136,10 @@ pub enum VsyncMode {
 pub enum TickProfile {
     Balanced,
     Max,
+    /// Ultra-aggressive MPS/GMS/MGS tuning. Higher tick-Hz ceiling, doubled MPS queue depth,
+    /// and scaled phase-chunk counts. Accepts more power draw and thermal pressure in exchange
+    /// for lower physics latency. Never the silent default.
+    Heimdall,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,9 +167,11 @@ impl TickProfile {
         match value.to_ascii_lowercase().as_str() {
             "balanced" => Ok(Self::Balanced),
             "max" | "aggressive" => Ok(Self::Max),
-            _ => {
-                Err(format!("invalid --tick-profile value: {value} (expected balanced|max)").into())
-            }
+            "heimdall" => Ok(Self::Heimdall),
+            _ => Err(format!(
+                "invalid --tick-profile value: {value} (expected balanced|max|heimdall)"
+            )
+            .into()),
         }
     }
 }
@@ -554,7 +560,7 @@ fn apply_ini_overrides(
             "vsync" => options.vsync = VsyncMode::parse(&value)?,
             "fps_cap" => options.fps_cap = parse_fps_cap(&value)?,
             "pipeline" => options.pipeline_mode = PipelineMode::parse(&value)?,
-            "tick_profile" => options.tick_profile = TickProfile::parse(&value)?,
+            "tick_profile" | "mps_profile" => options.tick_profile = TickProfile::parse(&value)?,
             "tick_cap" => options.tick_cap = parse_tick_cap(&value)?,
             "render_distance" => options.render_distance = parse_render_distance(&value)?,
             "adaptive_distance" => {
@@ -668,7 +674,7 @@ fn print_usage() {
     println!(
         "  --pipeline <mode>         Runtime frame pipeline: parallel|legacy (default: parallel)"
     );
-    println!("  --tick-profile <mode>     Physics tick planner: balanced|max (default: max)");
+    println!("  --tick-profile <mode>     Physics tick planner: balanced|max|heimdall (default: max)");
     println!("  --tick-cap <Hz|off>       Maximum physics tick Hz (default: off = auto)");
     println!("  --render-distance <N|off> Distance cull radius for 3D balls (default: auto)");
     println!("  --adaptive-distance <mode> Adaptive distance tuning: auto|on|off (default: auto)");
