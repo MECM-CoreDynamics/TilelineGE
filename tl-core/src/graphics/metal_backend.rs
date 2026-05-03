@@ -215,8 +215,38 @@ pub struct MetalBackend {
     index_buffer: Option<Buffer>,
     transform_buffer: Option<Buffer>,
     view_proj_buffer: Option<Buffer>,
-    frame_pacing_tx: std::sync::mpsc::SyncSender<()>,
-    frame_pacing_rx: std::sync::mpsc::Receiver<()>,
+    frame_pacing: FramePacing,
+}
+
+#[derive(Clone)]
+struct FramePacing {
+    inner: std::sync::Arc<(std::sync::Mutex<usize>, std::sync::Condvar)>,
+    max: usize,
+}
+
+impl FramePacing {
+    fn new(max: usize) -> Self {
+        Self {
+            inner: std::sync::Arc::new((std::sync::Mutex::new(0), std::sync::Condvar::new())),
+            max,
+        }
+    }
+
+    fn wait(&self) {
+        let (lock, cvar) = &*self.inner;
+        let mut guard = lock.lock().unwrap();
+        while *guard >= self.max {
+            guard = cvar.wait(guard).unwrap();
+        }
+        *guard += 1;
+    }
+
+    fn signal(&self) {
+        let (lock, cvar) = &*self.inner;
+        let mut guard = lock.lock().unwrap();
+        *guard -= 1;
+        cvar.notify_one();
+    }
 }
 
 impl MetalBackend {
@@ -335,11 +365,7 @@ impl MetalBackend {
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         ));
 
-        let (frame_pacing_tx, frame_pacing_rx) =
-            std::sync::mpsc::sync_channel(config.frames_in_flight);
-        for _ in 0..config.frames_in_flight {
-            let _ = frame_pacing_tx.send(());
-        }
+        let frame_pacing = FramePacing::new(config.frames_in_flight);
 
         Ok(Self {
             config,
@@ -361,8 +387,7 @@ impl MetalBackend {
             index_buffer,
             transform_buffer,
             view_proj_buffer,
-            frame_pacing_tx,
-            frame_pacing_rx,
+            frame_pacing,
         })
     }
 
@@ -454,7 +479,7 @@ impl MetalBackend {
         let snapshot_state = self.upload_state_snapshot(frame_slot, snapshot)?;
 
         // Wait for an in-flight slot before acquiring a drawable
-        self.frame_pacing_rx.recv().unwrap();
+        self.frame_pacing.wait();
 
         let drawable = self.layer.next_drawable();
         let command_buffer = self.command_queue.new_command_buffer();
@@ -527,10 +552,11 @@ impl MetalBackend {
                 early_z_reject_estimate = e;
             }
 
-            let tx = self.frame_pacing_tx.clone();
-            let block = block::ConcreteBlock::new(move |_buffer: &metal::CommandBufferRef| {
-                let _ = tx.send(());
+            let pacing = self.frame_pacing.clone();
+            let concrete = block::ConcreteBlock::new(move |_buffer: &metal::CommandBufferRef| {
+                pacing.signal();
             });
+            let block = concrete.copy();
             command_buffer.add_completed_handler(&block);
             command_buffer.present_drawable(drawable_ref);
             command_buffer.commit();
@@ -559,7 +585,7 @@ impl MetalBackend {
             })
         } else {
             // No drawable available – return the pacing token immediately
-            let _ = self.frame_pacing_tx.send(());
+            self.frame_pacing.signal();
             Ok(MetalFrameExecutionTelemetry {
                 submission: MetalFrameSubmissionTelemetry {
                     frame_slot,
@@ -794,11 +820,7 @@ impl MetalBackend {
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         ));
 
-        let (frame_pacing_tx, frame_pacing_rx) =
-            std::sync::mpsc::sync_channel(config.frames_in_flight);
-        for _ in 0..config.frames_in_flight {
-            let _ = frame_pacing_tx.send(());
-        }
+        let frame_pacing = FramePacing::new(config.frames_in_flight);
 
         Ok(Self {
             config,
@@ -820,8 +842,7 @@ impl MetalBackend {
             index_buffer,
             transform_buffer,
             view_proj_buffer,
-            frame_pacing_tx,
-            frame_pacing_rx,
+            frame_pacing,
         })
     }
 
@@ -832,6 +853,8 @@ impl MetalBackend {
     ) -> Result<MetalFrameExecutionTelemetry, MetalBackendError> {
         let frame_slot = self.current_frame_slot;
         let snapshot_state = self.upload_state_snapshot(frame_slot, snapshot)?;
+
+        self.frame_pacing.wait();
 
         let command_buffer = self.command_queue.new_command_buffer();
 
@@ -908,6 +931,8 @@ impl MetalBackend {
         }
 
         command_buffer.commit();
+        command_buffer.wait_until_completed();
+        self.frame_pacing.signal();
 
         self.primary_submission_serial = self.primary_submission_serial.saturating_add(1);
         self.current_frame_slot = (self.current_frame_slot + 1) % self.frame_slots.len();
