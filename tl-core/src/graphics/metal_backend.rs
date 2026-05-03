@@ -19,7 +19,7 @@ use metal::{
     Device, MTLClearColor, MTLCompareFunction, MTLIndexType, MTLLoadAction, MTLPixelFormat,
     MTLPrimitiveType, MTLResourceOptions, MTLStoreAction, MTLTextureType, MTLTextureUsage,
     MTLVertexFormat, MTLVertexStepFunction, MetalLayer, RenderPassDescriptor, RenderPipelineState,
-    Texture, TextureDescriptor,
+    SamplerDescriptor, SamplerState, Texture, TextureDescriptor,
 };
 use objc::runtime::Object;
 use objc::{msg_send, sel, sel_impl};
@@ -27,6 +27,7 @@ use winit::dpi::PhysicalSize;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
+use super::metal::mesh_slot::MeshSlot;
 use crate::graphics::frame_snapshot::RenderStateSnapshot;
 
 /// Runtime configuration for the raw Metal backend.
@@ -212,6 +213,8 @@ pub struct MetalBackend {
     instance_scratch: Vec<GpuInstance3d>,
     stub_buffer: Buffer,
     stub_shadow_texture: Texture,
+    stub_shadow_sampler: SamplerState,
+    mesh_slots: std::collections::HashMap<u8, MeshSlot>,
     frame_pacing: FramePacing,
 }
 
@@ -345,6 +348,13 @@ impl MetalBackend {
         stub_shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
         stub_shadow_desc.set_usage(MTLTextureUsage::ShaderRead);
         let stub_shadow_texture = device.new_texture(&stub_shadow_desc);
+        let mut stub_shadow_sampler_desc = SamplerDescriptor::new();
+        stub_shadow_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+        stub_shadow_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+        stub_shadow_sampler_desc.set_compare_function(metal::MTLCompareFunction::LessEqual);
+        stub_shadow_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
+        stub_shadow_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
+        let stub_shadow_sampler = device.new_sampler(&stub_shadow_sampler_desc);
 
         let frame_pacing = FramePacing::new(config.frames_in_flight);
 
@@ -371,6 +381,8 @@ impl MetalBackend {
             instance_scratch: Vec::with_capacity(max_transforms),
             stub_buffer,
             stub_shadow_texture,
+            stub_shadow_sampler,
+            mesh_slots: std::collections::HashMap::new(),
             frame_pacing,
         })
     }
@@ -831,6 +843,13 @@ impl MetalBackend {
         stub_shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
         stub_shadow_desc.set_usage(MTLTextureUsage::ShaderRead);
         let stub_shadow_texture = device.new_texture(&stub_shadow_desc);
+        let mut stub_shadow_sampler_desc = SamplerDescriptor::new();
+        stub_shadow_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+        stub_shadow_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+        stub_shadow_sampler_desc.set_compare_function(metal::MTLCompareFunction::LessEqual);
+        stub_shadow_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
+        stub_shadow_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
+        let stub_shadow_sampler = device.new_sampler(&stub_shadow_sampler_desc);
 
         let frame_pacing = FramePacing::new(config.frames_in_flight);
 
@@ -857,6 +876,8 @@ impl MetalBackend {
             instance_scratch: Vec::with_capacity(max_transforms),
             stub_buffer,
             stub_shadow_texture,
+            stub_shadow_sampler,
+            mesh_slots: std::collections::HashMap::new(),
             frame_pacing,
         })
     }
