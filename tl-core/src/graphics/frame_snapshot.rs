@@ -2,6 +2,14 @@
 //!
 //! These payload types are shared by Vulkan and Metal runtime backends.
 
+/// Axis-aligned bounding box per instance for occlusion-culling.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InstanceBounds {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
 /// Per-instance transform payload uploaded into backend-visible snapshot buffers.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]

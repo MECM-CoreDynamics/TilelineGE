@@ -613,4 +613,48 @@ mod tests {
         let xs: Vec<f32> = snapshot.transforms.iter().map(|t| t.model[3][0]).collect();
         assert_eq!(xs, vec![5.0, 20.0, 35.0, 50.0]);
     }
+
+    #[test]
+    fn snapshot_includes_empty_geometry_fields() {
+        let draw = crate::draw_path::RuntimeDrawFrame {
+            mode: crate::scene::RuntimeSceneMode::Spatial3d,
+            view_2d: None,
+            opaque_batches: vec![],
+            transparent_batches: vec![],
+            sprites: Vec::new(),
+            lights: Vec::new(),
+            stats: crate::draw_path::DrawFrameStats {
+                opaque_instances: 0,
+                transparent_instances: 0,
+                sprite_instances: 0,
+                light_instances: 0,
+                opaque_batches: 0,
+                transparent_batches: 0,
+                total_draw_calls: 0,
+            },
+        };
+
+        let mut transform_scratch = Vec::new();
+        let mut material_scratch = Vec::new();
+        let mut texture_scratch = Vec::new();
+        let mut light_scratch = Vec::new();
+        let mut primitive_range_scratch = Vec::new();
+        let mut sort_scratch = Vec::new();
+        let (snapshot, _) = build_vulkan_render_snapshot(
+            1,
+            [[1.0, 0.0, 0.0, 0.0]; 4],
+            [0.0, 0.0, 0.0],
+            &draw,
+            &mut transform_scratch,
+            &mut material_scratch,
+            &mut texture_scratch,
+            &mut light_scratch,
+            &mut primitive_range_scratch,
+            &mut sort_scratch,
+        );
+
+        assert!(snapshot.instance_bounds.is_empty());
+        assert!(snapshot.vertices.is_empty());
+        assert!(snapshot.indices.is_empty());
+    }
 }
