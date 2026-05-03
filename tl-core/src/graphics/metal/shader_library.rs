@@ -138,15 +138,17 @@ fn build_pipeline(
     }
 
     let vertex_descriptor = VertexDescriptor::new();
+    let mut global_attr_index = 0;
     for (buffer_index, layout) in vertex_layout.buffer_layouts.iter().enumerate() {
         let buffer_layout_desc = vertex_descriptor.layouts().object_at(buffer_index as u64).unwrap();
         buffer_layout_desc.set_stride(layout.stride as u64);
         buffer_layout_desc.set_step_function(layout.step_function);
-        for (attr_index, attr) in layout.attributes.iter().enumerate() {
-            let attr_desc = vertex_descriptor.attributes().object_at(attr_index as u64).unwrap();
+        for attr in layout.attributes.iter() {
+            let attr_desc = vertex_descriptor.attributes().object_at(global_attr_index as u64).unwrap();
             attr_desc.set_format(attr.format);
             attr_desc.set_offset(attr.offset as u64);
             attr_desc.set_buffer_index(attr.buffer_index as u64);
+            global_attr_index += 1;
         }
     }
     desc.set_vertex_descriptor(Some(&vertex_descriptor));

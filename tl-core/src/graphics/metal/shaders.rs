@@ -41,13 +41,10 @@ struct ShadowUniform {
 };
 
 // ── Vertex Input ─────────────────────────────────────────────────────────────
-struct VertexIn {
+struct VSIn {
     float3 position [[attribute(0)]];
     float3 normal   [[attribute(1)]];
     float2 uv       [[attribute(2)]];
-};
-
-struct InstanceIn {
     float4 model_col0 [[attribute(3)]];
     float4 model_col1 [[attribute(4)]];
     float4 model_col2 [[attribute(5)]];
@@ -69,23 +66,22 @@ struct VSOut {
 };
 
 vertex VSOut scene_3d_vertex(
-    VertexIn   vin  [[stage_in]],
-    InstanceIn inst [[stage_in]],
-    constant Camera &camera [[buffer(0)]]
+    VSIn in [[stage_in]],
+    constant Camera &camera [[buffer(2)]]
 ) {
-    float4x4 model = float4x4(inst.model_col0, inst.model_col1,
-                              inst.model_col2, inst.model_col3);
-    float4 world_pos = model * float4(vin.position, 1.0);
+    float4x4 model = float4x4(in.model_col0, in.model_col1,
+                              in.model_col2, in.model_col3);
+    float4 world_pos = model * float4(in.position, 1.0);
 
     VSOut out;
     out.position       = camera.view_proj * world_pos;
-    out.color          = inst.base_color;
-    out.emissive       = inst.emissive.xyz;
+    out.color          = in.base_color;
+    out.emissive       = in.emissive.xyz;
     out.world_pos      = world_pos.xyz;
-    out.local_pos      = vin.position;
-    out.primitive_code = inst.material_params.w;
-    out.roughness      = inst.material_params.x;
-    out.metallic       = inst.material_params.y;
+    out.local_pos      = in.position;
+    out.primitive_code = in.material_params.w;
+    out.roughness      = in.material_params.x;
+    out.metallic       = in.material_params.y;
     return out;
 }
 
@@ -439,25 +435,26 @@ struct ShadowPassUniform {
     float4x4 light_view_proj;
 };
 
-struct VertexIn {
+struct ShadowVSIn {
     float3 position [[attribute(0)]];
-};
-
-struct InstanceIn {
+    float3 normal   [[attribute(1)]];
+    float2 uv       [[attribute(2)]];
     float4 model_col0 [[attribute(3)]];
     float4 model_col1 [[attribute(4)]];
     float4 model_col2 [[attribute(5)]];
     float4 model_col3 [[attribute(6)]];
+    float4 base_color [[attribute(7)]];
+    float4 material_params [[attribute(8)]];
+    float4 emissive   [[attribute(9)]];
 };
 
 vertex float4 scene_shadow_vertex(
-    VertexIn   vin  [[stage_in]],
-    InstanceIn inst [[stage_in]],
+    ShadowVSIn in [[stage_in]],
     constant ShadowPassUniform &u_shadow [[buffer(0)]]
 ) {
-    float4x4 model = float4x4(inst.model_col0, inst.model_col1,
-                              inst.model_col2, inst.model_col3);
-    float4 world_pos = model * float4(vin.position, 1.0);
+    float4x4 model = float4x4(in.model_col0, in.model_col1,
+                              in.model_col2, in.model_col3);
+    float4 world_pos = model * float4(in.position, 1.0);
     return u_shadow.light_view_proj * world_pos;
 }
 "#;

@@ -73,6 +73,7 @@ pub struct FramePrimitiveRange {
 pub struct RenderStateSnapshot<'a> {
     pub frame_id: u64,
     pub camera_view_proj: [[f32; 4]; 4],
+    pub camera_eye: [f32; 4],
     pub opaque_instance_count: u32,
     pub transparent_instance_count: u32,
     pub primitive_ranges: &'a [FramePrimitiveRange],

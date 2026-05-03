@@ -15,14 +15,15 @@ use std::sync::Arc;
 
 use core_graphics_types::geometry::CGSize;
 use metal::{
-    foreign_types::ForeignType, Buffer, CommandQueue, DepthStencilDescriptor, DepthStencilState,
-    Device, MTLClearColor, MTLCompareFunction, MTLIndexType, MTLLoadAction, MTLPixelFormat,
-    MTLPrimitiveType, MTLResourceOptions, MTLStoreAction, MTLTextureType, MTLTextureUsage,
-    MTLVertexFormat, MTLVertexStepFunction, MetalLayer, RenderPassDescriptor, RenderPipelineState,
-    Texture, TextureDescriptor,
+    foreign_types::ForeignType,
+    Buffer, CommandQueue, CompileOptions, DepthStencilDescriptor, DepthStencilState, Device,
+    Function, MTLClearColor, MTLCompareFunction, MTLIndexType, MTLLoadAction,
+    MTLPixelFormat, MTLPrimitiveType, MTLResourceOptions, MTLStoreAction, MTLTextureUsage,
+    MTLVertexFormat, MTLVertexStepFunction, MetalLayer, RenderPassDescriptor,
+    RenderPipelineDescriptor, RenderPipelineState, Texture, TextureDescriptor,
 };
-use objc::runtime::Object;
 use objc::{msg_send, sel, sel_impl};
+use objc::runtime::Object;
 use winit::dpi::PhysicalSize;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
@@ -136,57 +137,62 @@ impl Display for MetalBackendError {
 
 impl Error for MetalBackendError {}
 
-use super::metal::shader_library::{
-    BlendMode, PipelineKey, ShaderLibrary, VertexAttributeDesc, VertexBufferLayoutDesc,
-    VertexLayout,
+const SHADER_SOURCE: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct VertexIn {
+    float3 position [[attribute(0)]];
+    float3 normal   [[attribute(1)]];
+    float2 uv       [[attribute(2)]];
 };
-use super::metal::shaders::SCENE_3D_MSL;
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct GpuInstance3d {
-    model_col0: [f32; 4],
-    model_col1: [f32; 4],
-    model_col2: [f32; 4],
-    model_col3: [f32; 4],
-    base_color: [f32; 4],
-    material_params: [f32; 4],
-    emissive: [f32; 4],
+struct ZPrepassOut {
+    float4 position [[position]];
+};
+
+vertex ZPrepassOut z_prepass_vertex(
+    VertexIn in [[stage_in]],
+    constant float4x4 &view_proj [[buffer(1)]],
+    constant float4x4 *model_matrices [[buffer(2)]],
+    uint instance_id [[instance_id]]
+) {
+    ZPrepassOut out;
+    float4 world_pos = model_matrices[instance_id] * float4(in.position, 1.0);
+    out.position = view_proj * world_pos;
+    return out;
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct CameraUniform {
-    view_proj: [[f32; 4]; 4],
-    camera_eye: [f32; 4],
+fragment void z_prepass_fragment() {}
+
+struct ForwardOut {
+    float4 position [[position]];
+    float3 world_normal;
+    float2 uv;
+};
+
+vertex ForwardOut forward_vertex(
+    VertexIn in [[stage_in]],
+    constant float4x4 &view_proj [[buffer(1)]],
+    constant float4x4 *model_matrices [[buffer(2)]],
+    uint instance_id [[instance_id]]
+) {
+    ForwardOut out;
+    float4 world_pos = model_matrices[instance_id] * float4(in.position, 1.0);
+    out.position = view_proj * world_pos;
+    out.world_normal = (model_matrices[instance_id] * float4(in.normal, 0.0)).xyz;
+    out.uv = in.uv;
+    return out;
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct LightingUniform {
-    light_count: u32,
-    rt_mode: u32,
-    rt_active: u32,
-    rt_dynamic_count: u32,
-    rt_dynamic_cap: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+fragment float4 forward_fragment(ForwardOut in [[stage_in]]) {
+    float3 color = float3(0.5, 0.5, 0.5);
+    float3 light_dir = normalize(float3(1.0, 1.0, 1.0));
+    float ndotl = max(dot(normalize(in.world_normal), light_dir), 0.0);
+    float3 lit = color * (0.2 + 0.8 * ndotl);
+    return float4(lit, 1.0);
 }
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct ShadowUniform {
-    light_view_proj: [[[f32; 4]; 4]; METAL_SHADOW_LAYERS],
-    shadow_light_indices: [i32; 4],
-    shadow_count: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
-}
-
-const METAL_MAX_LIGHTS: usize = 64;
-const METAL_SHADOW_LAYERS: usize = 4;
+"#;
 
 /// Raw Metal backend MVP used by runtime integration layers.
 pub struct MetalBackend {
@@ -209,9 +215,6 @@ pub struct MetalBackend {
     index_buffer: Option<Buffer>,
     transform_buffer: Option<Buffer>,
     view_proj_buffer: Option<Buffer>,
-    instance_scratch: Vec<GpuInstance3d>,
-    stub_buffer: Buffer,
-    stub_shadow_texture: Texture,
     frame_pacing: FramePacing,
 }
 
@@ -266,7 +269,7 @@ impl MetalBackend {
 
         let max_materials = config.max_instances.max(256);
         let max_textures = config.max_instances.max(128);
-        let max_lights = METAL_MAX_LIGHTS;
+        let max_lights = 64;
         let frame_slots = (0..config.frames_in_flight)
             .map(|_| SnapshotSlot {
                 instance_capacity: config.max_instances,
@@ -277,7 +280,40 @@ impl MetalBackend {
             })
             .collect::<Vec<_>>();
 
-        let (z_prepass_pipeline, forward_pipeline) = build_scene_pipelines(&device)?;
+        let library = device
+            .new_library_with_source(SHADER_SOURCE, &CompileOptions::new())
+            .map_err(MetalBackendError::ShaderCompilation)?;
+
+        let z_prepass_vertex = library
+            .get_function("z_prepass_vertex", None)
+            .map_err(MetalBackendError::ShaderCompilation)?;
+        let z_prepass_fragment = library
+            .get_function("z_prepass_fragment", None)
+            .map_err(MetalBackendError::ShaderCompilation)?;
+        let forward_vertex = library
+            .get_function("forward_vertex", None)
+            .map_err(MetalBackendError::ShaderCompilation)?;
+        let forward_fragment = library
+            .get_function("forward_fragment", None)
+            .map_err(MetalBackendError::ShaderCompilation)?;
+
+        let z_prepass_pipeline = build_pipeline(
+            &device,
+            &z_prepass_vertex,
+            Some(&z_prepass_fragment),
+            MTLPixelFormat::BGRA8Unorm,
+            MTLPixelFormat::Depth32Float,
+        )
+        .map_err(MetalBackendError::PipelineCreation)?;
+
+        let forward_pipeline = build_pipeline(
+            &device,
+            &forward_vertex,
+            Some(&forward_fragment),
+            MTLPixelFormat::BGRA8Unorm,
+            MTLPixelFormat::Depth32Float,
+        )
+        .map_err(MetalBackendError::PipelineCreation)?;
 
         let depth_state_write = build_depth_state(&device, MTLCompareFunction::Less, true)
             .map_err(MetalBackendError::PipelineCreation)?;
@@ -292,10 +328,7 @@ impl MetalBackend {
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_display_sync_enabled(true);
         layer.set_maximum_drawable_count(3);
-        layer.set_drawable_size(CGSize::new(
-            surface_size.width as f64,
-            surface_size.height as f64,
-        ));
+        layer.set_drawable_size(CGSize::new(surface_size.width as f64, surface_size.height as f64));
 
         let view = {
             let handle = window
@@ -324,27 +357,13 @@ impl MetalBackend {
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         ));
         let transform_buffer = Some(device.new_buffer(
-            (max_transforms * std::mem::size_of::<GpuInstance3d>()) as u64,
+            (max_transforms * std::mem::size_of::<[[f32; 4]; 4]>()) as u64,
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         ));
         let view_proj_buffer = Some(device.new_buffer(
-            std::mem::size_of::<CameraUniform>() as u64,
+            std::mem::size_of::<[[f32; 4]; 4]>() as u64,
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         ));
-
-        let stub_buffer = device.new_buffer(
-            metal_stub_fragment_buffer_len(),
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        );
-        zero_shared_buffer(&stub_buffer);
-        let stub_shadow_desc = TextureDescriptor::new();
-        stub_shadow_desc.set_texture_type(MTLTextureType::D2Array);
-        stub_shadow_desc.set_width(1);
-        stub_shadow_desc.set_height(1);
-        stub_shadow_desc.set_array_length(1);
-        stub_shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
-        stub_shadow_desc.set_usage(MTLTextureUsage::ShaderRead);
-        let stub_shadow_texture = device.new_texture(&stub_shadow_desc);
 
         let frame_pacing = FramePacing::new(config.frames_in_flight);
 
@@ -368,9 +387,6 @@ impl MetalBackend {
             index_buffer,
             transform_buffer,
             view_proj_buffer,
-            instance_scratch: Vec::with_capacity(max_transforms),
-            stub_buffer,
-            stub_shadow_texture,
             frame_pacing,
         })
     }
@@ -397,8 +413,7 @@ impl MetalBackend {
         }
         self.surface_size = new_size;
         self.depth_texture = create_depth_texture(&self.device, new_size.width, new_size.height);
-        self.layer
-            .set_drawable_size(CGSize::new(new_size.width as f64, new_size.height as f64));
+        self.layer.set_drawable_size(CGSize::new(new_size.width as f64, new_size.height as f64));
         Ok(())
     }
 
@@ -406,7 +421,7 @@ impl MetalBackend {
     pub fn upload_state_snapshot(
         &mut self,
         frame_slot: usize,
-        snapshot: &RenderStateSnapshot<'_>,
+        snapshot: RenderStateSnapshot<'_>,
     ) -> Result<MetalSnapshotSlotState, MetalBackendError> {
         let slot = self
             .frame_slots
@@ -455,35 +470,13 @@ impl MetalBackend {
         Ok(slot.last_state)
     }
 
-    fn prepare_instance_scratch(&mut self, snapshot: &RenderStateSnapshot<'_>) {
-        self.instance_scratch.clear();
-        self.instance_scratch.reserve(snapshot.transforms.len());
-        for transform in snapshot.transforms {
-            let (material_params, emissive_rgb) = snapshot
-                .materials
-                .get(transform.material_index as usize)
-                .map(|material| (material.material_params, material.emissive_rgb))
-                .unwrap_or(([0.55, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0]));
-            self.instance_scratch.push(GpuInstance3d {
-                model_col0: transform.model[0],
-                model_col1: transform.model[1],
-                model_col2: transform.model[2],
-                model_col3: transform.model[3],
-                base_color: transform.color_rgba,
-                material_params,
-                emissive: [emissive_rgb[0], emissive_rgb[1], emissive_rgb[2], 0.0],
-            });
-        }
-    }
-
     /// Submit one frame worth of work to the Metal command queue.
     pub fn render_n(
         &mut self,
         snapshot: RenderStateSnapshot<'_>,
     ) -> Result<MetalFrameExecutionTelemetry, MetalBackendError> {
         let frame_slot = self.current_frame_slot;
-        let snapshot_state = self.upload_state_snapshot(frame_slot, &snapshot)?;
-        self.prepare_instance_scratch(&snapshot);
+        let snapshot_state = self.upload_state_snapshot(frame_slot, snapshot)?;
 
         // Wait for an in-flight slot before acquiring a drawable
         self.frame_pacing.wait();
@@ -524,24 +517,20 @@ impl MetalBackend {
                     }
                 }
                 if !snapshot.transforms.is_empty() {
-                    let trans_bytes = std::mem::size_of_val(self.instance_scratch.as_slice());
+                    let trans_bytes = std::mem::size_of_val(snapshot.transforms);
                     unsafe {
                         std::ptr::copy_nonoverlapping(
-                            self.instance_scratch.as_ptr() as *const u8,
+                            snapshot.transforms.as_ptr() as *const u8,
                             tb.contents() as *mut u8,
                             trans_bytes.min(tb.length() as usize),
                         );
                     }
                 }
                 {
-                    let camera = CameraUniform {
-                        view_proj: snapshot.camera_view_proj,
-                        camera_eye: snapshot.camera_eye,
-                    };
-                    let vp_bytes = std::mem::size_of::<CameraUniform>();
+                    let vp_bytes = std::mem::size_of_val(&snapshot.camera_view_proj);
                     unsafe {
                         std::ptr::copy_nonoverlapping(
-                            &camera as *const CameraUniform as *const u8,
+                            snapshot.camera_view_proj.as_ptr() as *const u8,
                             vpb.contents() as *mut u8,
                             vp_bytes.min(vpb.length() as usize),
                         );
@@ -634,10 +623,7 @@ impl MetalBackend {
         let main_pass_draw_calls;
         let mut early_z_reject_estimate = 0u32;
 
-        if self.config.occlusion_culling_enabled
-            && !snapshot.indices.is_empty()
-            && instance_count > 0
-        {
+        if self.config.occlusion_culling_enabled && !snapshot.indices.is_empty() && instance_count > 0 {
             // Pass 1 — Z-Prepass (depth-only)
             let pass_desc = RenderPassDescriptor::new();
             let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
@@ -656,8 +642,8 @@ impl MetalBackend {
             encoder.set_render_pipeline_state(&self.z_prepass_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_write);
             encoder.set_vertex_buffer(0, Some(vb), 0);
-            encoder.set_vertex_buffer(1, Some(tb), 0);
-            encoder.set_vertex_buffer(2, Some(vpb), 0);
+            encoder.set_vertex_buffer(1, Some(vpb), 0);
+            encoder.set_vertex_buffer(2, Some(tb), 0);
             encoder.draw_indexed_primitives_instanced(
                 MTLPrimitiveType::Triangle,
                 index_count as u64,
@@ -685,13 +671,8 @@ impl MetalBackend {
             encoder.set_render_pipeline_state(&self.forward_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_equal);
             encoder.set_vertex_buffer(0, Some(vb), 0);
-            encoder.set_vertex_buffer(1, Some(tb), 0);
-            encoder.set_vertex_buffer(2, Some(vpb), 0);
-            encoder.set_fragment_buffer(0, Some(vpb), 0);
-            encoder.set_fragment_buffer(1, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_buffer(2, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
+            encoder.set_vertex_buffer(1, Some(vpb), 0);
+            encoder.set_vertex_buffer(2, Some(tb), 0);
             encoder.draw_indexed_primitives_instanced(
                 MTLPrimitiveType::Triangle,
                 index_count as u64,
@@ -723,13 +704,8 @@ impl MetalBackend {
             encoder.set_render_pipeline_state(&self.forward_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_write);
             encoder.set_vertex_buffer(0, Some(vb), 0);
-            encoder.set_vertex_buffer(1, Some(tb), 0);
-            encoder.set_vertex_buffer(2, Some(vpb), 0);
-            encoder.set_fragment_buffer(0, Some(vpb), 0);
-            encoder.set_fragment_buffer(1, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_buffer(2, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
+            encoder.set_vertex_buffer(1, Some(vpb), 0);
+            encoder.set_vertex_buffer(2, Some(tb), 0);
             encoder.draw_indexed_primitives_instanced(
                 MTLPrimitiveType::Triangle,
                 index_count as u64,
@@ -742,11 +718,7 @@ impl MetalBackend {
             encoder.end_encoding();
         }
 
-        (
-            prepass_draw_calls,
-            main_pass_draw_calls,
-            early_z_reject_estimate,
-        )
+        (prepass_draw_calls, main_pass_draw_calls, early_z_reject_estimate)
     }
 
     #[cfg(test)]
@@ -768,7 +740,7 @@ impl MetalBackend {
 
         let max_materials = config.max_instances.max(256);
         let max_textures = config.max_instances.max(128);
-        let max_lights = METAL_MAX_LIGHTS;
+        let max_lights = 64;
         let frame_slots = (0..config.frames_in_flight)
             .map(|_| SnapshotSlot {
                 instance_capacity: config.max_instances,
@@ -779,7 +751,40 @@ impl MetalBackend {
             })
             .collect::<Vec<_>>();
 
-        let (z_prepass_pipeline, forward_pipeline) = build_scene_pipelines(&device)?;
+        let library = device
+            .new_library_with_source(SHADER_SOURCE, &CompileOptions::new())
+            .map_err(MetalBackendError::ShaderCompilation)?;
+
+        let z_prepass_vertex = library
+            .get_function("z_prepass_vertex", None)
+            .map_err(MetalBackendError::ShaderCompilation)?;
+        let z_prepass_fragment = library
+            .get_function("z_prepass_fragment", None)
+            .map_err(MetalBackendError::ShaderCompilation)?;
+        let forward_vertex = library
+            .get_function("forward_vertex", None)
+            .map_err(MetalBackendError::ShaderCompilation)?;
+        let forward_fragment = library
+            .get_function("forward_fragment", None)
+            .map_err(MetalBackendError::ShaderCompilation)?;
+
+        let z_prepass_pipeline = build_pipeline(
+            &device,
+            &z_prepass_vertex,
+            Some(&z_prepass_fragment),
+            MTLPixelFormat::BGRA8Unorm,
+            MTLPixelFormat::Depth32Float,
+        )
+        .map_err(MetalBackendError::PipelineCreation)?;
+
+        let forward_pipeline = build_pipeline(
+            &device,
+            &forward_vertex,
+            Some(&forward_fragment),
+            MTLPixelFormat::BGRA8Unorm,
+            MTLPixelFormat::Depth32Float,
+        )
+        .map_err(MetalBackendError::PipelineCreation)?;
 
         let depth_state_write = build_depth_state(&device, MTLCompareFunction::Less, true)
             .map_err(MetalBackendError::PipelineCreation)?;
@@ -792,10 +797,7 @@ impl MetalBackend {
         let layer = MetalLayer::new();
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_drawable_size(CGSize::new(
-            surface_size.width as f64,
-            surface_size.height as f64,
-        ));
+        layer.set_drawable_size(CGSize::new(surface_size.width as f64, surface_size.height as f64));
 
         let max_verts = config.max_instances.max(1) * 64 * 8;
         let max_indices = config.max_instances.max(1) * 64 * 12;
@@ -810,27 +812,13 @@ impl MetalBackend {
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         ));
         let transform_buffer = Some(device.new_buffer(
-            (max_transforms * std::mem::size_of::<GpuInstance3d>()) as u64,
+            (max_transforms * std::mem::size_of::<[[f32; 4]; 4]>()) as u64,
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         ));
         let view_proj_buffer = Some(device.new_buffer(
-            std::mem::size_of::<CameraUniform>() as u64,
+            std::mem::size_of::<[[f32; 4]; 4]>() as u64,
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         ));
-
-        let stub_buffer = device.new_buffer(
-            metal_stub_fragment_buffer_len(),
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        );
-        zero_shared_buffer(&stub_buffer);
-        let stub_shadow_desc = TextureDescriptor::new();
-        stub_shadow_desc.set_texture_type(MTLTextureType::D2Array);
-        stub_shadow_desc.set_width(1);
-        stub_shadow_desc.set_height(1);
-        stub_shadow_desc.set_array_length(1);
-        stub_shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
-        stub_shadow_desc.set_usage(MTLTextureUsage::ShaderRead);
-        let stub_shadow_texture = device.new_texture(&stub_shadow_desc);
 
         let frame_pacing = FramePacing::new(config.frames_in_flight);
 
@@ -854,9 +842,6 @@ impl MetalBackend {
             index_buffer,
             transform_buffer,
             view_proj_buffer,
-            instance_scratch: Vec::with_capacity(max_transforms),
-            stub_buffer,
-            stub_shadow_texture,
             frame_pacing,
         })
     }
@@ -867,8 +852,7 @@ impl MetalBackend {
         snapshot: RenderStateSnapshot<'_>,
     ) -> Result<MetalFrameExecutionTelemetry, MetalBackendError> {
         let frame_slot = self.current_frame_slot;
-        let snapshot_state = self.upload_state_snapshot(frame_slot, &snapshot)?;
-        self.prepare_instance_scratch(&snapshot);
+        let snapshot_state = self.upload_state_snapshot(frame_slot, snapshot)?;
 
         self.frame_pacing.wait();
 
@@ -905,24 +889,20 @@ impl MetalBackend {
                 }
             }
             if !snapshot.transforms.is_empty() {
-                let trans_bytes = std::mem::size_of_val(self.instance_scratch.as_slice());
+                let trans_bytes = std::mem::size_of_val(snapshot.transforms);
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        self.instance_scratch.as_ptr() as *const u8,
+                        snapshot.transforms.as_ptr() as *const u8,
                         tb.contents() as *mut u8,
                         trans_bytes.min(tb.length() as usize),
                     );
                 }
             }
             {
-                let camera = CameraUniform {
-                    view_proj: snapshot.camera_view_proj,
-                    camera_eye: snapshot.camera_eye,
-                };
-                let vp_bytes = std::mem::size_of::<CameraUniform>();
+                let vp_bytes = std::mem::size_of_val(&snapshot.camera_view_proj);
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        &camera as *const CameraUniform as *const u8,
+                        snapshot.camera_view_proj.as_ptr() as *const u8,
                         vpb.contents() as *mut u8,
                         vp_bytes.min(vpb.length() as usize),
                     );
@@ -979,129 +959,6 @@ impl MetalBackend {
     }
 }
 
-fn build_scene_pipelines(
-    device: &Device,
-) -> Result<(RenderPipelineState, RenderPipelineState), MetalBackendError> {
-    let mut shader_library =
-        ShaderLibrary::new(device, SCENE_3D_MSL).map_err(MetalBackendError::ShaderCompilation)?;
-    let scene_3d_layout = scene_3d_vertex_layout();
-    let layout_hash = scene_3d_layout.hash_key();
-
-    let z_prepass_key = PipelineKey {
-        vertex_function: "scene_3d_vertex".to_string(),
-        fragment_function: None,
-        color_format: MTLPixelFormat::BGRA8Unorm,
-        depth_format: MTLPixelFormat::Depth32Float,
-        sample_count: 1,
-        blend_mode: BlendMode::None,
-        vertex_layout_hash: layout_hash,
-    };
-    let z_prepass_pipeline = shader_library
-        .get_pipeline(&z_prepass_key, &scene_3d_layout)
-        .map_err(MetalBackendError::PipelineCreation)?
-        .clone();
-
-    let forward_key = PipelineKey {
-        vertex_function: "scene_3d_vertex".to_string(),
-        fragment_function: Some("scene_3d_fragment".to_string()),
-        color_format: MTLPixelFormat::BGRA8Unorm,
-        depth_format: MTLPixelFormat::Depth32Float,
-        sample_count: 1,
-        blend_mode: BlendMode::None,
-        vertex_layout_hash: layout_hash,
-    };
-    let forward_pipeline = shader_library
-        .get_pipeline(&forward_key, &scene_3d_layout)
-        .map_err(MetalBackendError::PipelineCreation)?
-        .clone();
-
-    Ok((z_prepass_pipeline, forward_pipeline))
-}
-
-fn scene_3d_vertex_layout() -> VertexLayout {
-    VertexLayout {
-        buffer_layouts: vec![
-            VertexBufferLayoutDesc {
-                stride: 8 * std::mem::size_of::<f32>(),
-                step_function: MTLVertexStepFunction::PerVertex,
-                attributes: vec![
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::Float3,
-                        offset: 0,
-                        buffer_index: 0,
-                    },
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::Float3,
-                        offset: 3 * std::mem::size_of::<f32>(),
-                        buffer_index: 0,
-                    },
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::Float2,
-                        offset: 6 * std::mem::size_of::<f32>(),
-                        buffer_index: 0,
-                    },
-                ],
-            },
-            VertexBufferLayoutDesc {
-                stride: std::mem::size_of::<GpuInstance3d>(),
-                step_function: MTLVertexStepFunction::PerInstance,
-                attributes: vec![
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::Float4,
-                        offset: 0,
-                        buffer_index: 1,
-                    },
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::Float4,
-                        offset: 16,
-                        buffer_index: 1,
-                    },
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::Float4,
-                        offset: 32,
-                        buffer_index: 1,
-                    },
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::Float4,
-                        offset: 48,
-                        buffer_index: 1,
-                    },
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::Float4,
-                        offset: 64,
-                        buffer_index: 1,
-                    },
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::Float4,
-                        offset: 80,
-                        buffer_index: 1,
-                    },
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::Float4,
-                        offset: 96,
-                        buffer_index: 1,
-                    },
-                ],
-            },
-        ],
-    }
-}
-
-fn zero_shared_buffer(buffer: &Buffer) {
-    unsafe {
-        std::ptr::write_bytes(buffer.contents() as *mut u8, 0, buffer.length() as usize);
-    }
-}
-
-fn metal_stub_fragment_buffer_len() -> u64 {
-    std::mem::size_of::<ShadowUniform>()
-        .max(std::mem::size_of::<LightingUniform>())
-        .max(std::mem::size_of::<
-            crate::graphics::frame_snapshot::FrameLightRecord,
-        >())
-        .max(512) as u64
-}
-
 fn create_depth_texture(device: &Device, width: u32, height: u32) -> Texture {
     let desc = TextureDescriptor::new();
     desc.set_pixel_format(MTLPixelFormat::Depth32Float);
@@ -1123,6 +980,51 @@ fn create_offscreen_color_texture(device: &Device, width: u32, height: u32) -> T
     device.new_texture(&desc)
 }
 
+fn build_pipeline(
+    device: &Device,
+    vertex_function: &Function,
+    fragment_function: Option<&Function>,
+    color_format: MTLPixelFormat,
+    depth_format: MTLPixelFormat,
+) -> Result<RenderPipelineState, String> {
+    let desc = RenderPipelineDescriptor::new();
+    desc.set_vertex_function(Some(vertex_function));
+    if let Some(frag) = fragment_function {
+        desc.set_fragment_function(Some(frag));
+    }
+
+    let color_attachment = desc.color_attachments().object_at(0).unwrap();
+    color_attachment.set_pixel_format(color_format);
+
+    desc.set_depth_attachment_pixel_format(depth_format);
+
+    // Vertex layout: position (3 floats) + normal (3 floats) + uv (2 floats) = 8 floats
+    let vertex_descriptor = metal::VertexDescriptor::new();
+    let layout = vertex_descriptor.layouts().object_at(0).unwrap();
+    layout.set_stride((8 * std::mem::size_of::<f32>()) as u64);
+    layout.set_step_function(MTLVertexStepFunction::PerVertex);
+
+    let attrs = vertex_descriptor.attributes();
+    let attr0 = attrs.object_at(0).unwrap();
+    attr0.set_format(MTLVertexFormat::Float3);
+    attr0.set_offset(0);
+    attr0.set_buffer_index(0);
+
+    let attr1 = attrs.object_at(1).unwrap();
+    attr1.set_format(MTLVertexFormat::Float3);
+    attr1.set_offset((3 * std::mem::size_of::<f32>()) as u64);
+    attr1.set_buffer_index(0);
+
+    let attr2 = attrs.object_at(2).unwrap();
+    attr2.set_format(MTLVertexFormat::Float2);
+    attr2.set_offset((6 * std::mem::size_of::<f32>()) as u64);
+    attr2.set_buffer_index(0);
+
+    desc.set_vertex_descriptor(Some(&vertex_descriptor));
+
+    device.new_render_pipeline_state(&desc)
+}
+
 fn build_depth_state(
     device: &Device,
     compare: MTLCompareFunction,
@@ -1139,15 +1041,6 @@ mod tests {
     use super::*;
     use crate::graphics::frame_snapshot::FrameInstanceTransform;
 
-    #[cfg(target_os = "macos")]
-    fn metal_device_or_skip() -> Option<Device> {
-        let device = Device::system_default();
-        if device.is_none() {
-            eprintln!("skipping Metal backend test: no Metal device available");
-        }
-        device
-    }
-
     #[test]
     fn default_config_is_valid() {
         let cfg = MetalBackendConfig::default();
@@ -1159,20 +1052,19 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn shader_compilation_succeeds() {
-        let Some(device) = metal_device_or_skip() else {
-            return;
-        };
-        let library = ShaderLibrary::new(&device, SCENE_3D_MSL).expect("shader compilation failed");
-        assert!(library.get_function("scene_3d_vertex").is_ok());
-        assert!(library.get_function("scene_3d_fragment").is_ok());
+        let device = Device::system_default().expect("no Metal device");
+        let library = device
+            .new_library_with_source(SHADER_SOURCE, &CompileOptions::new())
+            .expect("shader compilation failed");
+        assert!(library.get_function("z_prepass_vertex", None).is_ok());
+        assert!(library.get_function("forward_vertex", None).is_ok());
+        assert!(library.get_function("forward_fragment", None).is_ok());
     }
 
     #[test]
     #[cfg(target_os = "macos")]
     fn depth_state_creation() {
-        let Some(device) = metal_device_or_skip() else {
-            return;
-        };
+        let device = Device::system_default().expect("no Metal device");
         assert!(build_depth_state(&device, MTLCompareFunction::Less, true).is_ok());
         assert!(build_depth_state(&device, MTLCompareFunction::Equal, false).is_ok());
     }
@@ -1180,21 +1072,26 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn pipeline_creation() {
-        let Some(device) = metal_device_or_skip() else {
-            return;
-        };
-        assert!(build_scene_pipelines(&device).is_ok());
+        let device = Device::system_default().expect("no Metal device");
+        let library = device
+            .new_library_with_source(SHADER_SOURCE, &CompileOptions::new())
+            .unwrap();
+        let vert = library.get_function("z_prepass_vertex", None).unwrap();
+        let frag = library.get_function("z_prepass_fragment", None).unwrap();
+        assert!(build_pipeline(
+            &device,
+            &vert,
+            Some(&frag),
+            MTLPixelFormat::BGRA8Unorm,
+            MTLPixelFormat::Depth32Float,
+        )
+        .is_ok());
     }
 
     fn dummy_snapshot_with_instances(instance_count: usize) -> RenderStateSnapshot<'static> {
         let transforms: Vec<FrameInstanceTransform> = (0..instance_count)
             .map(|_| FrameInstanceTransform {
-                model: [
-                    [1.0, 0.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0, 0.0],
-                    [0.0, 0.0, 1.0, 0.0],
-                    [0.0, 0.0, 0.0, 1.0],
-                ],
+                model: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
                 color_rgba: [1.0; 4],
                 material_index: 0,
                 texture_index: 0,
@@ -1203,8 +1100,9 @@ mod tests {
             })
             .collect();
         let vertices: Vec<f32> = vec![
-            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
+            0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
         ];
         let indices: Vec<u32> = vec![0, 1, 2];
         let transforms = Box::leak(transforms.into_boxed_slice());
@@ -1218,7 +1116,6 @@ mod tests {
                 [0.0, 0.0, 1.0, 0.0],
                 [0.0, 0.0, 0.0, 1.0],
             ],
-            camera_eye: [0.0, 12.0, 36.0, 1.0],
             opaque_instance_count: instance_count as u32,
             transparent_instance_count: 0,
             primitive_ranges: &[],
@@ -1235,22 +1132,16 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn upload_state_snapshot_capacity_guards() {
-        let mut backend = match MetalBackend::new_for_test(MetalBackendConfig {
+        let mut backend = MetalBackend::new_for_test(MetalBackendConfig {
             frames_in_flight: 1,
             max_instances: 4,
             occlusion_culling_enabled: true,
-        }) {
-            Ok(backend) => backend,
-            Err(MetalBackendError::NoMetalDevice) => return,
-            Err(err) => panic!("unexpected Metal backend init error: {err}"),
-        };
+        })
+        .unwrap();
 
         let too_many = dummy_snapshot_with_instances(8);
-        match backend.upload_state_snapshot(0, &too_many) {
-            Err(MetalBackendError::SnapshotCapacityExceeded {
-                requested,
-                capacity,
-            }) => {
+        match backend.upload_state_snapshot(0, too_many) {
+            Err(MetalBackendError::SnapshotCapacityExceeded { requested, capacity }) => {
                 assert_eq!(requested, 8);
                 assert_eq!(capacity, 4);
             }
@@ -1261,20 +1152,15 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn headless_two_pass_telemetry() {
-        let mut backend = match MetalBackend::new_for_test(MetalBackendConfig {
+        let mut backend = MetalBackend::new_for_test(MetalBackendConfig {
             frames_in_flight: 1,
             max_instances: 4,
             occlusion_culling_enabled: true,
-        }) {
-            Ok(backend) => backend,
-            Err(MetalBackendError::NoMetalDevice) => return,
-            Err(err) => panic!("unexpected Metal backend init error: {err}"),
-        };
+        })
+        .unwrap();
 
         let snapshot = dummy_snapshot_with_instances(2);
-        let telemetry = backend
-            .render_n_headless(snapshot)
-            .expect("headless render failed");
+        let telemetry = backend.render_n_headless(snapshot).expect("headless render failed");
         assert!(telemetry.command_buffer_submitted);
         assert_eq!(telemetry.prepass_draw_calls, 1);
         assert_eq!(telemetry.main_pass_draw_calls, 1);
@@ -1284,20 +1170,15 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn headless_single_pass_telemetry() {
-        let mut backend = match MetalBackend::new_for_test(MetalBackendConfig {
+        let mut backend = MetalBackend::new_for_test(MetalBackendConfig {
             frames_in_flight: 1,
             max_instances: 4,
             occlusion_culling_enabled: false,
-        }) {
-            Ok(backend) => backend,
-            Err(MetalBackendError::NoMetalDevice) => return,
-            Err(err) => panic!("unexpected Metal backend init error: {err}"),
-        };
+        })
+        .unwrap();
 
         let snapshot = dummy_snapshot_with_instances(2);
-        let telemetry = backend
-            .render_n_headless(snapshot)
-            .expect("headless render failed");
+        let telemetry = backend.render_n_headless(snapshot).expect("headless render failed");
         assert!(telemetry.command_buffer_submitted);
         assert_eq!(telemetry.prepass_draw_calls, 0);
         assert_eq!(telemetry.main_pass_draw_calls, 1);

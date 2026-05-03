@@ -127,6 +127,7 @@ pub fn build_vulkan_render_snapshot<'a>(
         RenderStateSnapshot {
             frame_id,
             camera_view_proj,
+            camera_eye: [camera_eye[0], camera_eye[1], camera_eye[2], 1.0],
             opaque_instance_count: stats.opaque_instances as u32,
             transparent_instance_count: stats.transparent_instances as u32,
             primitive_ranges: primitive_range_scratch.as_slice(),
