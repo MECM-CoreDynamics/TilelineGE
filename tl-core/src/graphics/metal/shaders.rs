@@ -250,6 +250,187 @@ fragment float4 scene_3d_fragment(
 }
 "#;
 
+pub const SCENE_SPRITE_MSL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct Lighting {
+    uint light_count;
+    uint rt_mode;
+    uint rt_active;
+    uint rt_dynamic_count;
+    uint rt_dynamic_cap;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
+
+struct SpriteVertexIn {
+    float2 local_pos [[attribute(0)]];
+};
+
+struct SpriteInstanceIn {
+    float4 translate_size [[attribute(1)]];
+    float4 rot_z          [[attribute(2)]];
+    float4 color          [[attribute(3)]];
+    float4 atlas_rect     [[attribute(4)]];
+    float4 kind_params    [[attribute(5)]];
+};
+
+struct SpriteVSOut {
+    float4 position [[position]];
+    float4 color    [[user(locn0)]];
+    float2 uv       [[user(locn1)]];
+    float2 atlas_uv [[user(locn2)]];
+    float2 kind     [[user(locn3)]];
+};
+
+vertex SpriteVSOut sprite_vertex(
+    SpriteVertexIn   vin  [[stage_in]],
+    SpriteInstanceIn inst [[stage_in]]
+) {
+    float c = cos(inst.rot_z.x);
+    float s = sin(inst.rot_z.x);
+    float2 scaled = float2(vin.local_pos.x * inst.translate_size.z,
+                           vin.local_pos.y * inst.translate_size.w);
+    float2 rotated = float2(scaled.x * c - scaled.y * s,
+                            scaled.x * s + scaled.y * c);
+    float2 pos = rotated + inst.translate_size.xy;
+    float2 uv = vin.local_pos + float2(0.5, 0.5);
+    float2 atlas_uv = mix(inst.atlas_rect.xy, inst.atlas_rect.zw, uv);
+
+    SpriteVSOut out;
+    out.position = float4(pos, inst.rot_z.y, 1.0);
+    out.color    = inst.color;
+    out.uv       = uv;
+    out.atlas_uv = atlas_uv;
+    out.kind     = inst.kind_params.xy;
+    return out;
+}
+
+float3 terrain_style(float3 base_color, float2 uv, float2 atlas_uv, float slot) {
+    float stripe = 0.5 + 0.5 * sin((atlas_uv.x * 64.0) + slot * 0.37);
+    float3 top = float3(base_color.r * 1.06, base_color.g * 1.03, base_color.b * 0.90);
+    float3 bottom = float3(base_color.r * 0.85, base_color.g * 0.92, base_color.b * 0.78);
+    float3 grad = mix(bottom, top, uv.y);
+    return mix(grad, grad * float3(0.72, 0.88, 0.72), stripe * 0.35);
+}
+
+float4 light_glow_style(float3 base_color, float2 uv) {
+    float2 centered = uv - float2(0.5, 0.5);
+    float dist = length(centered);
+    float core = 1.0 - smoothstep(0.0, 0.08, dist);
+    float halo = (1.0 - smoothstep(0.04, 0.38, dist)) * 0.55;
+    float scatter = (1.0 - smoothstep(0.18, 0.50, dist)) * 0.18;
+    float brightness = core + halo + scatter;
+    float red_extra = (1.0 - smoothstep(0.06, 0.22, dist)) * 0.18;
+    float3 color = float3(base_color.r * brightness + red_extra,
+                          base_color.g * brightness,
+                          base_color.b * brightness);
+    return float4(color, brightness);
+}
+
+float3 camera_style(float3 base_color, float2 uv, float2 atlas_uv, float slot) {
+    float2 centered = uv - float2(0.5, 0.5);
+    float dist = length(centered);
+    float ring = 1.0 - smoothstep(0.26, 0.43, abs(dist - 0.31));
+    float lens = 1.0 - smoothstep(0.07, 0.31, dist);
+    float scan = 0.5 + 0.5 * sin((atlas_uv.y * 48.0) + slot * 0.21);
+    float3 ring_color = float3(0.95, 0.98, 1.0);
+    float3 lens_color = mix(base_color * float3(0.36, 0.52, 0.78), base_color, scan * 0.6);
+    return lens_color * (0.55 + lens * 0.45) + ring_color * ring * 0.55;
+}
+
+fragment float4 sprite_fragment(
+    SpriteVSOut in          [[stage_in]],
+    texture2d<float> sprite_tex [[texture(0)]],
+    sampler sprite_smp      [[sampler(0)]],
+    constant Lighting &u_lighting [[buffer(0)]]
+) {
+    int kind = int(in.kind.x + 0.5);
+    float slot = in.kind.y;
+    float4 sampled = sprite_tex.sample(sprite_smp, in.atlas_uv);
+    float3 color = in.color.rgb * sampled.rgb;
+    float alpha = in.color.a * sampled.a;
+
+    if (kind == 4) {
+        return light_glow_style(in.color.rgb, in.uv);
+    }
+
+    if (kind == 2) {
+        color = camera_style(color, in.uv, in.atlas_uv, slot);
+    } else if (kind == 3) {
+        color = terrain_style(color, in.uv, in.atlas_uv, slot);
+    } else if (kind == 1) {
+        float pulse = 0.93 + 0.07 * sin(in.atlas_uv.x * 28.0 + slot * 0.15);
+        color = color * pulse;
+    } else {
+        float grain = 0.98 + 0.02 * sin((in.atlas_uv.x + in.atlas_uv.y) * 32.0 + slot * 0.11);
+        color = color * grain;
+    }
+
+    float2 centered = in.uv - float2(0.5, 0.5);
+    float radial = 1.0 - smoothstep(0.22, 0.66, length(centered));
+    float light_gain = 1.0 + min(float(u_lighting.light_count) / 16.0, 0.40);
+    if (kind == 0 || kind == 1) {
+        color += float3(0.06, 0.09, 0.14) * radial * light_gain;
+    }
+
+    return float4(color, alpha);
+}
+"#;
+
+pub const SCENE_UPSCALE_MSL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct UpscaleUniform {
+    float2 inv_source_size;
+    float2 source_uv_scale;
+    float sharpness;
+    float _pad0;
+    float _pad1;
+    float _pad2;
+};
+
+struct UpscaleVSOut {
+    float4 position [[position]];
+    float2 uv       [[user(locn0)]];
+};
+
+vertex UpscaleVSOut upscale_vertex(uint vid [[vertex_id]]) {
+    const float2 positions[3] = {
+        float2(-1.0, -3.0),
+        float2(-1.0,  1.0),
+        float2( 3.0,  1.0)
+    };
+    float2 pos = positions[vid];
+    UpscaleVSOut out;
+    out.position = float4(pos, 0.0, 1.0);
+    out.uv = pos * float2(0.5, -0.5) + float2(0.5, 0.5);
+    return out;
+}
+
+fragment float4 upscale_fragment(
+    UpscaleVSOut in          [[stage_in]],
+    texture2d<float> src_tex [[texture(0)]],
+    sampler src_smp          [[sampler(0)]],
+    constant UpscaleUniform &u_upscale [[buffer(0)]]
+) {
+    float2 uv = clamp(in.uv * u_upscale.source_uv_scale, float2(0.0), float2(1.0));
+    float4 center = src_tex.sample(src_smp, uv);
+
+    float2 texel = u_upscale.inv_source_size;
+    float4 s0 = src_tex.sample(src_smp, uv + float2( texel.x, 0.0));
+    float4 s1 = src_tex.sample(src_smp, uv + float2(-texel.x, 0.0));
+    float4 s2 = src_tex.sample(src_smp, uv + float2(0.0,  texel.y));
+    float4 s3 = src_tex.sample(src_smp, uv + float2(0.0, -texel.y));
+    float4 neighborhood = (s0 + s1 + s2 + s3) * 0.25;
+    float3 sharpened = center.rgb + (center.rgb - neighborhood.rgb) * (u_upscale.sharpness * 1.65);
+    return float4(max(sharpened, float3(0.0)), center.a);
+}
+"#;
+
 pub const SCENE_SHADOW_MSL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
