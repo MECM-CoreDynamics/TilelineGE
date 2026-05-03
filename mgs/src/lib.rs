@@ -37,6 +37,7 @@ pub use scene_workload::{
 };
 pub use tile_planner::MgsPlanner;
 pub use tuning::{
-    BackendRenderHints, LoadAction, MetalPassHints, MgsTuningProfile, StoreAction, VulkanPassHints,
+    BackendRenderHints, LoadAction, MetalPassHints, MgsPerformanceProfile, MgsTuningProfile,
+    StoreAction, VulkanPassHints,
 };
 pub use zram::{MpsZramConfig, MpsZramError, MpsZramSpillOutcome, MpsZramSpillPool, MpsZramStats};

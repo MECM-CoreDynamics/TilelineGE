@@ -112,7 +112,7 @@ pub use pre_alpha_loop::{
 };
 pub use runtime_bridge::{
     runtime_bridge_path_from_scheduler, GmsDomainBudgets, GmsGuardrailProfile, GmsScalerConfig,
-    GmsScalerDomain, GmsScalerMode, RuntimeBridgeConfig, RuntimeBridgeMetrics,
+    GmsScalerDomain, GmsScalerMode, PerformanceProfile, RuntimeBridgeConfig, RuntimeBridgeMetrics,
     RuntimeBridgeOrchestrator, RuntimeBridgePath, RuntimeBridgeSubmission, RuntimeBridgeTick,
     RuntimeFramePlan,
 };

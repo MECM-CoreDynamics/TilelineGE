@@ -23,7 +23,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::runtime_bridge::{GmsGuardrailProfile, GmsScalerConfig, GmsScalerMode};
+use crate::runtime_bridge::{GmsGuardrailProfile, GmsScalerConfig, GmsScalerMode, PerformanceProfile};
 use crate::tljoint::{compile_tljoint_scene_from_path, TljointDiagnosticLevel, TljointSceneBundle};
 use crate::tlscript_showcase::{
     compile_tlscript_showcase, TlscriptShowcaseConfig, TlscriptShowcaseProgram,
@@ -490,6 +490,25 @@ pub fn parse_tlpfile(source: &str) -> TlpfileParseOutcome {
                             line: line_no,
                             message: format!(
                                 "invalid gms_scaler.guardrail '{value}' (expected balanced|aggressive|relaxed)"
+                            ),
+                        });
+                    }
+                }
+                "profile" => {
+                    if value.is_empty() {
+                        diagnostics.push(TlpfileDiagnostic {
+                            level: TlpfileDiagnosticLevel::Warning,
+                            line: line_no,
+                            message: "empty gms_scaler.profile ignored".to_string(),
+                        });
+                    } else if let Some(profile) = PerformanceProfile::parse(value) {
+                        project_gms_scaler.profile = profile;
+                    } else {
+                        diagnostics.push(TlpfileDiagnostic {
+                            level: TlpfileDiagnosticLevel::Error,
+                            line: line_no,
+                            message: format!(
+                                "invalid gms_scaler.profile '{value}' (expected balanced|aggressive|heimdall)"
                             ),
                         });
                     }

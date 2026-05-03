@@ -7,9 +7,10 @@
 //! remaining single-step hot path.
 
 use mps::{
-    DispatcherPhaseCallbacks, DispatcherPhasePlan, MpsThreadPoolMetrics, PhysicsDispatchTrigger,
-    TaskDispatcher, TaskDispatcherConfig,
+    DispatcherPhaseCallbacks, DispatcherPhasePlan, MpsPerformanceProfile, MpsThreadPoolMetrics,
+    MpsTuningProfile, PhysicsDispatchTrigger, TaskDispatcher, TaskDispatcherConfig,
 };
+use crate::PerformanceProfile;
 use paradoxpe::PhysicsWorld;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,8 +66,15 @@ pub struct PhysicsMpsRunner {
 
 impl PhysicsMpsRunner {
     /// Create a runner from an existing world. Spawns the MPS worker pool.
-    pub fn new(world: PhysicsWorld) -> Self {
+    pub fn new(world: PhysicsWorld, profile: PerformanceProfile) -> Self {
         let mut dispatcher_config = TaskDispatcherConfig::default();
+        let mps_profile = match profile {
+            PerformanceProfile::Balanced => MpsPerformanceProfile::Balanced,
+            PerformanceProfile::Aggressive => MpsPerformanceProfile::Aggressive,
+            PerformanceProfile::Heimdall => MpsPerformanceProfile::Heimdall,
+        };
+        let tuning = MpsTuningProfile::from_profile(mps_profile);
+        dispatcher_config.apply_tuning(&tuning);
         dispatcher_config.queue_capacity = dispatcher_config.queue_capacity.max(262_144);
         dispatcher_config.transform_capacity =
             dispatcher_config.transform_capacity.max(world.body_count());

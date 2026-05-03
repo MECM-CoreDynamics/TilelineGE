@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use winit::dpi::PhysicalSize;
 
-use crate::{FsrMode, FsrQualityPreset, GraphicsSchedulerPath, DEFAULT_MSAA_SAMPLE_COUNT};
+use crate::{FsrMode, FsrQualityPreset, GraphicsSchedulerPath, PerformanceProfile, DEFAULT_MSAA_SAMPLE_COUNT};
 
 #[derive(Debug, Clone)]
 pub struct CliOptions {
@@ -32,6 +32,7 @@ pub struct CliOptions {
     pub sprite_path: PathBuf,
     pub ini_path: Option<PathBuf>,
     pub pak_path: Option<PathBuf>,
+    pub performance_profile: PerformanceProfile,
 }
 
 impl Default for CliOptions {
@@ -59,6 +60,7 @@ impl Default for CliOptions {
             sprite_path: PathBuf::from("docs/demos/tlapp/bounce_hud.tlsprite"),
             ini_path: None,
             pak_path: None,
+            performance_profile: PerformanceProfile::Balanced,
         }
     }
 }
@@ -421,6 +423,11 @@ fn apply_env_overrides(options: &mut CliOptions) -> Result<(), Box<dyn Error>> {
     if let Ok(value) = env::var("TILELINE_PAK") {
         options.pak_path = Some(PathBuf::from(value));
     }
+    if let Ok(value) = env::var("TILELINE_PERF_MODE") {
+        options.performance_profile = PerformanceProfile::parse(&value).ok_or_else(|| -> Box<dyn Error> {
+            "invalid TILELINE_PERF_MODE value (expected balanced|aggressive|heimdall)".into()
+        })?;
+    }
     Ok(())
 }
 
@@ -527,6 +534,14 @@ fn parse_cli_overrides(args: &[String], options: &mut CliOptions) -> Result<bool
                 let value = next_arg(&mut iter, "--sprite")?;
                 options.sprite_path = PathBuf::from(value);
             }
+            "--perf-mode" => {
+                let value = next_arg(&mut iter, "--perf-mode")?;
+                options.performance_profile = PerformanceProfile::parse(&value).ok_or_else(
+                    || -> Box<dyn Error> {
+                        "invalid --perf-mode value (expected balanced|aggressive|heimdall)".into()
+                    },
+                )?;
+            }
             other => {
                 return Err(format!("unknown argument: {other} (use --help)").into());
             }
@@ -585,6 +600,13 @@ fn apply_ini_overrides(
             "script" | "script_path" => options.script_path = PathBuf::from(value),
             "sprite" | "sprite_path" => options.sprite_path = PathBuf::from(value),
             "pak" | "pak_path" => options.pak_path = Some(PathBuf::from(value)),
+            "perf_mode" | "performance_profile" => {
+                options.performance_profile = PerformanceProfile::parse(&value).ok_or_else(
+                    || -> Box<dyn Error> {
+                        "invalid perf_mode value in ini (expected balanced|aggressive|heimdall)".into()
+                    },
+                )?
+            }
             "ini" | "ini_path" => warnings.push(format!(
                 "{}:{}: '{}' key is ignored (ini recursion is not supported)",
                 ini_path.display(),
@@ -689,6 +711,9 @@ fn print_usage() {
     );
     println!(
         "  --sprite <path>           .tlsprite path (default: docs/demos/tlapp/bounce_hud.tlsprite)"
+    );
+    println!(
+        "  --perf-mode <mode>        Performance profile: balanced|aggressive|heimdall (default: balanced)"
     );
     println!("  -V, --version             Show engine + module versions");
     println!("  -h, --help                Show help");

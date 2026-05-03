@@ -141,6 +141,7 @@ pub struct RuntimeBridgeMetrics {
     pub frame_plans_popped: u64,
     pub gms_mode: Option<GmsScalerMode>,
     pub domain_budgets: Option<GmsDomainBudgets>,
+    pub performance_profile: PerformanceProfile,
     pub sm_cu_utilization: f32,
     pub lane_queue_depth: usize,
     pub ai_ml_drop_rate: f32,
@@ -175,6 +176,34 @@ impl GmsScalerMode {
         match value.trim().to_ascii_lowercase().as_str() {
             "adaptive" | "auto" => Some(Self::Adaptive),
             "fixed" => Some(Self::Fixed),
+            _ => None,
+        }
+    }
+}
+
+/// Cross-stack performance profile used by runtime to control MPS, GMS, and MGS aggressiveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PerformanceProfile {
+    #[default]
+    Balanced,
+    Aggressive,
+    Heimdall,
+}
+
+impl PerformanceProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::Aggressive => "aggressive",
+            Self::Heimdall => "heimdall",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "balanced" | "default" => Some(Self::Balanced),
+            "aggressive" | "max" => Some(Self::Aggressive),
+            "heimdall" => Some(Self::Heimdall),
             _ => None,
         }
     }
@@ -270,6 +299,7 @@ pub struct GmsScalerConfig {
     pub min_physics_budget_pct: u8,
     pub budgets: GmsDomainBudgets,
     pub guardrail: GmsGuardrailProfile,
+    pub profile: PerformanceProfile,
 }
 
 impl Default for GmsScalerConfig {
@@ -280,6 +310,7 @@ impl Default for GmsScalerConfig {
             min_physics_budget_pct: 35,
             budgets: GmsDomainBudgets::default(),
             guardrail: GmsGuardrailProfile::Balanced,
+            profile: PerformanceProfile::Balanced,
         }
     }
 }
@@ -434,6 +465,10 @@ impl RuntimeBridgeOrchestrator {
         self.gms_scaler.guardrail = profile;
     }
 
+    pub fn set_gms_profile(&mut self, profile: PerformanceProfile) {
+        self.gms_scaler.profile = profile;
+    }
+
     pub fn set_mls_mode(&mut self, mode: MlsExecutionMode) {
         self.mls.set_mode(mode);
     }
@@ -505,10 +540,11 @@ impl RuntimeBridgeOrchestrator {
         let ai_ml_drop_rate =
             1.0 - (self.gms_ai_ml_kept_jobs as f64 / requested as f64).clamp(0.0, 1.0);
         Some(format!(
-            "gms scaler | mode={} target_fps={} guardrail={} budgets[render={} physics={} ai_ml={} postfx={} ui={}] min_physics={} lane_q={} sm_cu_utilization={:.2} ai_ml_drop_rate={:.3}{}",
+            "gms scaler | mode={} target_fps={} guardrail={} profile={} budgets[render={} physics={} ai_ml={} postfx={} ui={}] min_physics={} lane_q={} sm_cu_utilization={:.2} ai_ml_drop_rate={:.3}{}",
             self.gms_scaler.mode.as_str(),
             self.gms_scaler.target_fps,
             self.gms_scaler.guardrail.as_str(),
+            self.gms_scaler.profile.as_str(),
             self.gms_scaler.budgets.render_budget_pct,
             self.gms_scaler.budgets.physics_budget_pct,
             self.gms_scaler.budgets.ai_ml_budget_pct,
@@ -653,6 +689,7 @@ impl RuntimeBridgeOrchestrator {
                     frame_plans_popped: m.frame_plans_popped,
                     gms_mode: Some(self.gms_scaler.mode),
                     domain_budgets: Some(self.gms_scaler.budgets),
+                    performance_profile: self.gms_scaler.profile,
                     sm_cu_utilization: self.gms_last_sm_cu_utilization,
                     lane_queue_depth: self.gms_last_lane_queue_depth,
                     ai_ml_drop_rate: 1.0
@@ -683,6 +720,7 @@ impl RuntimeBridgeOrchestrator {
                     frame_plans_popped: m.frame_plans_popped,
                     gms_mode: None,
                     domain_budgets: None,
+                    performance_profile: self.gms_scaler.profile,
                     sm_cu_utilization: 0.0,
                     lane_queue_depth: m.queued_frame_plans,
                     ai_ml_drop_rate: 0.0,

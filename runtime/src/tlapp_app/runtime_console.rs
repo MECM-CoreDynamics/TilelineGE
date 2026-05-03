@@ -1168,6 +1168,10 @@ impl TlAppRuntime {
                             "gms.budget <render|physics|ai_ml|postfx|ui> <pct>",
                             "gms.guardrail <balanced|aggressive|relaxed>",
                         ]),
+                        "perf" => Some(vec![
+                            "perf.status",
+                            "perf.mode <balanced|aggressive|heimdall>",
+                        ]),
                         "mls" => Some(vec![
                             "mls.status",
                             "mls.mode <off|auto|on>",
@@ -1330,6 +1334,23 @@ impl TlAppRuntime {
                     return RuntimeCommand::Consumed;
                 };
                 match self.set_gms_guardrail_cli_override(profile) {
+                    Ok(note) => self.console_feedback(note),
+                    Err(err) => self.console_feedback(err),
+                }
+            }
+            "perf.status" => {
+                self.console_feedback(self.perf_status_line());
+            }
+            "perf.mode" => {
+                let Some(raw_profile) = parts.next() else {
+                    self.console_feedback("usage: perf.mode <balanced|aggressive|heimdall>");
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(profile) = PerformanceProfile::parse(raw_profile) else {
+                    self.console_feedback("usage: perf.mode <balanced|aggressive|heimdall>");
+                    return RuntimeCommand::Consumed;
+                };
+                match self.set_perf_mode_cli_override(profile) {
                     Ok(note) => self.console_feedback(note),
                     Err(err) => self.console_feedback(err),
                 }

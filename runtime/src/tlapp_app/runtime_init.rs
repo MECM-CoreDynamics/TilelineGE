@@ -346,6 +346,13 @@ impl TlAppRuntime {
             if let Some(gms_scaler) = project_gms_scaler_manifest {
                 bridge_config.gms_scaler = gms_scaler;
             }
+            // CLI --perf-mode takes highest precedence over .tlpfile defaults.
+            bridge_config.gms_scaler.profile = options.performance_profile;
+            if bridge_config.gms_scaler.profile == PerformanceProfile::Heimdall {
+                eprintln!(
+                    "[perf] Heimdall ultra-aggressive profile active. Higher power draw, heat, and cooling noise expected."
+                );
+            }
             if let Some(mls) = project_mls_manifest.clone() {
                 bridge_config.mls = mls;
             }
@@ -370,6 +377,7 @@ impl TlAppRuntime {
                 frame_plans_popped: 0,
                 gms_mode: None,
                 domain_budgets: None,
+                performance_profile: PerformanceProfile::Balanced,
                 sm_cu_utilization: 0.0,
                 lane_queue_depth: 0,
                 ai_ml_drop_rate: 0.0,
@@ -824,7 +832,7 @@ impl TlAppRuntime {
             queue,
             config,
             size,
-            world: PhysicsMpsRunner::new(world),
+            world: PhysicsMpsRunner::new(world, options.performance_profile),
             physics_token: None,
             last_tick: BounceTankTickMetrics {
                 spawned_this_tick: 0,
@@ -912,6 +920,7 @@ impl TlAppRuntime {
             gms_cli_override_mode: None,
             gms_cli_override_target_fps: None,
             gms_cli_override_guardrail: None,
+            gms_cli_override_profile: None,
             gms_cli_override_render_budget_pct: None,
             gms_cli_override_physics_budget_pct: None,
             gms_cli_override_ai_ml_budget_pct: None,

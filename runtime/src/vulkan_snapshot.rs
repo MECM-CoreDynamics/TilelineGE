@@ -134,6 +134,9 @@ pub fn build_vulkan_render_snapshot<'a>(
             materials: material_scratch.as_slice(),
             textures: texture_scratch.as_slice(),
             lights: light_scratch.as_slice(),
+            instance_bounds: &[],
+            vertices: &[],
+            indices: &[],
         },
         stats,
     )

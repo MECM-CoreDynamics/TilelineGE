@@ -22,3 +22,5 @@ ash-window = "0.13.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 metal = "0.33.0"
+objc = "0.2"
+core-graphics-types = "0.2"

@@ -8,6 +8,34 @@
 
 use crate::hardware::{GfxBackend, MobileGpuFamily, MobileGpuProfile, TbdrArchitecture};
 
+/// Named performance mode for MGS tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MgsPerformanceProfile {
+    #[default]
+    Balanced,
+    Aggressive,
+    Heimdall,
+}
+
+impl MgsPerformanceProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::Aggressive => "aggressive",
+            Self::Heimdall => "heimdall",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "balanced" | "default" => Some(Self::Balanced),
+            "aggressive" | "max" => Some(Self::Aggressive),
+            "heimdall" => Some(Self::Heimdall),
+            _ => None,
+        }
+    }
+}
+
 /// Instant thermal / power state of the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalState {
@@ -246,6 +274,31 @@ impl MgsTuningProfile {
     /// Effective bandwidth budget per tile (MB).
     pub fn effective_tile_bandwidth_mb(&self) -> f32 {
         self.tile_bandwidth_budget_mb * self.thermal_state.performance_factor()
+    }
+
+    /// Overlay a performance profile onto the current tuning state.
+    pub fn apply_profile(&mut self, profile: MgsPerformanceProfile) {
+        match profile {
+            MgsPerformanceProfile::Balanced => {
+                // No changes; defaults are already conservative.
+            }
+            MgsPerformanceProfile::Aggressive => {
+                self.max_draw_calls_per_frame =
+                    (self.max_draw_calls_per_frame + 512).min(8192);
+                self.power_saving_mode = false;
+                if self.thermal_state == ThermalState::Unknown {
+                    self.thermal_state = ThermalState::Nominal;
+                }
+            }
+            MgsPerformanceProfile::Heimdall => {
+                self.max_draw_calls_per_frame =
+                    (self.max_draw_calls_per_frame * 2).min(16384);
+                self.power_saving_mode = false;
+                self.thermal_state = ThermalState::Nominal;
+                self.render_pass_strategy = RenderPassStrategy::SinglePassPerFrame;
+                self.tile_bandwidth_budget_mb *= 1.5;
+            }
+        }
     }
 }
 

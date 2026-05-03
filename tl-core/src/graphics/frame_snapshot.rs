@@ -72,4 +72,11 @@ pub struct RenderStateSnapshot<'a> {
     pub materials: &'a [FrameMaterialRecord],
     pub textures: &'a [FrameTextureRecord],
     pub lights: &'a [FrameLightRecord],
+    /// Per-instance world-space AABB bounds [min_x, min_y, min_z, max_x, max_y, max_z].
+    /// Empty when the backend does not support occlusion culling.
+    pub instance_bounds: &'a [[f32; 6]],
+    /// Shared interleaved vertex buffer: position (3) + normal (3) + uv (2).
+    pub vertices: &'a [f32],
+    /// Shared index buffer.
+    pub indices: &'a [u32],
 }

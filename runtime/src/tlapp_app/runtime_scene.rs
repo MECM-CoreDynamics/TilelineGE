@@ -579,6 +579,42 @@ impl TlAppRuntime {
         ))
     }
 
+    pub(super) fn perf_status_line(&self) -> String {
+        let gms_profile = self
+            .runtime_bridge
+            .as_ref()
+            .map(|b| b.metrics().performance_profile)
+            .unwrap_or(PerformanceProfile::Balanced);
+        format!(
+            "perf profile | gms={} (mps set at startup, requires restart to change)",
+            gms_profile.as_str()
+        )
+    }
+
+    pub(super) fn set_perf_mode_cli_override(
+        &mut self,
+        profile: PerformanceProfile,
+    ) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return Err(
+                "perf.mode unavailable: parallel bridge is disabled (pipeline=legacy)".to_string(),
+            );
+        };
+        self.gms_cli_override_profile = Some(profile);
+        bridge.set_gms_profile(profile);
+        self.runtime_bridge_metrics = bridge.metrics();
+        let mut note = format!(
+            "performance profile override set to '{}' (CLI precedence active)",
+            profile.as_str()
+        );
+        if profile == PerformanceProfile::Heimdall {
+            note.push_str(
+                " | WARNING: higher power draw, heat, and cooling noise expected",
+            );
+        }
+        Ok(note)
+    }
+
     pub(super) fn apply_script_mls_overrides(&mut self, overrides: crate::TlscriptMlsOverride) {
         let Some(bridge) = self.runtime_bridge.as_mut() else {
             return;

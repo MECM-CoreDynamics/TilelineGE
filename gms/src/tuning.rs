@@ -8,6 +8,34 @@
 use std::path::Path;
 use wgpu::DeviceType;
 
+/// Named performance mode for GMS tuning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GmsPerformanceProfile {
+    #[default]
+    Balanced,
+    Aggressive,
+    Heimdall,
+}
+
+impl GmsPerformanceProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::Aggressive => "aggressive",
+            Self::Heimdall => "heimdall",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "balanced" | "default" => Some(Self::Balanced),
+            "aggressive" | "max" => Some(Self::Aggressive),
+            "heimdall" => Some(Self::Heimdall),
+            _ => None,
+        }
+    }
+}
+
 /// Reusable runtime tuning hints derived from adapter characteristics.
 #[derive(Debug, Clone, Copy)]
 pub struct GmsRuntimeTuningProfile {
@@ -166,6 +194,35 @@ impl GmsRuntimeTuningProfile {
 
         self.throughput_startup_prewarm_submits
             .min(offscreen_ring_len as u32)
+    }
+
+    /// Overlay a performance profile onto an adapter-derived profile.
+    pub fn apply_profile(&mut self, profile: GmsPerformanceProfile) {
+        match profile {
+            GmsPerformanceProfile::Balanced => {
+                // Conservative defaults already set by from_adapter_info.
+            }
+            GmsPerformanceProfile::Aggressive => {
+                self.throughput_offscreen_target_ring_len += 2;
+                self.integrated_throughput_burst_work_units =
+                    (self.integrated_throughput_burst_work_units + 2).min(16);
+                self.throughput_startup_ramp_frames =
+                    self.throughput_startup_ramp_frames.saturating_sub(15);
+                self.throughput_startup_prewarm_submits += 1;
+            }
+            GmsPerformanceProfile::Heimdall => {
+                self.throughput_offscreen_target_ring_len =
+                    (self.throughput_offscreen_target_ring_len * 2).min(16);
+                self.integrated_throughput_burst_work_units =
+                    (self.integrated_throughput_burst_work_units * 2).min(24);
+                self.throughput_startup_ramp_frames =
+                    self.throughput_startup_ramp_frames.saturating_sub(30);
+                self.throughput_startup_prewarm_submits =
+                    (self.throughput_startup_prewarm_submits + 2).min(6);
+                self.benchmark_timing_capacity =
+                    (self.benchmark_timing_capacity * 2).min(524_288);
+            }
+        }
     }
 }
 

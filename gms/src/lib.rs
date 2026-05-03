@@ -44,4 +44,4 @@ pub use multi_gpu_runtime::{
 pub use scene_workload::{
     estimate_scene_workload, SceneWorkloadEstimate, SceneWorkloadSnapshot, SceneWorkloadTuning,
 };
-pub use tuning::GmsRuntimeTuningProfile;
+pub use tuning::{GmsPerformanceProfile, GmsRuntimeTuningProfile};
