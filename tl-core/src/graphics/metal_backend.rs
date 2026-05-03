@@ -28,7 +28,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 use super::metal::mesh_slot::MeshSlot;
-use crate::graphics::frame_snapshot::RenderStateSnapshot;
+use crate::graphics::frame_snapshot::{FramePrimitiveRange, RenderStateSnapshot};
 
 /// Runtime configuration for the raw Metal backend.
 #[derive(Debug, Clone)]
@@ -391,6 +391,10 @@ impl MetalBackend {
     }
 
     /// Report the active Metal device name.
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
     pub fn device_name(&self) -> &str {
         &self.device_name
     }
@@ -406,6 +410,10 @@ impl MetalBackend {
     }
 
     /// Update current surface size and recreate depth texture.
+    pub fn bind_mesh_slot(&mut self, slot: u8, mesh: MeshSlot) {
+        self.mesh_slots.insert(slot, mesh);
+    }
+
     pub fn resize(&mut self, new_size: PhysicalSize<u32>) -> Result<(), MetalBackendError> {
         if new_size.width == 0 || new_size.height == 0 {
             return Ok(());
@@ -568,8 +576,6 @@ impl MetalBackend {
                     &snapshot,
                     drawable_ref.texture(),
                     &self.depth_texture,
-                    vb,
-                    ib,
                     tb,
                     vpb,
                 );
@@ -638,21 +644,14 @@ impl MetalBackend {
         snapshot: &RenderStateSnapshot<'_>,
         color_texture: &metal::TextureRef,
         depth_texture: &metal::TextureRef,
-        vb: &Buffer,
-        ib: &Buffer,
         tb: &Buffer,
         vpb: &Buffer,
     ) -> (u32, u32, u32) {
-        let index_count = snapshot.indices.len();
-        let instance_count = snapshot.transforms.len();
         let mut prepass_draw_calls = 0u32;
-        let main_pass_draw_calls;
+        let mut main_pass_draw_calls = 0u32;
         let mut early_z_reject_estimate = 0u32;
 
-        if self.config.occlusion_culling_enabled
-            && !snapshot.indices.is_empty()
-            && instance_count > 0
-        {
+        if self.config.occlusion_culling_enabled && !snapshot.primitive_ranges.is_empty() {
             // Pass 1 — Z-Prepass (depth-only)
             let pass_desc = RenderPassDescriptor::new();
             let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
@@ -670,18 +669,24 @@ impl MetalBackend {
             let encoder = command_buffer.new_render_command_encoder(&pass_desc);
             encoder.set_render_pipeline_state(&self.z_prepass_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_write);
-            encoder.set_vertex_buffer(0, Some(vb), 0);
-            encoder.set_vertex_buffer(1, Some(tb), 0);
-            encoder.set_vertex_buffer(2, Some(vpb), 0);
-            encoder.draw_indexed_primitives_instanced(
-                MTLPrimitiveType::Triangle,
-                index_count as u64,
-                MTLIndexType::UInt32,
-                ib,
-                0,
-                instance_count as u64,
-            );
-            prepass_draw_calls = 1;
+            for range in snapshot.primitive_ranges {
+                if let Some(mesh) = self.mesh_slots.get(&(range.primitive_code as u8)) {
+                    encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
+                    encoder.set_vertex_buffer(1, Some(tb), 0);
+                    encoder.set_vertex_buffer(2, Some(vpb), 0);
+                    encoder.draw_indexed_primitives_instanced_base_instance(
+                        MTLPrimitiveType::Triangle,
+                        mesh.index_count as u64,
+                        mesh.index_type,
+                        &mesh.index_buffer,
+                        0,
+                        range.instance_count as u64,
+                        0,
+                        range.first_instance as u64,
+                    );
+                    prepass_draw_calls += 1;
+                }
+            }
             encoder.end_encoding();
 
             // Pass 2 — Forward Shading (equal-depth, no write)
@@ -699,23 +704,30 @@ impl MetalBackend {
             let encoder = command_buffer.new_render_command_encoder(&pass_desc);
             encoder.set_render_pipeline_state(&self.forward_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_equal);
-            encoder.set_vertex_buffer(0, Some(vb), 0);
-            encoder.set_vertex_buffer(1, Some(tb), 0);
-            encoder.set_vertex_buffer(2, Some(vpb), 0);
-            encoder.set_fragment_buffer(0, Some(vpb), 0);
-            encoder.set_fragment_buffer(1, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_buffer(2, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
-            encoder.draw_indexed_primitives_instanced(
-                MTLPrimitiveType::Triangle,
-                index_count as u64,
-                MTLIndexType::UInt32,
-                ib,
-                0,
-                instance_count as u64,
-            );
-            main_pass_draw_calls = 1;
+            for range in snapshot.primitive_ranges {
+                if let Some(mesh) = self.mesh_slots.get(&(range.primitive_code as u8)) {
+                    encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
+                    encoder.set_vertex_buffer(1, Some(tb), 0);
+                    encoder.set_vertex_buffer(2, Some(vpb), 0);
+                    encoder.set_fragment_buffer(2, Some(vpb), 0);
+                    encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
+                    encoder.set_fragment_buffer(4, Some(&self.stub_buffer), 0);
+                    encoder.set_fragment_buffer(5, Some(&self.stub_buffer), 0);
+                    encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
+                    encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
+                    encoder.draw_indexed_primitives_instanced_base_instance(
+                        MTLPrimitiveType::Triangle,
+                        mesh.index_count as u64,
+                        mesh.index_type,
+                        &mesh.index_buffer,
+                        0,
+                        range.instance_count as u64,
+                        0,
+                        range.first_instance as u64,
+                    );
+                    main_pass_draw_calls += 1;
+                }
+            }
             encoder.end_encoding();
 
             early_z_reject_estimate = prepass_draw_calls.saturating_sub(main_pass_draw_calls);
@@ -737,23 +749,30 @@ impl MetalBackend {
             let encoder = command_buffer.new_render_command_encoder(&pass_desc);
             encoder.set_render_pipeline_state(&self.forward_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_write);
-            encoder.set_vertex_buffer(0, Some(vb), 0);
-            encoder.set_vertex_buffer(1, Some(tb), 0);
-            encoder.set_vertex_buffer(2, Some(vpb), 0);
-            encoder.set_fragment_buffer(0, Some(vpb), 0);
-            encoder.set_fragment_buffer(1, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_buffer(2, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
-            encoder.draw_indexed_primitives_instanced(
-                MTLPrimitiveType::Triangle,
-                index_count as u64,
-                MTLIndexType::UInt32,
-                ib,
-                0,
-                instance_count as u64,
-            );
-            main_pass_draw_calls = 1;
+            for range in snapshot.primitive_ranges {
+                if let Some(mesh) = self.mesh_slots.get(&(range.primitive_code as u8)) {
+                    encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
+                    encoder.set_vertex_buffer(1, Some(tb), 0);
+                    encoder.set_vertex_buffer(2, Some(vpb), 0);
+                    encoder.set_fragment_buffer(2, Some(vpb), 0);
+                    encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
+                    encoder.set_fragment_buffer(4, Some(&self.stub_buffer), 0);
+                    encoder.set_fragment_buffer(5, Some(&self.stub_buffer), 0);
+                    encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
+                    encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
+                    encoder.draw_indexed_primitives_instanced_base_instance(
+                        MTLPrimitiveType::Triangle,
+                        mesh.index_count as u64,
+                        mesh.index_type,
+                        &mesh.index_buffer,
+                        0,
+                        range.instance_count as u64,
+                        0,
+                        range.first_instance as u64,
+                    );
+                    main_pass_draw_calls += 1;
+                }
+            }
             encoder.end_encoding();
         }
 
@@ -964,8 +983,6 @@ impl MetalBackend {
                 &snapshot,
                 &color_texture,
                 &self.depth_texture,
-                vb,
-                ib,
                 tb,
                 vpb,
             );
@@ -1225,14 +1242,13 @@ mod tests {
                 _padding: 0,
             })
             .collect();
-        let vertices: Vec<f32> = vec![
-            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
-        ];
-        let indices: Vec<u32> = vec![0, 1, 2];
+        let primitive_ranges = Box::leak(vec![FramePrimitiveRange {
+            primitive_code: 0,
+            first_instance: 0,
+            instance_count: instance_count as u32,
+            flags: 0,
+        }].into_boxed_slice());
         let transforms = Box::leak(transforms.into_boxed_slice());
-        let vertices = Box::leak(vertices.into_boxed_slice());
-        let indices = Box::leak(indices.into_boxed_slice());
         RenderStateSnapshot {
             frame_id: 1,
             camera_view_proj: [
@@ -1244,14 +1260,14 @@ mod tests {
             camera_eye: [0.0, 12.0, 36.0, 1.0],
             opaque_instance_count: instance_count as u32,
             transparent_instance_count: 0,
-            primitive_ranges: &[],
+            primitive_ranges,
             transforms,
             materials: &[],
             textures: &[],
             lights: &[],
             instance_bounds: &[],
-            vertices,
-            indices,
+            vertices: &[],
+            indices: &[],
         }
     }
 
@@ -1294,6 +1310,15 @@ mod tests {
             Err(err) => panic!("unexpected Metal backend init error: {err}"),
         };
 
+        let vertices: Vec<f32> = vec![
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
+            0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+        ];
+        let indices: Vec<u32> = vec![0, 1, 2];
+        let mesh = MeshSlot::new(backend.device(), &vertices, &indices, MTLIndexType::UInt32);
+        backend.bind_mesh_slot(0, mesh);
+
         let snapshot = dummy_snapshot_with_instances(2);
         let telemetry = backend
             .render_n_headless(snapshot)
@@ -1316,6 +1341,15 @@ mod tests {
             Err(MetalBackendError::NoMetalDevice) => return,
             Err(err) => panic!("unexpected Metal backend init error: {err}"),
         };
+
+        let vertices: Vec<f32> = vec![
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
+            0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+        ];
+        let indices: Vec<u32> = vec![0, 1, 2];
+        let mesh = MeshSlot::new(backend.device(), &vertices, &indices, MTLIndexType::UInt32);
+        backend.bind_mesh_slot(0, mesh);
 
         let snapshot = dummy_snapshot_with_instances(2);
         let telemetry = backend
