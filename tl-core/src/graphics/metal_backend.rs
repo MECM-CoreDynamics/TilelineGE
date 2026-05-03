@@ -28,7 +28,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 use super::metal::mesh_slot::MeshSlot;
-use crate::graphics::frame_snapshot::{FramePrimitiveRange, RenderStateSnapshot};
+use crate::graphics::frame_snapshot::{FrameLightRecord, FramePrimitiveRange, RenderStateSnapshot};
 
 /// Runtime configuration for the raw Metal backend.
 #[derive(Debug, Clone)]
@@ -157,6 +157,16 @@ struct GpuInstance3d {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+struct LightData {
+    position_kind: [f32; 4],
+    direction_inner: [f32; 4],
+    color_intensity: [f32; 4],
+    params: [f32; 4],
+    shadow: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
     camera_eye: [f32; 4],
@@ -208,6 +218,8 @@ pub struct MetalBackend {
     depth_state_equal: DepthStencilState,
     transform_buffers: Vec<Buffer>,
     view_proj_buffers: Vec<Buffer>,
+    light_data_buffers: Vec<Buffer>,
+    lighting_uniform_buffers: Vec<Buffer>,
     instance_scratch: Vec<GpuInstance3d>,
     stub_buffer: Buffer,
     stub_shadow_texture: Texture,
@@ -332,6 +344,22 @@ impl MetalBackend {
                 )
             })
             .collect();
+        let light_data_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    (METAL_MAX_LIGHTS * std::mem::size_of::<LightData>()) as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
+        let lighting_uniform_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    std::mem::size_of::<LightingUniform>() as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
 
         let stub_buffer = device.new_buffer(
             metal_stub_fragment_buffer_len(),
@@ -374,6 +402,8 @@ impl MetalBackend {
             depth_state_equal,
             transform_buffers,
             view_proj_buffers,
+            light_data_buffers,
+            lighting_uniform_buffers,
             instance_scratch: Vec::with_capacity(max_transforms),
             stub_buffer,
             stub_shadow_texture,
@@ -492,6 +522,53 @@ impl MetalBackend {
         }
     }
 
+    fn upload_lights(
+        &self,
+        _frame_slot: usize,
+        lb: &Buffer,
+        lub: &Buffer,
+        snapshot: &RenderStateSnapshot<'_>,
+    ) {
+        if !snapshot.lights.is_empty() {
+            let light_bytes = snapshot.lights.len() * std::mem::size_of::<FrameLightRecord>();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    snapshot.lights.as_ptr() as *const u8,
+                    lb.contents() as *mut u8,
+                    light_bytes.min(lb.length() as usize),
+                );
+                let total_light_bytes = METAL_MAX_LIGHTS * std::mem::size_of::<FrameLightRecord>();
+                if light_bytes < total_light_bytes {
+                    std::ptr::write_bytes(
+                        (lb.contents() as *mut u8).add(light_bytes),
+                        0,
+                        total_light_bytes - light_bytes,
+                    );
+                }
+            }
+            let lighting = LightingUniform {
+                light_count: snapshot.lights.len() as u32,
+                rt_mode: 0,
+                rt_active: 0,
+                rt_dynamic_count: 0,
+                rt_dynamic_cap: 0,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &lighting as *const LightingUniform as *const u8,
+                    lub.contents() as *mut u8,
+                    std::mem::size_of::<LightingUniform>(),
+                );
+            }
+        } else {
+            zero_shared_buffer(lb);
+            zero_shared_buffer(lub);
+        }
+    }
+
     /// Submit one frame worth of work to the Metal command queue.
     pub fn render_n(
         &mut self,
@@ -542,6 +619,10 @@ impl MetalBackend {
                     }
                 }
 
+                let lb = &self.light_data_buffers[frame_slot];
+                let lub = &self.lighting_uniform_buffers[frame_slot];
+                self.upload_lights(frame_slot, lb, lub, &snapshot);
+
                 let (p, m, e) = self.encode_frame(
                     &command_buffer,
                     &snapshot,
@@ -549,6 +630,8 @@ impl MetalBackend {
                     &self.depth_texture,
                     tb,
                     vpb,
+                    lb,
+                    lub,
                     &visible_ranges,
                 );
                 prepass_draw_calls = p;
@@ -764,6 +847,8 @@ impl MetalBackend {
         depth_texture: &metal::TextureRef,
         tb: &Buffer,
         vpb: &Buffer,
+        lb: &Buffer,
+        lub: &Buffer,
         ranges: &[FramePrimitiveRange],
     ) -> (u32, u32, u32) {
         let mut prepass_draw_calls = 0u32;
@@ -826,8 +911,8 @@ impl MetalBackend {
             encoder.set_vertex_buffer(1, Some(tb), 0);
             encoder.set_vertex_buffer(2, Some(vpb), 0);
             encoder.set_fragment_buffer(0, Some(vpb), 0);
-            encoder.set_fragment_buffer(1, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_buffer(2, Some(&self.stub_buffer), 0);
+            encoder.set_fragment_buffer(1, Some(lb), 0);
+            encoder.set_fragment_buffer(2, Some(lub), 0);
             encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
             encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
             encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
@@ -871,8 +956,8 @@ impl MetalBackend {
             encoder.set_vertex_buffer(1, Some(tb), 0);
             encoder.set_vertex_buffer(2, Some(vpb), 0);
             encoder.set_fragment_buffer(0, Some(vpb), 0);
-            encoder.set_fragment_buffer(1, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_buffer(2, Some(&self.stub_buffer), 0);
+            encoder.set_fragment_buffer(1, Some(lb), 0);
+            encoder.set_fragment_buffer(2, Some(lub), 0);
             encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
             encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
             encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
@@ -968,6 +1053,22 @@ impl MetalBackend {
                 )
             })
             .collect();
+        let light_data_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    (METAL_MAX_LIGHTS * std::mem::size_of::<LightData>()) as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
+        let lighting_uniform_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    std::mem::size_of::<LightingUniform>() as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
 
         let stub_buffer = device.new_buffer(
             metal_stub_fragment_buffer_len(),
@@ -1010,6 +1111,8 @@ impl MetalBackend {
             depth_state_equal,
             transform_buffers,
             view_proj_buffers,
+            light_data_buffers,
+            lighting_uniform_buffers,
             instance_scratch: Vec::with_capacity(max_transforms),
             stub_buffer,
             stub_shadow_texture,
@@ -1071,6 +1174,10 @@ impl MetalBackend {
             self.surface_size.height,
         );
 
+        let lb = &self.light_data_buffers[frame_slot];
+        let lub = &self.lighting_uniform_buffers[frame_slot];
+        self.upload_lights(frame_slot, lb, lub, &snapshot);
+
         let (p, m, e) = self.encode_frame(
             &command_buffer,
             &snapshot,
@@ -1078,6 +1185,8 @@ impl MetalBackend {
             &self.depth_texture,
             tb,
             vpb,
+            lb,
+            lub,
             &visible_ranges,
         );
         prepass_draw_calls = p;
