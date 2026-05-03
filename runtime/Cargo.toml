@@ -42,4 +42,7 @@ hound = "3.5.1"
 image = { version = "0.25.5", default-features = false, features = ["png"] }
 resvg = { version = "0.45.1", default-features = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.33.0"
+
 [dev-dependencies]

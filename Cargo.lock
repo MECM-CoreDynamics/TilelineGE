@@ -3974,6 +3974,7 @@ dependencies = [
  "gms",
  "hound",
  "image",
+ "metal 0.33.0",
  "mgs",
  "mps",
  "nalgebra",

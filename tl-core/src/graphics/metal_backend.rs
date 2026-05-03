@@ -638,6 +638,18 @@ impl MetalBackend {
         }
     }
 
+    /// Resolve a mesh slot from a primitive code, matching the WGPU renderer mapping:
+    /// - 0 → built-in sphere
+    /// - 1 → built-in box
+    /// - 2+ → custom mesh slot = code - 2
+    fn resolve_mesh_slot(&self, primitive_code: u8) -> Option<&MeshSlot> {
+        match primitive_code {
+            0 => self.mesh_slots.get(&0),
+            1 => self.mesh_slots.get(&1),
+            code => self.mesh_slots.get(&(code.saturating_sub(2))),
+        }
+    }
+
     fn encode_frame(
         &self,
         command_buffer: &metal::CommandBufferRef,
@@ -670,7 +682,7 @@ impl MetalBackend {
             encoder.set_render_pipeline_state(&self.z_prepass_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_write);
             for range in snapshot.primitive_ranges {
-                if let Some(mesh) = self.mesh_slots.get(&(range.primitive_code as u8)) {
+                if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.set_vertex_buffer(1, Some(tb), 0);
                     encoder.set_vertex_buffer(2, Some(vpb), 0);
@@ -705,7 +717,7 @@ impl MetalBackend {
             encoder.set_render_pipeline_state(&self.forward_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_equal);
             for range in snapshot.primitive_ranges {
-                if let Some(mesh) = self.mesh_slots.get(&(range.primitive_code as u8)) {
+                if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.set_vertex_buffer(1, Some(tb), 0);
                     encoder.set_vertex_buffer(2, Some(vpb), 0);
@@ -750,7 +762,7 @@ impl MetalBackend {
             encoder.set_render_pipeline_state(&self.forward_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_write);
             for range in snapshot.primitive_ranges {
-                if let Some(mesh) = self.mesh_slots.get(&(range.primitive_code as u8)) {
+                if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.set_vertex_buffer(1, Some(tb), 0);
                     encoder.set_vertex_buffer(2, Some(vpb), 0);

@@ -19,6 +19,8 @@ use tl_core::{
     FrameTextureRecord, MetalBackend, MetalBackendConfig, MetalBackendError,
     MetalFrameExecutionTelemetry, RenderStateSnapshot,
 };
+use metal::MTLIndexType;
+use tl_core::graphics::metal::mesh_slot::MeshSlot;
 use wgpu::Backend;
 use winit::window::Window;
 
@@ -105,7 +107,7 @@ impl MetalSceneRenderer {
     ) -> Result<Self, MetalSceneRendererError> {
         let scratch_capacity = config.backend.max_instances.max(1);
         let backend = MetalBackend::new(window, config.backend)?;
-        Ok(Self {
+        let mut renderer = Self {
             backend,
             transform_snapshot_scratch: Vec::with_capacity(scratch_capacity),
             material_snapshot_scratch: Vec::with_capacity(scratch_capacity.max(256)),
@@ -124,7 +126,10 @@ impl MetalSceneRenderer {
             ray_tracing_status: resolve_rt_status(RayTracingMode::Auto, false),
             last_upload_stats: WgpuSceneRendererUploadStats::default(),
             last_frame_result: None,
-        })
+        };
+        renderer.bind_builtin_sphere_mesh_slot(0, false);
+        renderer.bind_builtin_box_mesh_slot(1);
+        Ok(renderer)
     }
 
     /// Resize backend-dependent resources.
@@ -240,8 +245,13 @@ impl MetalSceneRenderer {
         self.force_full_fbx_sphere
     }
 
-    /// Placeholder FBX mesh binding hook for the Metal migration path.
-    pub fn bind_fbx_mesh_slot_from_path(&mut self, _slot: u8, _path: &Path) -> Result<(), String> {
+    /// Bind an FBX mesh file to a Metal mesh slot.
+    pub fn bind_fbx_mesh_slot_from_path(&mut self, slot: u8, path: &Path) -> Result<(), String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let parsed = crate::fbx_mesh::parse_first_mesh_from_fbx(&bytes)?;
+        let vertices: Vec<SceneVertex> = parsed.positions.iter().map(|&p| SceneVertex::new(p)).collect();
+        let mesh = MeshSlot::new(self.backend.device(), &vertices, &parsed.indices, MTLIndexType::UInt32);
+        self.backend.bind_mesh_slot(slot, mesh);
         Ok(())
     }
 
@@ -254,8 +264,21 @@ impl MetalSceneRenderer {
         Ok(())
     }
 
-    /// Placeholder procedural sphere binding for runtime compatibility.
-    pub fn bind_builtin_sphere_mesh_slot(&mut self, _slot: u8, _high_quality: bool) {}
+    /// Bind a procedural sphere mesh to a Metal mesh slot.
+    pub fn bind_builtin_sphere_mesh_slot(&mut self, slot: u8, high_quality: bool) {
+        let mesh = if high_quality {
+            build_icosa_sphere_mesh(self.backend.device())
+        } else {
+            build_octa_sphere_mesh(self.backend.device())
+        };
+        self.backend.bind_mesh_slot(slot, mesh);
+    }
+
+    /// Bind a procedural box mesh to a Metal mesh slot.
+    pub fn bind_builtin_box_mesh_slot(&mut self, slot: u8) {
+        let mesh = build_box_mesh(self.backend.device());
+        self.backend.bind_mesh_slot(slot, mesh);
+    }
 
     /// Estimate snapshot payload bytes for telemetry and planning.
     pub fn estimate_snapshot_bytes(draw: &RuntimeDrawFrame) -> u64 {
@@ -520,4 +543,94 @@ mod tests {
                 + expected_sprite_bytes
         );
     }
+}
+
+// ── Vertex helpers ───────────────────────────────────────────────────────────
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct SceneVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+}
+
+impl SceneVertex {
+    fn new(position: [f32; 3]) -> Self {
+        let len = (position[0] * position[0]
+            + position[1] * position[1]
+            + position[2] * position[2])
+            .sqrt()
+            .max(1e-6);
+        let normal = [position[0] / len, position[1] / len, position[2] / len];
+        Self {
+            position,
+            normal,
+            uv: [0.0, 0.0],
+        }
+    }
+}
+
+fn build_octa_sphere_mesh(device: &metal::Device) -> MeshSlot {
+    let vertices = [
+        SceneVertex::new([1.0, 0.0, 0.0]),
+        SceneVertex::new([-1.0, 0.0, 0.0]),
+        SceneVertex::new([0.0, 1.0, 0.0]),
+        SceneVertex::new([0.0, -1.0, 0.0]),
+        SceneVertex::new([0.0, 0.0, 1.0]),
+        SceneVertex::new([0.0, 0.0, -1.0]),
+    ];
+    let indices: [u16; 24] = [
+        0, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0,
+        4, 3, 0, 1, 3, 4, 5, 3, 1, 0, 3, 5,
+    ];
+    MeshSlot::new(device, &vertices, &indices, MTLIndexType::UInt16)
+}
+
+fn build_icosa_sphere_mesh(device: &metal::Device) -> MeshSlot {
+    let t = (1.0 + 5.0_f32.sqrt()) * 0.5;
+    let v = [
+        [-1.0, t, 0.0],
+        [1.0, t, 0.0],
+        [-1.0, -t, 0.0],
+        [1.0, -t, 0.0],
+        [0.0, -1.0, t],
+        [0.0, 1.0, t],
+        [0.0, -1.0, -t],
+        [0.0, 1.0, -t],
+        [t, 0.0, -1.0],
+        [t, 0.0, 1.0],
+        [-t, 0.0, -1.0],
+        [-t, 0.0, 1.0],
+    ];
+    let vertices: Vec<SceneVertex> = v.iter().map(|&p| SceneVertex::new(p)).collect();
+    let indices: [u16; 60] = [
+        0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11,
+        1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
+        3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9,
+        4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1,
+    ];
+    MeshSlot::new(device, &vertices, &indices, MTLIndexType::UInt16)
+}
+
+fn build_box_mesh(device: &metal::Device) -> MeshSlot {
+    let vertices = [
+        SceneVertex::new([-0.5, -0.5, -0.5]),
+        SceneVertex::new([0.5, -0.5, -0.5]),
+        SceneVertex::new([0.5, 0.5, -0.5]),
+        SceneVertex::new([-0.5, 0.5, -0.5]),
+        SceneVertex::new([-0.5, -0.5, 0.5]),
+        SceneVertex::new([0.5, -0.5, 0.5]),
+        SceneVertex::new([0.5, 0.5, 0.5]),
+        SceneVertex::new([-0.5, 0.5, 0.5]),
+    ];
+    let indices: [u16; 36] = [
+        0, 1, 2, 2, 3, 0, // back
+        4, 6, 5, 6, 4, 7, // front
+        0, 4, 5, 5, 1, 0, // bottom
+        3, 2, 6, 6, 7, 3, // top
+        1, 5, 6, 6, 2, 1, // right
+        0, 3, 7, 7, 4, 0, // left
+    ];
+    MeshSlot::new(device, &vertices, &indices, MTLIndexType::UInt16)
 }
