@@ -262,10 +262,7 @@ struct Lighting {
 };
 
 struct SpriteVertexIn {
-    float2 local_pos [[attribute(0)]];
-};
-
-struct SpriteInstanceIn {
+    float2 local_pos      [[attribute(0)]];
     float4 translate_size [[attribute(1)]];
     float4 rot_z          [[attribute(2)]];
     float4 color          [[attribute(3)]];
@@ -281,26 +278,23 @@ struct SpriteVSOut {
     float2 kind     [[user(locn3)]];
 };
 
-vertex SpriteVSOut sprite_vertex(
-    SpriteVertexIn   vin  [[stage_in]],
-    SpriteInstanceIn inst [[stage_in]]
-) {
-    float c = cos(inst.rot_z.x);
-    float s = sin(inst.rot_z.x);
-    float2 scaled = float2(vin.local_pos.x * inst.translate_size.z,
-                           vin.local_pos.y * inst.translate_size.w);
+vertex SpriteVSOut sprite_vertex(SpriteVertexIn in [[stage_in]]) {
+    float c = cos(in.rot_z.x);
+    float s = sin(in.rot_z.x);
+    float2 scaled = float2(in.local_pos.x * in.translate_size.z,
+                           in.local_pos.y * in.translate_size.w);
     float2 rotated = float2(scaled.x * c - scaled.y * s,
                             scaled.x * s + scaled.y * c);
-    float2 pos = rotated + inst.translate_size.xy;
-    float2 uv = vin.local_pos + float2(0.5, 0.5);
-    float2 atlas_uv = mix(inst.atlas_rect.xy, inst.atlas_rect.zw, uv);
+    float2 pos = rotated + in.translate_size.xy;
+    float2 uv = in.local_pos + float2(0.5, 0.5);
+    float2 atlas_uv = mix(in.atlas_rect.xy, in.atlas_rect.zw, uv);
 
     SpriteVSOut out;
-    out.position = float4(pos, inst.rot_z.y, 1.0);
-    out.color    = inst.color;
+    out.position = float4(pos, in.rot_z.y, 1.0);
+    out.color    = in.color;
     out.uv       = uv;
     out.atlas_uv = atlas_uv;
-    out.kind     = inst.kind_params.xy;
+    out.kind     = in.kind_params.xy;
     return out;
 }
 

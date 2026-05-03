@@ -28,7 +28,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 use super::metal::mesh_slot::MeshSlot;
-use crate::graphics::frame_snapshot::{FrameLightRecord, FramePrimitiveRange, RenderStateSnapshot};
+use crate::graphics::frame_snapshot::{FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange, FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot};
 
 /// Runtime configuration for the raw Metal backend.
 #[derive(Debug, Clone)]
@@ -39,6 +39,8 @@ pub struct MetalBackendConfig {
     pub max_instances: usize,
     /// Enable Z-prepass + Early-Z occlusion culling.
     pub occlusion_culling_enabled: bool,
+    /// Maximum sprite instances accepted per frame.
+    pub max_sprites: usize,
 }
 
 impl Default for MetalBackendConfig {
@@ -47,6 +49,7 @@ impl Default for MetalBackendConfig {
             frames_in_flight: 3,
             max_instances: 32_768,
             occlusion_culling_enabled: true,
+            max_sprites: 4096,
         }
     }
 }
@@ -141,7 +144,7 @@ use super::metal::shader_library::{
     BlendMode, PipelineKey, ShaderLibrary, VertexAttributeDesc, VertexBufferLayoutDesc,
     VertexLayout,
 };
-use super::metal::shaders::{SCENE_3D_MSL, SCENE_SHADOW_MSL};
+use super::metal::shaders::{SCENE_3D_MSL, SCENE_SHADOW_MSL, SCENE_SPRITE_MSL, SCENE_UPSCALE_MSL};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -202,6 +205,17 @@ struct ShadowUniform {
     _pad2: u32,
 }
 
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct UpscaleUniform {
+    inv_source_size: [f32; 2],
+    source_uv_scale: [f32; 2],
+    sharpness: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
 const METAL_MAX_LIGHTS: usize = 64;
 const METAL_SHADOW_LAYERS: usize = 4;
 
@@ -227,13 +241,21 @@ pub struct MetalBackend {
     light_data_buffers: Vec<Buffer>,
     lighting_uniform_buffers: Vec<Buffer>,
     instance_scratch: Vec<GpuInstance3d>,
-    stub_buffer: Buffer,
     shadow_texture: Texture,
     shadow_layer_views: Vec<Texture>,
     shadow_sampler: SamplerState,
     shadow_pipeline: RenderPipelineState,
     shadow_pass_uniform_buffers: Vec<Buffer>,
     shadow_uniform_buffers: Vec<Buffer>,
+    offscreen_color_texture: Texture,
+    upscale_pipeline: RenderPipelineState,
+    upscale_uniform_buffer: Buffer,
+    upscale_sampler: SamplerState,
+    sprite_pipeline: RenderPipelineState,
+    sprite_vertex_buffer: Buffer,
+    sprite_instance_buffers: Vec<Buffer>,
+    sprite_atlas_texture: Texture,
+    sprite_sampler: SamplerState,
     mesh_slots: std::collections::HashMap<u8, MeshSlot>,
     frame_pacing: FramePacing,
 }
@@ -371,11 +393,6 @@ impl MetalBackend {
             })
             .collect();
 
-        let stub_buffer = device.new_buffer(
-            metal_stub_fragment_buffer_len(),
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        );
-        zero_shared_buffer(&stub_buffer);
         let shadow_desc = TextureDescriptor::new();
         shadow_desc.set_texture_type(MTLTextureType::D2Array);
         shadow_desc.set_width(1024);
@@ -418,6 +435,59 @@ impl MetalBackend {
                 )
             })
             .collect();
+        let offscreen_color_desc = TextureDescriptor::new();
+        offscreen_color_desc.set_texture_type(MTLTextureType::D2);
+        offscreen_color_desc.set_width(surface_size.width as u64);
+        offscreen_color_desc.set_height(surface_size.height as u64);
+        offscreen_color_desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        offscreen_color_desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+        let offscreen_color_texture = device.new_texture(&offscreen_color_desc);
+        let upscale_pipeline = build_upscale_pipeline(&device)?;
+        let upscale_uniform_buffer = device.new_buffer(
+            std::mem::size_of::<UpscaleUniform>() as u64,
+            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+        );
+        let upscale_sampler_desc = SamplerDescriptor::new();
+        upscale_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+        upscale_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+        upscale_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
+        upscale_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
+        let upscale_sampler = device.new_sampler(&upscale_sampler_desc);
+
+        let sprite_pipeline = build_sprite_pipeline(&device)?;
+        let sprite_vertex_buffer = device.new_buffer_with_data(
+            [
+                -0.5f32, -0.5f32, // bottom-left
+                0.5f32, -0.5f32,  // bottom-right
+                -0.5f32, 0.5f32,  // top-left
+                0.5f32, 0.5f32,   // top-right
+            ]
+            .as_ptr() as *const _,
+            8 * std::mem::size_of::<f32>() as u64,
+            MTLResourceOptions::CPUCacheModeDefaultCache,
+        );
+        let max_sprites = config.max_sprites.max(1);
+        let sprite_instance_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    (max_sprites * std::mem::size_of::<FrameSpriteRecord>()) as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
+        let sprite_atlas_desc = TextureDescriptor::new();
+        sprite_atlas_desc.set_texture_type(MTLTextureType::D2);
+        sprite_atlas_desc.set_width(1);
+        sprite_atlas_desc.set_height(1);
+        sprite_atlas_desc.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+        sprite_atlas_desc.set_usage(MTLTextureUsage::ShaderRead);
+        let sprite_atlas_texture = device.new_texture(&sprite_atlas_desc);
+        let sprite_sampler_desc = SamplerDescriptor::new();
+        sprite_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+        sprite_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+        sprite_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
+        sprite_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
+        let sprite_sampler = device.new_sampler(&sprite_sampler_desc);
 
         let frame_pacing = FramePacing::new(config.frames_in_flight);
 
@@ -442,13 +512,21 @@ impl MetalBackend {
             light_data_buffers,
             lighting_uniform_buffers,
             instance_scratch: Vec::with_capacity(max_transforms),
-            stub_buffer,
             shadow_texture,
             shadow_layer_views,
             shadow_sampler,
             shadow_pipeline,
             shadow_pass_uniform_buffers,
             shadow_uniform_buffers,
+            offscreen_color_texture,
+            upscale_pipeline,
+            upscale_uniform_buffer,
+            upscale_sampler,
+            sprite_pipeline,
+            sprite_vertex_buffer,
+            sprite_instance_buffers,
+            sprite_atlas_texture,
+            sprite_sampler,
             mesh_slots: std::collections::HashMap::new(),
             frame_pacing,
         })
@@ -716,6 +794,84 @@ impl MetalBackend {
         }
     }
 
+    fn encode_sprite_pass(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        color_texture: &metal::TextureRef,
+        frame_slot: usize,
+        sprite_count: usize,
+        lighting_buffer: &Buffer,
+    ) {
+        if sprite_count == 0 {
+            return;
+        }
+        let pass_desc = RenderPassDescriptor::new();
+        let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
+        color_attachment.set_texture(Some(color_texture));
+        color_attachment.set_load_action(MTLLoadAction::Load);
+        color_attachment.set_store_action(MTLStoreAction::Store);
+
+        let encoder = command_buffer.new_render_command_encoder(&pass_desc);
+        encoder.set_render_pipeline_state(&self.sprite_pipeline);
+        encoder.set_vertex_buffer(0, Some(&self.sprite_vertex_buffer), 0);
+        encoder.set_vertex_buffer(1, Some(&self.sprite_instance_buffers[frame_slot]), 0);
+        encoder.set_fragment_texture(0, Some(&self.sprite_atlas_texture));
+        encoder.set_fragment_sampler_state(0, Some(&self.sprite_sampler));
+        encoder.set_fragment_buffer(0, Some(lighting_buffer), 0);
+        encoder.draw_primitives_instanced(
+            MTLPrimitiveType::TriangleStrip,
+            0,
+            4,
+            sprite_count as u64,
+        );
+        encoder.end_encoding();
+    }
+
+    fn encode_upscale_pass(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        source_texture: &metal::TextureRef,
+        target_texture: &metal::TextureRef,
+        source_width: u32,
+        source_height: u32,
+        target_width: u32,
+        target_height: u32,
+    ) {
+        let pass_desc = RenderPassDescriptor::new();
+        let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
+        color_attachment.set_texture(Some(target_texture));
+        color_attachment.set_load_action(MTLLoadAction::Clear);
+        color_attachment.set_store_action(MTLStoreAction::Store);
+        color_attachment.set_clear_color(MTLClearColor::new(0.0, 0.0, 0.0, 1.0));
+
+        let encoder = command_buffer.new_render_command_encoder(&pass_desc);
+        encoder.set_render_pipeline_state(&self.upscale_pipeline);
+        encoder.set_fragment_texture(0, Some(source_texture));
+        encoder.set_fragment_sampler_state(0, Some(&self.upscale_sampler));
+
+        let uniform = UpscaleUniform {
+            inv_source_size: [1.0 / source_width as f32, 1.0 / source_height as f32],
+            source_uv_scale: [
+                source_width as f32 / target_width.max(1) as f32,
+                source_height as f32 / target_height.max(1) as f32,
+            ],
+            sharpness: 0.5,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &uniform as *const UpscaleUniform as *const u8,
+                self.upscale_uniform_buffer.contents() as *mut u8,
+                std::mem::size_of::<UpscaleUniform>(),
+            );
+        }
+        encoder.set_fragment_buffer(0, Some(&self.upscale_uniform_buffer), 0);
+        encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, 3);
+        encoder.end_encoding();
+    }
+
     /// Submit one frame worth of work to the Metal command queue.
     pub fn render_n(
         &mut self,
@@ -788,7 +944,7 @@ impl MetalBackend {
             let (p, m, e) = self.encode_frame(
                 &command_buffer,
                 &snapshot,
-                drawable_ref.texture(),
+                &self.offscreen_color_texture,
                 &self.depth_texture,
                 tb,
                 vpb,
@@ -800,6 +956,35 @@ impl MetalBackend {
             prepass_draw_calls = p;
             main_pass_draw_calls = m;
             early_z_reject_estimate = e;
+
+            if !snapshot.sprites.is_empty() {
+                let sprite_buf = &self.sprite_instance_buffers[frame_slot];
+                let sprite_bytes = std::mem::size_of_val(snapshot.sprites);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        snapshot.sprites.as_ptr() as *const u8,
+                        sprite_buf.contents() as *mut u8,
+                        sprite_bytes.min(sprite_buf.length() as usize),
+                    );
+                }
+            }
+            self.encode_sprite_pass(
+                &command_buffer,
+                &self.offscreen_color_texture,
+                frame_slot,
+                snapshot.sprites.len(),
+                lub,
+            );
+
+            self.encode_upscale_pass(
+                &command_buffer,
+                &self.offscreen_color_texture,
+                drawable_ref.texture(),
+                self.surface_size.width,
+                self.surface_size.height,
+                self.surface_size.width,
+                self.surface_size.height,
+            );
 
             let pacing = self.frame_pacing.clone();
             let concrete = block::ConcreteBlock::new(move |_buffer: &metal::CommandBufferRef| {
@@ -1231,11 +1416,6 @@ impl MetalBackend {
             })
             .collect();
 
-        let stub_buffer = device.new_buffer(
-            metal_stub_fragment_buffer_len(),
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        );
-        zero_shared_buffer(&stub_buffer);
         let shadow_desc = TextureDescriptor::new();
         shadow_desc.set_texture_type(MTLTextureType::D2Array);
         shadow_desc.set_width(1024);
@@ -1278,6 +1458,59 @@ impl MetalBackend {
                 )
             })
             .collect();
+        let offscreen_color_desc = TextureDescriptor::new();
+        offscreen_color_desc.set_texture_type(MTLTextureType::D2);
+        offscreen_color_desc.set_width(surface_size.width as u64);
+        offscreen_color_desc.set_height(surface_size.height as u64);
+        offscreen_color_desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        offscreen_color_desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+        let offscreen_color_texture = device.new_texture(&offscreen_color_desc);
+        let upscale_pipeline = build_upscale_pipeline(&device)?;
+        let upscale_uniform_buffer = device.new_buffer(
+            std::mem::size_of::<UpscaleUniform>() as u64,
+            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+        );
+        let upscale_sampler_desc = SamplerDescriptor::new();
+        upscale_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+        upscale_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+        upscale_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
+        upscale_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
+        let upscale_sampler = device.new_sampler(&upscale_sampler_desc);
+
+        let sprite_pipeline = build_sprite_pipeline(&device)?;
+        let sprite_vertex_buffer = device.new_buffer_with_data(
+            [
+                -0.5f32, -0.5f32,
+                0.5f32, -0.5f32,
+                -0.5f32, 0.5f32,
+                0.5f32, 0.5f32,
+            ]
+            .as_ptr() as *const _,
+            8 * std::mem::size_of::<f32>() as u64,
+            MTLResourceOptions::CPUCacheModeDefaultCache,
+        );
+        let max_sprites = config.max_sprites.max(1);
+        let sprite_instance_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    (max_sprites * std::mem::size_of::<FrameSpriteRecord>()) as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
+        let sprite_atlas_desc = TextureDescriptor::new();
+        sprite_atlas_desc.set_texture_type(MTLTextureType::D2);
+        sprite_atlas_desc.set_width(1);
+        sprite_atlas_desc.set_height(1);
+        sprite_atlas_desc.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
+        sprite_atlas_desc.set_usage(MTLTextureUsage::ShaderRead);
+        let sprite_atlas_texture = device.new_texture(&sprite_atlas_desc);
+        let sprite_sampler_desc = SamplerDescriptor::new();
+        sprite_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+        sprite_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+        sprite_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
+        sprite_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
+        let sprite_sampler = device.new_sampler(&sprite_sampler_desc);
 
         let frame_pacing = FramePacing::new(config.frames_in_flight);
 
@@ -1302,13 +1535,21 @@ impl MetalBackend {
             light_data_buffers,
             lighting_uniform_buffers,
             instance_scratch: Vec::with_capacity(max_transforms),
-            stub_buffer,
             shadow_texture,
             shadow_layer_views,
             shadow_sampler,
             shadow_pipeline,
             shadow_pass_uniform_buffers,
             shadow_uniform_buffers,
+            offscreen_color_texture,
+            upscale_pipeline,
+            upscale_uniform_buffer,
+            upscale_sampler,
+            sprite_pipeline,
+            sprite_vertex_buffer,
+            sprite_instance_buffers,
+            sprite_atlas_texture,
+            sprite_sampler,
             mesh_slots: std::collections::HashMap::new(),
             frame_pacing,
         })
@@ -1491,6 +1732,99 @@ fn build_shadow_pipeline(
         .clone())
 }
 
+fn build_upscale_pipeline(
+    device: &Device,
+) -> Result<RenderPipelineState, MetalBackendError> {
+    let mut shader_library =
+        ShaderLibrary::new(device, SCENE_UPSCALE_MSL).map_err(MetalBackendError::ShaderCompilation)?;
+    let empty_layout = VertexLayout { buffer_layouts: vec![] };
+    let layout_hash = empty_layout.hash_key();
+
+    let key = PipelineKey {
+        vertex_function: "upscale_vertex".to_string(),
+        fragment_function: Some("upscale_fragment".to_string()),
+        color_format: MTLPixelFormat::BGRA8Unorm,
+        depth_format: MTLPixelFormat::Invalid,
+        sample_count: 1,
+        blend_mode: BlendMode::None,
+        vertex_layout_hash: layout_hash,
+    };
+    Ok(shader_library
+        .get_pipeline(&key, &empty_layout)
+        .map_err(MetalBackendError::PipelineCreation)?
+        .clone())
+}
+
+fn build_sprite_pipeline(
+    device: &Device,
+) -> Result<RenderPipelineState, MetalBackendError> {
+    let mut shader_library =
+        ShaderLibrary::new(device, SCENE_SPRITE_MSL).map_err(MetalBackendError::ShaderCompilation)?;
+    let layout = sprite_vertex_layout();
+    let layout_hash = layout.hash_key();
+
+    let key = PipelineKey {
+        vertex_function: "sprite_vertex".to_string(),
+        fragment_function: Some("sprite_fragment".to_string()),
+        color_format: MTLPixelFormat::BGRA8Unorm,
+        depth_format: MTLPixelFormat::Invalid,
+        sample_count: 1,
+        blend_mode: BlendMode::Alpha,
+        vertex_layout_hash: layout_hash,
+    };
+    Ok(shader_library
+        .get_pipeline(&key, &layout)
+        .map_err(MetalBackendError::PipelineCreation)?
+        .clone())
+}
+
+fn sprite_vertex_layout() -> VertexLayout {
+    VertexLayout {
+        buffer_layouts: vec![
+            VertexBufferLayoutDesc {
+                stride: 2 * std::mem::size_of::<f32>(),
+                step_function: MTLVertexStepFunction::PerVertex,
+                attributes: vec![VertexAttributeDesc {
+                    format: MTLVertexFormat::Float2,
+                    offset: 0,
+                    buffer_index: 0,
+                }],
+            },
+            VertexBufferLayoutDesc {
+                stride: std::mem::size_of::<FrameSpriteRecord>(),
+                step_function: MTLVertexStepFunction::PerInstance,
+                attributes: vec![
+                    VertexAttributeDesc {
+                        format: MTLVertexFormat::Float4,
+                        offset: 0,
+                        buffer_index: 1,
+                    },
+                    VertexAttributeDesc {
+                        format: MTLVertexFormat::Float4,
+                        offset: 16,
+                        buffer_index: 1,
+                    },
+                    VertexAttributeDesc {
+                        format: MTLVertexFormat::Float4,
+                        offset: 32,
+                        buffer_index: 1,
+                    },
+                    VertexAttributeDesc {
+                        format: MTLVertexFormat::Float4,
+                        offset: 48,
+                        buffer_index: 1,
+                    },
+                    VertexAttributeDesc {
+                        format: MTLVertexFormat::Float4,
+                        offset: 64,
+                        buffer_index: 1,
+                    },
+                ],
+            },
+        ],
+    }
+}
+
 fn scene_3d_vertex_layout() -> VertexLayout {
     VertexLayout {
         buffer_layouts: vec![
@@ -1558,21 +1892,6 @@ fn scene_3d_vertex_layout() -> VertexLayout {
             },
         ],
     }
-}
-
-fn zero_shared_buffer(buffer: &Buffer) {
-    unsafe {
-        std::ptr::write_bytes(buffer.contents() as *mut u8, 0, buffer.length() as usize);
-    }
-}
-
-fn metal_stub_fragment_buffer_len() -> u64 {
-    std::mem::size_of::<ShadowUniform>()
-        .max(std::mem::size_of::<LightingUniform>())
-        .max(std::mem::size_of::<
-            crate::graphics::frame_snapshot::FrameLightRecord,
-        >())
-        .max(512) as u64
 }
 
 fn create_depth_texture(device: &Device, width: u32, height: u32) -> Texture {
@@ -1699,6 +2018,7 @@ mod tests {
             materials: &[],
             textures: &[],
             lights: &[],
+            sprites: &[],
             instance_bounds: &[],
             vertices: &[],
             indices: &[],
@@ -1747,6 +2067,7 @@ mod tests {
             materials: &[],
             textures: &[],
             lights: &[],
+            sprites: &[],
             instance_bounds: &[],
             vertices: &[],
             indices: &[],
@@ -1760,6 +2081,7 @@ mod tests {
             frames_in_flight: 1,
             max_instances: 4,
             occlusion_culling_enabled: true,
+            max_sprites: 4096,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -1786,6 +2108,7 @@ mod tests {
             frames_in_flight: 1,
             max_instances: 4,
             occlusion_culling_enabled: true,
+            max_sprites: 4096,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -1818,6 +2141,7 @@ mod tests {
             frames_in_flight: 1,
             max_instances: 4,
             occlusion_culling_enabled: false,
+            max_sprites: 4096,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -1850,6 +2174,7 @@ mod tests {
             frames_in_flight: 1,
             max_instances: 4,
             occlusion_culling_enabled: false,
+            max_sprites: 4096,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,

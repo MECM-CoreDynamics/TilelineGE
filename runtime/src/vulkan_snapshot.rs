@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 
 use tl_core::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
-    FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 
 use crate::draw_path::{DrawBatch3d, DrawLane, RuntimeDrawFrame};
-use crate::scene::{SceneLight, SceneLightKind};
+use crate::scene::{SceneLight, SceneLightKind, SpriteInstance, SpriteKind};
 
 const FLAG_TRANSPARENT: u32 = 1 << 0;
 const FLAG_MESH: u32 = 1 << 1;
@@ -49,6 +49,7 @@ pub fn build_vulkan_render_snapshot<'a>(
     texture_scratch: &'a mut Vec<FrameTextureRecord>,
     light_scratch: &'a mut Vec<FrameLightRecord>,
     primitive_range_scratch: &'a mut Vec<FramePrimitiveRange>,
+    sprite_scratch: &'a mut Vec<FrameSpriteRecord>,
     sort_scratch: &mut Vec<(f32, u32)>,
 ) -> (RenderStateSnapshot<'a>, VulkanSnapshotBuildStats) {
     transform_scratch.clear();
@@ -60,6 +61,8 @@ pub fn build_vulkan_render_snapshot<'a>(
     material_scratch.reserve(draw.stats.opaque_batches + draw.stats.transparent_batches);
     texture_scratch.reserve(draw.stats.opaque_batches + draw.stats.transparent_batches);
     light_scratch.reserve(draw.stats.light_instances);
+    sprite_scratch.clear();
+    sprite_scratch.reserve(draw.sprites.len());
     primitive_range_scratch.reserve(draw.stats.opaque_batches + draw.stats.transparent_batches);
 
     let mut stats = VulkanSnapshotBuildStats::default();
@@ -117,6 +120,9 @@ pub fn build_vulkan_render_snapshot<'a>(
     for light in &draw.lights {
         light_scratch.push(pack_light(light));
     }
+    for sprite in &draw.sprites {
+        sprite_scratch.push(pack_sprite(sprite));
+    }
 
     stats.total_instances = transform_scratch.len();
     stats.primitive_ranges = primitive_range_scratch.len();
@@ -135,6 +141,7 @@ pub fn build_vulkan_render_snapshot<'a>(
             materials: material_scratch.as_slice(),
             textures: texture_scratch.as_slice(),
             lights: light_scratch.as_slice(),
+            sprites: sprite_scratch.as_slice(),
             instance_bounds: &[],
             vertices: &[],
             indices: &[],
@@ -353,6 +360,28 @@ fn pack_light(light: &SceneLight) -> FrameLightRecord {
     }
 }
 
+fn pack_sprite(sprite: &SpriteInstance) -> FrameSpriteRecord {
+    let kind_id = match sprite.kind {
+        SpriteKind::Generic => 0.0,
+        SpriteKind::Hud => 1.0,
+        SpriteKind::Camera => 2.0,
+        SpriteKind::Terrain => 3.0,
+        SpriteKind::LightGlow => 4.0,
+    };
+    FrameSpriteRecord {
+        translate_size: [
+            sprite.position[0],
+            sprite.position[1],
+            sprite.size[0],
+            sprite.size[1],
+        ],
+        rot_z: [sprite.rotation_rad, sprite.position[2], 0.0, 0.0],
+        color: sprite.color_rgba,
+        atlas_rect: [0.0, 0.0, 1.0, 1.0],
+        kind_params: [kind_id, sprite.texture_slot as f32, 0.0, 0.0],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +443,7 @@ mod tests {
         let mut texture_scratch = Vec::new();
         let mut light_scratch = Vec::new();
         let mut primitive_range_scratch = Vec::new();
+        let mut sprite_scratch = Vec::new();
         let mut sort_scratch = Vec::new();
         let (snapshot, stats) = build_vulkan_render_snapshot(
             42,
@@ -425,6 +455,7 @@ mod tests {
             &mut texture_scratch,
             &mut light_scratch,
             &mut primitive_range_scratch,
+            &mut sprite_scratch,
             &mut sort_scratch,
         );
         assert_eq!(snapshot.frame_id, 42);
@@ -514,6 +545,7 @@ mod tests {
         let mut texture_scratch = Vec::new();
         let mut light_scratch = Vec::new();
         let mut primitive_range_scratch = Vec::new();
+        let mut sprite_scratch = Vec::new();
         let mut sort_scratch = Vec::new();
         let (snapshot, stats) = build_vulkan_render_snapshot(
             7,
@@ -525,6 +557,7 @@ mod tests {
             &mut texture_scratch,
             &mut light_scratch,
             &mut primitive_range_scratch,
+            &mut sprite_scratch,
             &mut sort_scratch,
         );
 
@@ -596,6 +629,7 @@ mod tests {
         let mut texture_scratch = Vec::new();
         let mut light_scratch = Vec::new();
         let mut primitive_range_scratch = Vec::new();
+        let mut sprite_scratch = Vec::new();
         let mut sort_scratch = Vec::new();
         let (snapshot, _) = build_vulkan_render_snapshot(
             1,
@@ -607,6 +641,7 @@ mod tests {
             &mut texture_scratch,
             &mut light_scratch,
             &mut primitive_range_scratch,
+            &mut sprite_scratch,
             &mut sort_scratch,
         );
 
@@ -640,6 +675,7 @@ mod tests {
         let mut texture_scratch = Vec::new();
         let mut light_scratch = Vec::new();
         let mut primitive_range_scratch = Vec::new();
+        let mut sprite_scratch = Vec::new();
         let mut sort_scratch = Vec::new();
         let (snapshot, _) = build_vulkan_render_snapshot(
             1,
@@ -651,6 +687,7 @@ mod tests {
             &mut texture_scratch,
             &mut light_scratch,
             &mut primitive_range_scratch,
+            &mut sprite_scratch,
             &mut sort_scratch,
         );
 

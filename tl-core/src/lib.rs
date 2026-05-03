@@ -35,7 +35,7 @@ pub use core::mgs_bridge::{
 pub use gms::{AdaptiveBufferDecision, AdaptiveFrameTelemetry};
 pub use graphics::frame_snapshot::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
-    FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 #[cfg(target_os = "macos")]
 pub use graphics::metal_backend::{

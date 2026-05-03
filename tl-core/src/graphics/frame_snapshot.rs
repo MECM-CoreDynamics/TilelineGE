@@ -55,6 +55,17 @@ pub struct FrameLightRecord {
     pub shadow: [f32; 4],
 }
 
+/// One compact sprite instance record prepared for renderer consumption.
+#[repr(C, align(16))]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FrameSpriteRecord {
+    pub translate_size: [f32; 4],
+    pub rot_z: [f32; 4],
+    pub color: [f32; 4],
+    pub atlas_rect: [f32; 4],
+    pub kind_params: [f32; 4],
+}
+
 /// Transparent flag for one primitive draw range inside a frame snapshot.
 pub const FRAME_PRIMITIVE_RANGE_TRANSPARENT: u32 = 1 << 0;
 
@@ -81,6 +92,7 @@ pub struct RenderStateSnapshot<'a> {
     pub materials: &'a [FrameMaterialRecord],
     pub textures: &'a [FrameTextureRecord],
     pub lights: &'a [FrameLightRecord],
+    pub sprites: &'a [FrameSpriteRecord],
     /// Per-instance world-space AABB bounds [min_x, min_y, min_z, max_x, max_y, max_z].
     /// Empty when the backend does not support occlusion culling.
     pub instance_bounds: &'a [[f32; 6]],
