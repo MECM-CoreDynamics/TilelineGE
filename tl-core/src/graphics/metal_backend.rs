@@ -141,7 +141,7 @@ use super::metal::shader_library::{
     BlendMode, PipelineKey, ShaderLibrary, VertexAttributeDesc, VertexBufferLayoutDesc,
     VertexLayout,
 };
-use super::metal::shaders::SCENE_3D_MSL;
+use super::metal::shaders::{SCENE_3D_MSL, SCENE_SHADOW_MSL};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -187,6 +187,12 @@ struct LightingUniform {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+struct ShadowPassUniform {
+    light_view_proj: [[f32; 4]; 4],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
 struct ShadowUniform {
     light_view_proj: [[[f32; 4]; 4]; METAL_SHADOW_LAYERS],
     shadow_light_indices: [i32; 4],
@@ -222,8 +228,12 @@ pub struct MetalBackend {
     lighting_uniform_buffers: Vec<Buffer>,
     instance_scratch: Vec<GpuInstance3d>,
     stub_buffer: Buffer,
-    stub_shadow_texture: Texture,
-    stub_shadow_sampler: SamplerState,
+    shadow_texture: Texture,
+    shadow_layer_views: Vec<Texture>,
+    shadow_sampler: SamplerState,
+    shadow_pipeline: RenderPipelineState,
+    shadow_pass_uniform_buffers: Vec<Buffer>,
+    shadow_uniform_buffers: Vec<Buffer>,
     mesh_slots: std::collections::HashMap<u8, MeshSlot>,
     frame_pacing: FramePacing,
 }
@@ -366,21 +376,48 @@ impl MetalBackend {
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         );
         zero_shared_buffer(&stub_buffer);
-        let stub_shadow_desc = TextureDescriptor::new();
-        stub_shadow_desc.set_texture_type(MTLTextureType::D2Array);
-        stub_shadow_desc.set_width(1);
-        stub_shadow_desc.set_height(1);
-        stub_shadow_desc.set_array_length(1);
-        stub_shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
-        stub_shadow_desc.set_usage(MTLTextureUsage::ShaderRead);
-        let stub_shadow_texture = device.new_texture(&stub_shadow_desc);
-        let stub_shadow_sampler_desc = SamplerDescriptor::new();
-        stub_shadow_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
-        stub_shadow_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
-        stub_shadow_sampler_desc.set_compare_function(metal::MTLCompareFunction::LessEqual);
-        stub_shadow_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
-        stub_shadow_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
-        let stub_shadow_sampler = device.new_sampler(&stub_shadow_sampler_desc);
+        let shadow_desc = TextureDescriptor::new();
+        shadow_desc.set_texture_type(MTLTextureType::D2Array);
+        shadow_desc.set_width(1024);
+        shadow_desc.set_height(1024);
+        shadow_desc.set_array_length(METAL_SHADOW_LAYERS as u64);
+        shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
+        shadow_desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+        let shadow_texture = device.new_texture(&shadow_desc);
+        let shadow_layer_views: Vec<Texture> = (0..METAL_SHADOW_LAYERS)
+            .map(|layer| {
+                shadow_texture.new_texture_view_from_slice(
+                    MTLPixelFormat::Depth32Float,
+                    MTLTextureType::D2,
+                    metal::NSRange { location: 0, length: 1 },
+                    metal::NSRange { location: layer as u64, length: 1 },
+                )
+            })
+            .collect();
+        let shadow_sampler_desc = SamplerDescriptor::new();
+        shadow_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+        shadow_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+        shadow_sampler_desc.set_compare_function(metal::MTLCompareFunction::LessEqual);
+        shadow_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
+        shadow_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
+        let shadow_sampler = device.new_sampler(&shadow_sampler_desc);
+        let shadow_pipeline = build_shadow_pipeline(&device)?;
+        let shadow_pass_uniform_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    (METAL_SHADOW_LAYERS * std::mem::size_of::<ShadowPassUniform>()) as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
+        let shadow_uniform_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    std::mem::size_of::<ShadowUniform>() as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
 
         let frame_pacing = FramePacing::new(config.frames_in_flight);
 
@@ -406,8 +443,12 @@ impl MetalBackend {
             lighting_uniform_buffers,
             instance_scratch: Vec::with_capacity(max_transforms),
             stub_buffer,
-            stub_shadow_texture,
-            stub_shadow_sampler,
+            shadow_texture,
+            shadow_layer_views,
+            shadow_sampler,
+            shadow_pipeline,
+            shadow_pass_uniform_buffers,
+            shadow_uniform_buffers,
             mesh_slots: std::collections::HashMap::new(),
             frame_pacing,
         })
@@ -558,6 +599,123 @@ impl MetalBackend {
         }
     }
 
+    fn upload_shadows(
+        &self,
+        _frame_slot: usize,
+        spub: &Buffer,
+        sub: &Buffer,
+        snapshot: &RenderStateSnapshot<'_>,
+    ) {
+        use nalgebra::{Isometry3, Perspective3, Point3, Vector3};
+
+        let mut shadow_uniform = ShadowUniform {
+            light_view_proj: [[[0.0; 4]; 4]; METAL_SHADOW_LAYERS],
+            shadow_light_indices: [-1; 4],
+            shadow_count: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+
+        let mut slot = 0usize;
+        for (i, light) in snapshot.lights.iter().enumerate() {
+            if slot >= METAL_SHADOW_LAYERS {
+                break;
+            }
+            let casts_shadow = light.shadow[0] > 0.5;
+            let kind = light.position_kind[3] as u32;
+            if casts_shadow && kind == 1 {
+                let pos = Point3::new(light.position_kind[0], light.position_kind[1], light.position_kind[2]);
+                let dir = Vector3::new(light.direction_inner[0], light.direction_inner[1], light.direction_inner[2]).normalize();
+                let up = if dir.y.abs() < 0.99 {
+                    Vector3::y()
+                } else {
+                    Vector3::x()
+                };
+                let view = Isometry3::look_at_rh(&pos, &Point3::from(pos + dir), &up);
+
+                let outer_cos = light.params[1];
+                let outer_deg = outer_cos.acos().to_degrees();
+                let fov_y = ((outer_deg * 2.0 + 6.0) as f32)
+                    .clamp(10.0, 170.0)
+                    .to_radians();
+                let range = light.params[0].max(1.0);
+                let proj = Perspective3::new(1.0, fov_y, 0.5, range * 1.1);
+
+                let view_proj = proj.to_homogeneous() * view.to_homogeneous();
+                let slice = view_proj.as_slice();
+                let mut vp = [[0f32; 4]; 4];
+                for col in 0..4 {
+                    vp[col].copy_from_slice(&slice[col * 4..(col + 1) * 4]);
+                }
+
+                shadow_uniform.light_view_proj[slot] = vp;
+                shadow_uniform.shadow_light_indices[slot] = i as i32;
+
+                let pass_uniform = ShadowPassUniform { light_view_proj: vp };
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        &pass_uniform as *const ShadowPassUniform as *const u8,
+                        (spub.contents() as *mut u8).add(slot * std::mem::size_of::<ShadowPassUniform>()),
+                        std::mem::size_of::<ShadowPassUniform>(),
+                    );
+                }
+
+                slot += 1;
+            }
+        }
+        shadow_uniform.shadow_count = slot as u32;
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &shadow_uniform as *const ShadowUniform as *const u8,
+                sub.contents() as *mut u8,
+                std::mem::size_of::<ShadowUniform>(),
+            );
+        }
+    }
+
+    fn encode_shadow_pass(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        tb: &Buffer,
+        spub: &Buffer,
+        ranges: &[FramePrimitiveRange],
+    ) {
+        for layer in 0..METAL_SHADOW_LAYERS {
+            let pass_desc = RenderPassDescriptor::new();
+            let depth_attachment = pass_desc.depth_attachment().unwrap();
+            depth_attachment.set_texture(Some(&self.shadow_layer_views[layer]));
+            depth_attachment.set_load_action(MTLLoadAction::Clear);
+            depth_attachment.set_store_action(MTLStoreAction::Store);
+            depth_attachment.set_clear_depth(1.0);
+
+            let encoder = command_buffer.new_render_command_encoder(&pass_desc);
+            encoder.set_render_pipeline_state(&self.shadow_pipeline);
+            encoder.set_depth_stencil_state(&self.depth_state_write);
+            encoder.set_cull_mode(metal::MTLCullMode::Back);
+            encoder.set_vertex_buffer(1, Some(tb), 0);
+            let offset = (layer * std::mem::size_of::<ShadowPassUniform>()) as u64;
+            encoder.set_vertex_buffer(2, Some(spub), offset);
+            for range in ranges {
+                if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
+                    encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
+                    encoder.draw_indexed_primitives_instanced_base_instance(
+                        MTLPrimitiveType::Triangle,
+                        mesh.index_count as u64,
+                        mesh.index_type,
+                        &mesh.index_buffer,
+                        0,
+                        range.instance_count as u64,
+                        0,
+                        range.first_instance as u64,
+                    );
+                }
+            }
+            encoder.end_encoding();
+        }
+    }
+
     /// Submit one frame worth of work to the Metal command queue.
     pub fn render_n(
         &mut self,
@@ -620,7 +778,12 @@ impl MetalBackend {
 
             let lb = &self.light_data_buffers[frame_slot];
             let lub = &self.lighting_uniform_buffers[frame_slot];
+            let spub = &self.shadow_pass_uniform_buffers[frame_slot];
+            let sub = &self.shadow_uniform_buffers[frame_slot];
             self.upload_lights(frame_slot, lb, lub, &snapshot);
+            self.upload_shadows(frame_slot, spub, sub, &snapshot);
+
+            self.encode_shadow_pass(&command_buffer, tb, spub, draw_ranges);
 
             let (p, m, e) = self.encode_frame(
                 &command_buffer,
@@ -631,6 +794,7 @@ impl MetalBackend {
                 vpb,
                 lb,
                 lub,
+                sub,
                 draw_ranges,
             );
             prepass_draw_calls = p;
@@ -845,6 +1009,7 @@ impl MetalBackend {
         vpb: &Buffer,
         lb: &Buffer,
         lub: &Buffer,
+        sub: &Buffer,
         ranges: &[FramePrimitiveRange],
     ) -> (u32, u32, u32) {
         let mut prepass_draw_calls = 0u32;
@@ -909,9 +1074,9 @@ impl MetalBackend {
             encoder.set_fragment_buffer(0, Some(vpb), 0);
             encoder.set_fragment_buffer(1, Some(lb), 0);
             encoder.set_fragment_buffer(2, Some(lub), 0);
-            encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
-            encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
+            encoder.set_fragment_buffer(3, Some(sub), 0);
+            encoder.set_fragment_texture(0, Some(&self.shadow_texture));
+            encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
             for range in ranges {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
@@ -954,9 +1119,9 @@ impl MetalBackend {
             encoder.set_fragment_buffer(0, Some(vpb), 0);
             encoder.set_fragment_buffer(1, Some(lb), 0);
             encoder.set_fragment_buffer(2, Some(lub), 0);
-            encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
-            encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
-            encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
+            encoder.set_fragment_buffer(3, Some(sub), 0);
+            encoder.set_fragment_texture(0, Some(&self.shadow_texture));
+            encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
             for range in ranges {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
@@ -1071,21 +1236,48 @@ impl MetalBackend {
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         );
         zero_shared_buffer(&stub_buffer);
-        let stub_shadow_desc = TextureDescriptor::new();
-        stub_shadow_desc.set_texture_type(MTLTextureType::D2Array);
-        stub_shadow_desc.set_width(1);
-        stub_shadow_desc.set_height(1);
-        stub_shadow_desc.set_array_length(1);
-        stub_shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
-        stub_shadow_desc.set_usage(MTLTextureUsage::ShaderRead);
-        let stub_shadow_texture = device.new_texture(&stub_shadow_desc);
-        let stub_shadow_sampler_desc = SamplerDescriptor::new();
-        stub_shadow_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
-        stub_shadow_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
-        stub_shadow_sampler_desc.set_compare_function(metal::MTLCompareFunction::LessEqual);
-        stub_shadow_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
-        stub_shadow_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
-        let stub_shadow_sampler = device.new_sampler(&stub_shadow_sampler_desc);
+        let shadow_desc = TextureDescriptor::new();
+        shadow_desc.set_texture_type(MTLTextureType::D2Array);
+        shadow_desc.set_width(1024);
+        shadow_desc.set_height(1024);
+        shadow_desc.set_array_length(METAL_SHADOW_LAYERS as u64);
+        shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
+        shadow_desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+        let shadow_texture = device.new_texture(&shadow_desc);
+        let shadow_layer_views: Vec<Texture> = (0..METAL_SHADOW_LAYERS)
+            .map(|layer| {
+                shadow_texture.new_texture_view_from_slice(
+                    MTLPixelFormat::Depth32Float,
+                    MTLTextureType::D2,
+                    metal::NSRange { location: 0, length: 1 },
+                    metal::NSRange { location: layer as u64, length: 1 },
+                )
+            })
+            .collect();
+        let shadow_sampler_desc = SamplerDescriptor::new();
+        shadow_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
+        shadow_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
+        shadow_sampler_desc.set_compare_function(metal::MTLCompareFunction::LessEqual);
+        shadow_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::ClampToEdge);
+        shadow_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::ClampToEdge);
+        let shadow_sampler = device.new_sampler(&shadow_sampler_desc);
+        let shadow_pipeline = build_shadow_pipeline(&device)?;
+        let shadow_pass_uniform_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    (METAL_SHADOW_LAYERS * std::mem::size_of::<ShadowPassUniform>()) as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
+        let shadow_uniform_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    std::mem::size_of::<ShadowUniform>() as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
 
         let frame_pacing = FramePacing::new(config.frames_in_flight);
 
@@ -1111,8 +1303,12 @@ impl MetalBackend {
             lighting_uniform_buffers,
             instance_scratch: Vec::with_capacity(max_transforms),
             stub_buffer,
-            stub_shadow_texture,
-            stub_shadow_sampler,
+            shadow_texture,
+            shadow_layer_views,
+            shadow_sampler,
+            shadow_pipeline,
+            shadow_pass_uniform_buffers,
+            shadow_uniform_buffers,
             mesh_slots: std::collections::HashMap::new(),
             frame_pacing,
         })
@@ -1182,7 +1378,12 @@ impl MetalBackend {
 
         let lb = &self.light_data_buffers[frame_slot];
         let lub = &self.lighting_uniform_buffers[frame_slot];
+        let spub = &self.shadow_pass_uniform_buffers[frame_slot];
+        let sub = &self.shadow_uniform_buffers[frame_slot];
         self.upload_lights(frame_slot, lb, lub, &snapshot);
+        self.upload_shadows(frame_slot, spub, sub, &snapshot);
+
+        self.encode_shadow_pass(&command_buffer, tb, spub, draw_ranges);
 
         let (p, m, e) = self.encode_frame(
             &command_buffer,
@@ -1193,6 +1394,7 @@ impl MetalBackend {
             vpb,
             lb,
             lub,
+            sub,
             draw_ranges,
         );
         prepass_draw_calls = p;
@@ -1264,6 +1466,29 @@ fn build_scene_pipelines(
         .clone();
 
     Ok((z_prepass_pipeline, forward_pipeline))
+}
+
+fn build_shadow_pipeline(
+    device: &Device,
+) -> Result<RenderPipelineState, MetalBackendError> {
+    let mut shader_library =
+        ShaderLibrary::new(device, SCENE_SHADOW_MSL).map_err(MetalBackendError::ShaderCompilation)?;
+    let layout = scene_3d_vertex_layout();
+    let layout_hash = layout.hash_key();
+
+    let key = PipelineKey {
+        vertex_function: "scene_shadow_vertex".to_string(),
+        fragment_function: None,
+        color_format: MTLPixelFormat::BGRA8Unorm,
+        depth_format: MTLPixelFormat::Depth32Float,
+        sample_count: 1,
+        blend_mode: BlendMode::None,
+        vertex_layout_hash: layout_hash,
+    };
+    Ok(shader_library
+        .get_pipeline(&key, &layout)
+        .map_err(MetalBackendError::PipelineCreation)?
+        .clone())
 }
 
 fn scene_3d_vertex_layout() -> VertexLayout {
