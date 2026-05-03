@@ -529,6 +529,16 @@ impl MetalBackend {
         lub: &Buffer,
         snapshot: &RenderStateSnapshot<'_>,
     ) {
+        let lighting = LightingUniform {
+            light_count: snapshot.lights.len() as u32,
+            rt_mode: 0,
+            rt_active: 0,
+            rt_dynamic_count: 0,
+            rt_dynamic_cap: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
         if !snapshot.lights.is_empty() {
             let light_bytes = snapshot.lights.len() * std::mem::size_of::<FrameLightRecord>();
             unsafe {
@@ -537,35 +547,14 @@ impl MetalBackend {
                     lb.contents() as *mut u8,
                     light_bytes.min(lb.length() as usize),
                 );
-                let total_light_bytes = METAL_MAX_LIGHTS * std::mem::size_of::<FrameLightRecord>();
-                if light_bytes < total_light_bytes {
-                    std::ptr::write_bytes(
-                        (lb.contents() as *mut u8).add(light_bytes),
-                        0,
-                        total_light_bytes - light_bytes,
-                    );
-                }
             }
-            let lighting = LightingUniform {
-                light_count: snapshot.lights.len() as u32,
-                rt_mode: 0,
-                rt_active: 0,
-                rt_dynamic_count: 0,
-                rt_dynamic_cap: 0,
-                _pad0: 0,
-                _pad1: 0,
-                _pad2: 0,
-            };
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    &lighting as *const LightingUniform as *const u8,
-                    lub.contents() as *mut u8,
-                    std::mem::size_of::<LightingUniform>(),
-                );
-            }
-        } else {
-            zero_shared_buffer(lb);
-            zero_shared_buffer(lub);
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &lighting as *const LightingUniform as *const u8,
+                lub.contents() as *mut u8,
+                std::mem::size_of::<LightingUniform>(),
+            );
         }
     }
 
@@ -592,51 +581,61 @@ impl MetalBackend {
             // Upload transform and view-proj data if provided
             let tb = &self.transform_buffers[frame_slot];
             let vpb = &self.view_proj_buffers[frame_slot];
-                let (visible_instances, visible_ranges) = self.cull_and_compact(&snapshot);
+            let cull_result = if self.config.occlusion_culling_enabled {
+                Some(self.cull_and_compact(&snapshot))
+            } else {
+                None
+            };
+            let (instance_data, draw_ranges): (&[GpuInstance3d], &[FramePrimitiveRange]) =
+                if let Some((visible_instances, visible_ranges)) = cull_result.as_ref() {
+                    (visible_instances.as_slice(), visible_ranges.as_slice())
+                } else {
+                    (self.instance_scratch.as_slice(), snapshot.primitive_ranges)
+                };
 
-                if !visible_instances.is_empty() {
-                    let trans_bytes = std::mem::size_of_val(visible_instances.as_slice());
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            visible_instances.as_ptr() as *const u8,
-                            tb.contents() as *mut u8,
-                            trans_bytes.min(tb.length() as usize),
-                        );
-                    }
+            if !instance_data.is_empty() {
+                let trans_bytes = std::mem::size_of_val(instance_data);
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        instance_data.as_ptr() as *const u8,
+                        tb.contents() as *mut u8,
+                        trans_bytes.min(tb.length() as usize),
+                    );
                 }
-                {
-                    let camera = CameraUniform {
-                        view_proj: snapshot.camera_view_proj,
-                        camera_eye: snapshot.camera_eye,
-                    };
-                    let vp_bytes = std::mem::size_of::<CameraUniform>();
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            &camera as *const CameraUniform as *const u8,
-                            vpb.contents() as *mut u8,
-                            vp_bytes.min(vpb.length() as usize),
-                        );
-                    }
+            }
+            {
+                let camera = CameraUniform {
+                    view_proj: snapshot.camera_view_proj,
+                    camera_eye: snapshot.camera_eye,
+                };
+                let vp_bytes = std::mem::size_of::<CameraUniform>();
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        &camera as *const CameraUniform as *const u8,
+                        vpb.contents() as *mut u8,
+                        vp_bytes.min(vpb.length() as usize),
+                    );
                 }
+            }
 
-                let lb = &self.light_data_buffers[frame_slot];
-                let lub = &self.lighting_uniform_buffers[frame_slot];
-                self.upload_lights(frame_slot, lb, lub, &snapshot);
+            let lb = &self.light_data_buffers[frame_slot];
+            let lub = &self.lighting_uniform_buffers[frame_slot];
+            self.upload_lights(frame_slot, lb, lub, &snapshot);
 
-                let (p, m, e) = self.encode_frame(
-                    &command_buffer,
-                    &snapshot,
-                    drawable_ref.texture(),
-                    &self.depth_texture,
-                    tb,
-                    vpb,
-                    lb,
-                    lub,
-                    &visible_ranges,
-                );
-                prepass_draw_calls = p;
-                main_pass_draw_calls = m;
-                early_z_reject_estimate = e;
+            let (p, m, e) = self.encode_frame(
+                &command_buffer,
+                &snapshot,
+                drawable_ref.texture(),
+                &self.depth_texture,
+                tb,
+                vpb,
+                lb,
+                lub,
+                draw_ranges,
+            );
+            prepass_draw_calls = p;
+            main_pass_draw_calls = m;
+            early_z_reject_estimate = e;
 
             let pacing = self.frame_pacing.clone();
             let concrete = block::ConcreteBlock::new(move |_buffer: &metal::CommandBufferRef| {
@@ -733,10 +732,10 @@ impl MetalBackend {
     }
 
     #[inline]
-    fn is_sphere_visible(center: [f32; 3], radius: f32, planes: &[[f32; 4]; 6]) -> bool {
+    fn is_sphere_visible(center: [f32; 3], radius_sq: f32, planes: &[[f32; 4]; 6]) -> bool {
         for plane in planes {
             let dist = plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
-            if dist < -radius {
+            if dist < 0.0 && dist * dist > radius_sq {
                 return false;
             }
         }
@@ -744,11 +743,11 @@ impl MetalBackend {
     }
 
     #[inline]
-    fn primitive_radius(primitive_code: u32) -> f32 {
+    fn primitive_radius_sq(primitive_code: u32) -> f32 {
         match primitive_code {
-            0 => 1.0,               // unit sphere
-            1 => 0.866_025_4,       // sqrt(3)/2: circumscribed sphere of unit box
-            _ => 1.0,               // custom mesh: conservative
+            0 => 1.0,  // unit sphere
+            1 => 0.75, // (sqrt(3)/2)^2: circumscribed sphere of unit box
+            _ => 1.0,  // custom mesh: conservative
         }
     }
 
@@ -765,7 +764,7 @@ impl MetalBackend {
         let mut ranges = Vec::with_capacity(snapshot.primitive_ranges.len());
 
         for range in snapshot.primitive_ranges {
-            let base_radius = Self::primitive_radius(range.primitive_code);
+            let base_radius_sq = Self::primitive_radius_sq(range.primitive_code);
             let start = range.first_instance;
             let end = range.first_instance + range.instance_count;
             let mut block_start: Option<u32> = None;
@@ -773,21 +772,18 @@ impl MetalBackend {
             for i in start..end {
                 let inst = &self.instance_scratch[i as usize];
                 let center = [inst.model_col3[0], inst.model_col3[1], inst.model_col3[2]];
-                let sx = (inst.model_col0[0] * inst.model_col0[0]
+                let sx = inst.model_col0[0] * inst.model_col0[0]
                     + inst.model_col0[1] * inst.model_col0[1]
-                    + inst.model_col0[2] * inst.model_col0[2])
-                    .sqrt();
-                let sy = (inst.model_col1[0] * inst.model_col1[0]
+                    + inst.model_col0[2] * inst.model_col0[2];
+                let sy = inst.model_col1[0] * inst.model_col1[0]
                     + inst.model_col1[1] * inst.model_col1[1]
-                    + inst.model_col1[2] * inst.model_col1[2])
-                    .sqrt();
-                let sz = (inst.model_col2[0] * inst.model_col2[0]
+                    + inst.model_col1[2] * inst.model_col1[2];
+                let sz = inst.model_col2[0] * inst.model_col2[0]
                     + inst.model_col2[1] * inst.model_col2[1]
-                    + inst.model_col2[2] * inst.model_col2[2])
-                    .sqrt();
-                let radius = base_radius * sx.max(sy).max(sz);
+                    + inst.model_col2[2] * inst.model_col2[2];
+                let radius_sq = base_radius_sq * sx.max(sy).max(sz);
 
-                if Self::is_sphere_visible(center, radius, &planes) {
+                if Self::is_sphere_visible(center, radius_sq, &planes) {
                     visible.push(*inst);
                     if block_start.is_none() {
                         block_start = Some((visible.len() - 1) as u32);
@@ -1141,13 +1137,23 @@ impl MetalBackend {
 
         let tb = &self.transform_buffers[frame_slot];
         let vpb = &self.view_proj_buffers[frame_slot];
-        let (visible_instances, visible_ranges) = self.cull_and_compact(&snapshot);
+        let cull_result = if self.config.occlusion_culling_enabled {
+            Some(self.cull_and_compact(&snapshot))
+        } else {
+            None
+        };
+        let (instance_data, draw_ranges): (&[GpuInstance3d], &[FramePrimitiveRange]) =
+            if let Some((visible_instances, visible_ranges)) = cull_result.as_ref() {
+                (visible_instances.as_slice(), visible_ranges.as_slice())
+            } else {
+                (self.instance_scratch.as_slice(), snapshot.primitive_ranges)
+            };
 
-        if !visible_instances.is_empty() {
-            let trans_bytes = std::mem::size_of_val(visible_instances.as_slice());
+        if !instance_data.is_empty() {
+            let trans_bytes = std::mem::size_of_val(instance_data);
             unsafe {
                 std::ptr::copy_nonoverlapping(
-                    visible_instances.as_ptr() as *const u8,
+                    instance_data.as_ptr() as *const u8,
                     tb.contents() as *mut u8,
                     trans_bytes.min(tb.length() as usize),
                 );
@@ -1187,7 +1193,7 @@ impl MetalBackend {
             vpb,
             lb,
             lub,
-            &visible_ranges,
+            draw_ranges,
         );
         prepass_draw_calls = p;
         main_pass_draw_calls = m;
@@ -1474,6 +1480,54 @@ mod tests {
         }
     }
 
+    fn dummy_snapshot_with_translation(
+        instance_count: usize,
+        translation: [f32; 3],
+    ) -> RenderStateSnapshot<'static> {
+        let transforms: Vec<FrameInstanceTransform> = (0..instance_count)
+            .map(|_| FrameInstanceTransform {
+                model: [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [translation[0], translation[1], translation[2], 1.0],
+                ],
+                color_rgba: [1.0; 4],
+                material_index: 0,
+                texture_index: 0,
+                flags: 0,
+                _padding: 0,
+            })
+            .collect();
+        let primitive_ranges = Box::leak(vec![FramePrimitiveRange {
+            primitive_code: 0,
+            first_instance: 0,
+            instance_count: instance_count as u32,
+            flags: 0,
+        }].into_boxed_slice());
+        let transforms = Box::leak(transforms.into_boxed_slice());
+        RenderStateSnapshot {
+            frame_id: 1,
+            camera_view_proj: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            camera_eye: [0.0, 12.0, 36.0, 1.0],
+            opaque_instance_count: instance_count as u32,
+            transparent_instance_count: 0,
+            primitive_ranges,
+            transforms,
+            materials: &[],
+            textures: &[],
+            lights: &[],
+            instance_bounds: &[],
+            vertices: &[],
+            indices: &[],
+        }
+    }
+
     #[test]
     #[cfg(target_os = "macos")]
     fn upload_state_snapshot_capacity_guards() {
@@ -1562,5 +1616,35 @@ mod tests {
         assert_eq!(telemetry.prepass_draw_calls, 0);
         assert_eq!(telemetry.main_pass_draw_calls, 1);
         assert_eq!(telemetry.presented, false);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn headless_single_pass_does_not_cpu_cull_when_disabled() {
+        let mut backend = match MetalBackend::new_for_test(MetalBackendConfig {
+            frames_in_flight: 1,
+            max_instances: 4,
+            occlusion_culling_enabled: false,
+        }) {
+            Ok(backend) => backend,
+            Err(MetalBackendError::NoMetalDevice) => return,
+            Err(err) => panic!("unexpected Metal backend init error: {err}"),
+        };
+
+        let vertices: Vec<f32> = vec![
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
+            0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+        ];
+        let indices: Vec<u32> = vec![0, 1, 2];
+        let mesh = MeshSlot::new(backend.device(), &vertices, &indices, MTLIndexType::UInt32);
+        backend.bind_mesh_slot(0, mesh);
+
+        let snapshot = dummy_snapshot_with_translation(1, [8.0, 0.0, 0.0]);
+        let telemetry = backend
+            .render_n_headless(snapshot)
+            .expect("headless render failed");
+        assert_eq!(telemetry.prepass_draw_calls, 0);
+        assert_eq!(telemetry.main_pass_draw_calls, 1);
     }
 }
