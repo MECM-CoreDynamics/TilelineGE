@@ -4615,6 +4615,7 @@ version = "0.4.5"
 dependencies = [
  "ash",
  "ash-window",
+ "block",
  "bytemuck",
  "core-graphics-types 0.2.0",
  "crossbeam",

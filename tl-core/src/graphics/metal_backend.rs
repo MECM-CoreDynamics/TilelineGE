@@ -215,6 +215,8 @@ pub struct MetalBackend {
     index_buffer: Option<Buffer>,
     transform_buffer: Option<Buffer>,
     view_proj_buffer: Option<Buffer>,
+    frame_pacing_tx: std::sync::mpsc::SyncSender<()>,
+    frame_pacing_rx: std::sync::mpsc::Receiver<()>,
 }
 
 impl MetalBackend {
@@ -294,6 +296,8 @@ impl MetalBackend {
         let layer = MetalLayer::new();
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        layer.set_display_sync_enabled(true);
+        layer.set_maximum_drawable_count(3);
         layer.set_drawable_size(CGSize::new(surface_size.width as f64, surface_size.height as f64));
 
         let view = {
@@ -331,6 +335,12 @@ impl MetalBackend {
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         ));
 
+        let (frame_pacing_tx, frame_pacing_rx) =
+            std::sync::mpsc::sync_channel(config.frames_in_flight);
+        for _ in 0..config.frames_in_flight {
+            let _ = frame_pacing_tx.send(());
+        }
+
         Ok(Self {
             config,
             _window: Some(Arc::clone(&window)),
@@ -351,6 +361,8 @@ impl MetalBackend {
             index_buffer,
             transform_buffer,
             view_proj_buffer,
+            frame_pacing_tx,
+            frame_pacing_rx,
         })
     }
 
@@ -441,6 +453,9 @@ impl MetalBackend {
         let frame_slot = self.current_frame_slot;
         let snapshot_state = self.upload_state_snapshot(frame_slot, snapshot)?;
 
+        // Wait for an in-flight slot before acquiring a drawable
+        self.frame_pacing_rx.recv().unwrap();
+
         let drawable = self.layer.next_drawable();
         let command_buffer = self.command_queue.new_command_buffer();
 
@@ -448,55 +463,55 @@ impl MetalBackend {
         let mut main_pass_draw_calls = 0u32;
         let mut early_z_reject_estimate = 0u32;
 
-        // Upload vertex / index / transform / view-proj data if provided
-        if let (Some(vb), Some(ib), Some(tb), Some(vpb)) = (
-            self.vertex_buffer.as_ref(),
-            self.index_buffer.as_ref(),
-            self.transform_buffer.as_ref(),
-            self.view_proj_buffer.as_ref(),
-        ) {
-            if !snapshot.vertices.is_empty() {
-                let vert_bytes = std::mem::size_of_val(snapshot.vertices);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        snapshot.vertices.as_ptr() as *const u8,
-                        vb.contents() as *mut u8,
-                        vert_bytes.min(vb.length() as usize),
-                    );
+        if let Some(drawable_ref) = drawable.as_ref() {
+            // Upload vertex / index / transform / view-proj data if provided
+            if let (Some(vb), Some(ib), Some(tb), Some(vpb)) = (
+                self.vertex_buffer.as_ref(),
+                self.index_buffer.as_ref(),
+                self.transform_buffer.as_ref(),
+                self.view_proj_buffer.as_ref(),
+            ) {
+                if !snapshot.vertices.is_empty() {
+                    let vert_bytes = std::mem::size_of_val(snapshot.vertices);
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            snapshot.vertices.as_ptr() as *const u8,
+                            vb.contents() as *mut u8,
+                            vert_bytes.min(vb.length() as usize),
+                        );
+                    }
                 }
-            }
-            if !snapshot.indices.is_empty() {
-                let idx_bytes = std::mem::size_of_val(snapshot.indices);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        snapshot.indices.as_ptr() as *const u8,
-                        ib.contents() as *mut u8,
-                        idx_bytes.min(ib.length() as usize),
-                    );
+                if !snapshot.indices.is_empty() {
+                    let idx_bytes = std::mem::size_of_val(snapshot.indices);
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            snapshot.indices.as_ptr() as *const u8,
+                            ib.contents() as *mut u8,
+                            idx_bytes.min(ib.length() as usize),
+                        );
+                    }
                 }
-            }
-            if !snapshot.transforms.is_empty() {
-                let trans_bytes = std::mem::size_of_val(snapshot.transforms);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        snapshot.transforms.as_ptr() as *const u8,
-                        tb.contents() as *mut u8,
-                        trans_bytes.min(tb.length() as usize),
-                    );
+                if !snapshot.transforms.is_empty() {
+                    let trans_bytes = std::mem::size_of_val(snapshot.transforms);
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            snapshot.transforms.as_ptr() as *const u8,
+                            tb.contents() as *mut u8,
+                            trans_bytes.min(tb.length() as usize),
+                        );
+                    }
                 }
-            }
-            {
-                let vp_bytes = std::mem::size_of_val(&snapshot.camera_view_proj);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        snapshot.camera_view_proj.as_ptr() as *const u8,
-                        vpb.contents() as *mut u8,
-                        vp_bytes.min(vpb.length() as usize),
-                    );
+                {
+                    let vp_bytes = std::mem::size_of_val(&snapshot.camera_view_proj);
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            snapshot.camera_view_proj.as_ptr() as *const u8,
+                            vpb.contents() as *mut u8,
+                            vp_bytes.min(vpb.length() as usize),
+                        );
+                    }
                 }
-            }
 
-            if let Some(drawable_ref) = drawable.as_ref() {
                 let (p, m, e) = self.encode_frame(
                     &command_buffer,
                     &snapshot,
@@ -511,35 +526,58 @@ impl MetalBackend {
                 main_pass_draw_calls = m;
                 early_z_reject_estimate = e;
             }
-        }
 
-        if let Some(drawable_ref) = drawable {
+            let tx = self.frame_pacing_tx.clone();
+            let block = block::ConcreteBlock::new(move |_buffer: &metal::CommandBufferRef| {
+                let _ = tx.send(());
+            });
+            command_buffer.add_completed_handler(&block);
             command_buffer.present_drawable(drawable_ref);
+            command_buffer.commit();
+
+            self.primary_submission_serial = self.primary_submission_serial.saturating_add(1);
+            self.current_frame_slot = (self.current_frame_slot + 1) % self.frame_slots.len();
+
+            let submission = MetalFrameSubmissionTelemetry {
+                frame_slot,
+                frame_id: snapshot_state.frame_id,
+                instance_count: snapshot_state.instance_count,
+                material_count: snapshot_state.material_count,
+                texture_count: snapshot_state.texture_count,
+                light_count: snapshot_state.light_count,
+            };
+
+            Ok(MetalFrameExecutionTelemetry {
+                submission,
+                snapshot_state,
+                command_buffer_submitted: true,
+                presented: true,
+                primary_submission_serial: self.primary_submission_serial,
+                prepass_draw_calls,
+                main_pass_draw_calls,
+                early_z_reject_estimate,
+            })
+        } else {
+            // No drawable available – return the pacing token immediately
+            let _ = self.frame_pacing_tx.send(());
+            Ok(MetalFrameExecutionTelemetry {
+                submission: MetalFrameSubmissionTelemetry {
+                    frame_slot,
+                    frame_id: snapshot_state.frame_id,
+                    instance_count: snapshot_state.instance_count,
+                    material_count: snapshot_state.material_count,
+                    texture_count: snapshot_state.texture_count,
+                    light_count: snapshot_state.light_count,
+                },
+                snapshot_state,
+                command_buffer_submitted: false,
+                presented: false,
+                primary_submission_serial: self.primary_submission_serial,
+                prepass_draw_calls: 0,
+                main_pass_draw_calls: 0,
+                early_z_reject_estimate: 0,
+            })
         }
-        command_buffer.commit();
-
-        self.primary_submission_serial = self.primary_submission_serial.saturating_add(1);
-        self.current_frame_slot = (self.current_frame_slot + 1) % self.frame_slots.len();
-
-        let submission = MetalFrameSubmissionTelemetry {
-            frame_slot,
-            frame_id: snapshot_state.frame_id,
-            instance_count: snapshot_state.instance_count,
-            material_count: snapshot_state.material_count,
-            texture_count: snapshot_state.texture_count,
-            light_count: snapshot_state.light_count,
-        };
-
-        Ok(MetalFrameExecutionTelemetry {
-            submission,
-            snapshot_state,
-            command_buffer_submitted: true,
-            presented: drawable.is_some(),
-            primary_submission_serial: self.primary_submission_serial,
-            prepass_draw_calls,
-            main_pass_draw_calls,
-            early_z_reject_estimate,
-        })
     }
 
     fn encode_frame(
@@ -756,6 +794,12 @@ impl MetalBackend {
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
         ));
 
+        let (frame_pacing_tx, frame_pacing_rx) =
+            std::sync::mpsc::sync_channel(config.frames_in_flight);
+        for _ in 0..config.frames_in_flight {
+            let _ = frame_pacing_tx.send(());
+        }
+
         Ok(Self {
             config,
             _window: None,
@@ -776,6 +820,8 @@ impl MetalBackend {
             index_buffer,
             transform_buffer,
             view_proj_buffer,
+            frame_pacing_tx,
+            frame_pacing_rx,
         })
     }
 
