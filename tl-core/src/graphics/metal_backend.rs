@@ -16,7 +16,7 @@ use std::sync::Arc;
 use core_graphics_types::geometry::CGSize;
 use metal::{
     foreign_types::ForeignType, Buffer, CommandQueue, DepthStencilDescriptor, DepthStencilState,
-    Device, MTLClearColor, MTLCompareFunction, MTLIndexType, MTLLoadAction, MTLPixelFormat,
+    Device, MTLClearColor, MTLCompareFunction, MTLLoadAction, MTLPixelFormat,
     MTLPrimitiveType, MTLResourceOptions, MTLStoreAction, MTLTextureType, MTLTextureUsage,
     MTLVertexFormat, MTLVertexStepFunction, MetalLayer, RenderPassDescriptor, RenderPipelineState,
     SamplerDescriptor, SamplerState, Texture, TextureDescriptor,
@@ -28,7 +28,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 use super::metal::mesh_slot::MeshSlot;
-use crate::graphics::frame_snapshot::{FramePrimitiveRange, RenderStateSnapshot};
+use crate::graphics::frame_snapshot::RenderStateSnapshot;
 
 /// Runtime configuration for the raw Metal backend.
 #[derive(Debug, Clone)]
@@ -292,7 +292,7 @@ impl MetalBackend {
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_display_sync_enabled(true);
-        layer.set_maximum_drawable_count(4);
+        layer.set_maximum_drawable_count(3);
         unsafe {
             let () = msg_send![layer.as_ptr(), setAllowsNextDrawableTimeout: false];
         }
@@ -339,7 +339,7 @@ impl MetalBackend {
         stub_shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
         stub_shadow_desc.set_usage(MTLTextureUsage::ShaderRead);
         let stub_shadow_texture = device.new_texture(&stub_shadow_desc);
-        let mut stub_shadow_sampler_desc = SamplerDescriptor::new();
+        let stub_shadow_sampler_desc = SamplerDescriptor::new();
         stub_shadow_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
         stub_shadow_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
         stub_shadow_sampler_desc.set_compare_function(metal::MTLCompareFunction::LessEqual);
@@ -831,7 +831,7 @@ impl MetalBackend {
         stub_shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
         stub_shadow_desc.set_usage(MTLTextureUsage::ShaderRead);
         let stub_shadow_texture = device.new_texture(&stub_shadow_desc);
-        let mut stub_shadow_sampler_desc = SamplerDescriptor::new();
+        let stub_shadow_sampler_desc = SamplerDescriptor::new();
         stub_shadow_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
         stub_shadow_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
         stub_shadow_sampler_desc.set_compare_function(metal::MTLCompareFunction::LessEqual);
@@ -1119,7 +1119,8 @@ fn build_depth_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graphics::frame_snapshot::FrameInstanceTransform;
+    use crate::graphics::frame_snapshot::{FrameInstanceTransform, FramePrimitiveRange};
+    use metal::MTLIndexType;
 
     #[cfg(target_os = "macos")]
     fn metal_device_or_skip() -> Option<Device> {
