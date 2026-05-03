@@ -206,8 +206,6 @@ pub struct MetalBackend {
     forward_pipeline: RenderPipelineState,
     depth_state_write: DepthStencilState,
     depth_state_equal: DepthStencilState,
-    vertex_buffer: Option<Buffer>,
-    index_buffer: Option<Buffer>,
     transform_buffer: Option<Buffer>,
     view_proj_buffer: Option<Buffer>,
     instance_scratch: Vec<GpuInstance3d>,
@@ -317,18 +315,8 @@ impl MetalBackend {
             let () = msg_send![view, setLayer: layer.as_ptr()];
         }
 
-        let max_verts = config.max_instances.max(1) * 64 * 8;
-        let max_indices = config.max_instances.max(1) * 64 * 12;
         let max_transforms = config.max_instances.max(1);
 
-        let vertex_buffer = Some(device.new_buffer(
-            (max_verts * std::mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        ));
-        let index_buffer = Some(device.new_buffer(
-            (max_indices * std::mem::size_of::<u32>()) as u64,
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        ));
         let transform_buffer = Some(device.new_buffer(
             (max_transforms * std::mem::size_of::<GpuInstance3d>()) as u64,
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
@@ -377,8 +365,6 @@ impl MetalBackend {
             forward_pipeline,
             depth_state_write,
             depth_state_equal,
-            vertex_buffer,
-            index_buffer,
             transform_buffer,
             view_proj_buffer,
             instance_scratch: Vec::with_capacity(max_transforms),
@@ -519,33 +505,11 @@ impl MetalBackend {
         let mut early_z_reject_estimate = 0u32;
 
         if let Some(drawable_ref) = drawable.as_ref() {
-            // Upload vertex / index / transform / view-proj data if provided
-            if let (Some(vb), Some(ib), Some(tb), Some(vpb)) = (
-                self.vertex_buffer.as_ref(),
-                self.index_buffer.as_ref(),
+            // Upload transform and view-proj data if provided
+            if let (Some(tb), Some(vpb)) = (
                 self.transform_buffer.as_ref(),
                 self.view_proj_buffer.as_ref(),
             ) {
-                if !snapshot.vertices.is_empty() {
-                    let vert_bytes = std::mem::size_of_val(snapshot.vertices);
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            snapshot.vertices.as_ptr() as *const u8,
-                            vb.contents() as *mut u8,
-                            vert_bytes.min(vb.length() as usize),
-                        );
-                    }
-                }
-                if !snapshot.indices.is_empty() {
-                    let idx_bytes = std::mem::size_of_val(snapshot.indices);
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            snapshot.indices.as_ptr() as *const u8,
-                            ib.contents() as *mut u8,
-                            idx_bytes.min(ib.length() as usize),
-                        );
-                    }
-                }
                 if !snapshot.transforms.is_empty() {
                     let trans_bytes = std::mem::size_of_val(self.instance_scratch.as_slice());
                     unsafe {
@@ -681,11 +645,11 @@ impl MetalBackend {
             let encoder = command_buffer.new_render_command_encoder(&pass_desc);
             encoder.set_render_pipeline_state(&self.z_prepass_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_write);
+            encoder.set_vertex_buffer(1, Some(tb), 0);
+            encoder.set_vertex_buffer(2, Some(vpb), 0);
             for range in snapshot.primitive_ranges {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
-                    encoder.set_vertex_buffer(1, Some(tb), 0);
-                    encoder.set_vertex_buffer(2, Some(vpb), 0);
                     encoder.draw_indexed_primitives_instanced_base_instance(
                         MTLPrimitiveType::Triangle,
                         mesh.index_count as u64,
@@ -716,17 +680,17 @@ impl MetalBackend {
             let encoder = command_buffer.new_render_command_encoder(&pass_desc);
             encoder.set_render_pipeline_state(&self.forward_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_equal);
+            encoder.set_vertex_buffer(1, Some(tb), 0);
+            encoder.set_vertex_buffer(2, Some(vpb), 0);
+            encoder.set_fragment_buffer(0, Some(vpb), 0);
+            encoder.set_fragment_buffer(1, Some(&self.stub_buffer), 0);
+            encoder.set_fragment_buffer(2, Some(&self.stub_buffer), 0);
+            encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
+            encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
+            encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
             for range in snapshot.primitive_ranges {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
-                    encoder.set_vertex_buffer(1, Some(tb), 0);
-                    encoder.set_vertex_buffer(2, Some(vpb), 0);
-                    encoder.set_fragment_buffer(2, Some(vpb), 0);
-                    encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
-                    encoder.set_fragment_buffer(4, Some(&self.stub_buffer), 0);
-                    encoder.set_fragment_buffer(5, Some(&self.stub_buffer), 0);
-                    encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
-                    encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
                     encoder.draw_indexed_primitives_instanced_base_instance(
                         MTLPrimitiveType::Triangle,
                         mesh.index_count as u64,
@@ -761,17 +725,17 @@ impl MetalBackend {
             let encoder = command_buffer.new_render_command_encoder(&pass_desc);
             encoder.set_render_pipeline_state(&self.forward_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_write);
+            encoder.set_vertex_buffer(1, Some(tb), 0);
+            encoder.set_vertex_buffer(2, Some(vpb), 0);
+            encoder.set_fragment_buffer(0, Some(vpb), 0);
+            encoder.set_fragment_buffer(1, Some(&self.stub_buffer), 0);
+            encoder.set_fragment_buffer(2, Some(&self.stub_buffer), 0);
+            encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
+            encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
+            encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
             for range in snapshot.primitive_ranges {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
-                    encoder.set_vertex_buffer(1, Some(tb), 0);
-                    encoder.set_vertex_buffer(2, Some(vpb), 0);
-                    encoder.set_fragment_buffer(2, Some(vpb), 0);
-                    encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
-                    encoder.set_fragment_buffer(4, Some(&self.stub_buffer), 0);
-                    encoder.set_fragment_buffer(5, Some(&self.stub_buffer), 0);
-                    encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
-                    encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
                     encoder.draw_indexed_primitives_instanced_base_instance(
                         MTLPrimitiveType::Triangle,
                         mesh.index_count as u64,
@@ -843,18 +807,8 @@ impl MetalBackend {
             surface_size.height as f64,
         ));
 
-        let max_verts = config.max_instances.max(1) * 64 * 8;
-        let max_indices = config.max_instances.max(1) * 64 * 12;
         let max_transforms = config.max_instances.max(1);
 
-        let vertex_buffer = Some(device.new_buffer(
-            (max_verts * std::mem::size_of::<f32>()) as u64,
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        ));
-        let index_buffer = Some(device.new_buffer(
-            (max_indices * std::mem::size_of::<u32>()) as u64,
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        ));
         let transform_buffer = Some(device.new_buffer(
             (max_transforms * std::mem::size_of::<GpuInstance3d>()) as u64,
             MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
@@ -903,8 +857,6 @@ impl MetalBackend {
             forward_pipeline,
             depth_state_write,
             depth_state_equal,
-            vertex_buffer,
-            index_buffer,
             transform_buffer,
             view_proj_buffer,
             instance_scratch: Vec::with_capacity(max_transforms),
@@ -933,32 +885,10 @@ impl MetalBackend {
         let mut main_pass_draw_calls = 0u32;
         let mut early_z_reject_estimate = 0u32;
 
-        if let (Some(vb), Some(ib), Some(tb), Some(vpb)) = (
-            self.vertex_buffer.as_ref(),
-            self.index_buffer.as_ref(),
+        if let (Some(tb), Some(vpb)) = (
             self.transform_buffer.as_ref(),
             self.view_proj_buffer.as_ref(),
         ) {
-            if !snapshot.vertices.is_empty() {
-                let vert_bytes = std::mem::size_of_val(snapshot.vertices);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        snapshot.vertices.as_ptr() as *const u8,
-                        vb.contents() as *mut u8,
-                        vert_bytes.min(vb.length() as usize),
-                    );
-                }
-            }
-            if !snapshot.indices.is_empty() {
-                let idx_bytes = std::mem::size_of_val(snapshot.indices);
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        snapshot.indices.as_ptr() as *const u8,
-                        ib.contents() as *mut u8,
-                        idx_bytes.min(ib.length() as usize),
-                    );
-                }
-            }
             if !snapshot.transforms.is_empty() {
                 let trans_bytes = std::mem::size_of_val(self.instance_scratch.as_slice());
                 unsafe {
