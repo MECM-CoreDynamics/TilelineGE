@@ -44,7 +44,7 @@ pub struct MetalBackendConfig {
 impl Default for MetalBackendConfig {
     fn default() -> Self {
         Self {
-            frames_in_flight: 2,
+            frames_in_flight: 3,
             max_instances: 32_768,
             occlusion_culling_enabled: true,
         }
@@ -294,7 +294,10 @@ impl MetalBackend {
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_display_sync_enabled(true);
-        layer.set_maximum_drawable_count(3);
+        layer.set_maximum_drawable_count(4);
+        unsafe {
+            let () = msg_send![layer.as_ptr(), setAllowsNextDrawableTimeout: false];
+        }
         layer.set_drawable_size(CGSize::new(
             surface_size.width as f64,
             surface_size.height as f64,
@@ -973,7 +976,6 @@ impl MetalBackend {
 
         command_buffer.commit();
         command_buffer.wait_until_completed();
-        self.frame_pacing.signal();
 
         self.primary_submission_serial = self.primary_submission_serial.saturating_add(1);
         self.current_frame_slot = (self.current_frame_slot + 1) % self.frame_slots.len();
