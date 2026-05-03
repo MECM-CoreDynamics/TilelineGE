@@ -28,7 +28,7 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 use super::metal::mesh_slot::MeshSlot;
-use crate::graphics::frame_snapshot::RenderStateSnapshot;
+use crate::graphics::frame_snapshot::{FramePrimitiveRange, RenderStateSnapshot};
 
 /// Runtime configuration for the raw Metal backend.
 #[derive(Debug, Clone)]
@@ -510,11 +510,13 @@ impl MetalBackend {
                 self.transform_buffer.as_ref(),
                 self.view_proj_buffer.as_ref(),
             ) {
-                if !snapshot.transforms.is_empty() {
-                    let trans_bytes = std::mem::size_of_val(self.instance_scratch.as_slice());
+                let (visible_instances, visible_ranges) = self.cull_and_compact(&snapshot);
+
+                if !visible_instances.is_empty() {
+                    let trans_bytes = std::mem::size_of_val(visible_instances.as_slice());
                     unsafe {
                         std::ptr::copy_nonoverlapping(
-                            self.instance_scratch.as_ptr() as *const u8,
+                            visible_instances.as_ptr() as *const u8,
                             tb.contents() as *mut u8,
                             trans_bytes.min(tb.length() as usize),
                         );
@@ -542,6 +544,7 @@ impl MetalBackend {
                     &self.depth_texture,
                     tb,
                     vpb,
+                    &visible_ranges,
                 );
                 prepass_draw_calls = p;
                 main_pass_draw_calls = m;
@@ -614,20 +617,156 @@ impl MetalBackend {
         }
     }
 
+    /// Extract six view-frustum planes from a column-major view-projection matrix.
+    /// Planes are normalized (xyz) and oriented so that `dot(point, xyz) + w >= 0`
+    /// means the point is on the inside side.
+    #[inline]
+    fn extract_frustum_planes(view_proj: [[f32; 4]; 4]) -> [[f32; 4]; 6] {
+        let mut p = [[0.0f32; 4]; 6];
+        // column-major layout: view_proj[col][row] = M[row][col]
+        // row i = [view_proj[0][i], view_proj[1][i], view_proj[2][i], view_proj[3][i]]
+        for c in 0..4 {
+            p[0][c] = view_proj[c][0] + view_proj[c][3]; // left   = row0 + row3
+            p[1][c] = view_proj[c][3] - view_proj[c][0]; // right  = row3 - row0
+            p[2][c] = view_proj[c][1] + view_proj[c][3]; // bottom = row1 + row3
+            p[3][c] = view_proj[c][3] - view_proj[c][1]; // top    = row3 - row1
+            p[4][c] = view_proj[c][2] + view_proj[c][3]; // near   = row2 + row3
+            p[5][c] = view_proj[c][3] - view_proj[c][2]; // far    = row3 - row2
+        }
+        for plane in &mut p {
+            let len = (plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2])
+                .sqrt()
+                .max(1e-6);
+            plane[0] /= len;
+            plane[1] /= len;
+            plane[2] /= len;
+            plane[3] /= len;
+        }
+        p
+    }
+
+    #[inline]
+    fn is_sphere_visible(center: [f32; 3], radius: f32, planes: &[[f32; 4]; 6]) -> bool {
+        for plane in planes {
+            let dist = plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
+            if dist < -radius {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline]
+    fn primitive_radius(primitive_code: u32) -> f32 {
+        match primitive_code {
+            0 => 1.0,               // unit sphere
+            1 => 0.866_025_4,       // sqrt(3)/2: circumscribed sphere of unit box
+            _ => 1.0,               // custom mesh: conservative
+        }
+    }
+
+    /// CPU-side frustum cull + compaction.
+    ///
+    /// Returns a compacted instance buffer containing only visible instances,
+    /// and rewritten primitive ranges that point into the compacted buffer.
+    fn cull_and_compact(
+        &self,
+        snapshot: &RenderStateSnapshot<'_>,
+    ) -> (Vec<GpuInstance3d>, Vec<FramePrimitiveRange>) {
+        let planes = Self::extract_frustum_planes(snapshot.camera_view_proj);
+        let mut visible = Vec::with_capacity(self.instance_scratch.len());
+        let mut ranges = Vec::with_capacity(snapshot.primitive_ranges.len());
+
+        for range in snapshot.primitive_ranges {
+            let base_radius = Self::primitive_radius(range.primitive_code);
+            let start = range.first_instance;
+            let end = range.first_instance + range.instance_count;
+            let mut block_start: Option<u32> = None;
+
+            for i in start..end {
+                let inst = &self.instance_scratch[i as usize];
+                let center = [inst.model_col3[0], inst.model_col3[1], inst.model_col3[2]];
+                let sx = (inst.model_col0[0] * inst.model_col0[0]
+                    + inst.model_col0[1] * inst.model_col0[1]
+                    + inst.model_col0[2] * inst.model_col0[2])
+                    .sqrt();
+                let sy = (inst.model_col1[0] * inst.model_col1[0]
+                    + inst.model_col1[1] * inst.model_col1[1]
+                    + inst.model_col1[2] * inst.model_col1[2])
+                    .sqrt();
+                let sz = (inst.model_col2[0] * inst.model_col2[0]
+                    + inst.model_col2[1] * inst.model_col2[1]
+                    + inst.model_col2[2] * inst.model_col2[2])
+                    .sqrt();
+                let radius = base_radius * sx.max(sy).max(sz);
+
+                if Self::is_sphere_visible(center, radius, &planes) {
+                    visible.push(*inst);
+                    if block_start.is_none() {
+                        block_start = Some((visible.len() - 1) as u32);
+                    }
+                } else if let Some(bs) = block_start {
+                    ranges.push(FramePrimitiveRange {
+                        primitive_code: range.primitive_code,
+                        first_instance: bs,
+                        instance_count: (visible.len() as u32) - bs,
+                        flags: range.flags,
+                    });
+                    block_start = None;
+                }
+            }
+
+            if let Some(bs) = block_start {
+                ranges.push(FramePrimitiveRange {
+                    primitive_code: range.primitive_code,
+                    first_instance: bs,
+                    instance_count: (visible.len() as u32) - bs,
+                    flags: range.flags,
+                });
+            }
+        }
+
+        Self::merge_ranges(&mut ranges);
+        (visible, ranges)
+    }
+
+    /// Merge consecutive primitive ranges that share the same mesh and contiguous instances.
+    fn merge_ranges(ranges: &mut Vec<FramePrimitiveRange>) {
+        if ranges.len() < 2 {
+            return;
+        }
+        let mut write = 0;
+        for read in 1..ranges.len() {
+            let prev = ranges[write];
+            let curr = ranges[read];
+            if prev.primitive_code == curr.primitive_code
+                && prev.first_instance + prev.instance_count == curr.first_instance
+                && prev.flags == curr.flags
+            {
+                ranges[write].instance_count += curr.instance_count;
+            } else {
+                write += 1;
+                ranges[write] = curr;
+            }
+        }
+        ranges.truncate(write + 1);
+    }
+
     fn encode_frame(
         &self,
         command_buffer: &metal::CommandBufferRef,
-        snapshot: &RenderStateSnapshot<'_>,
+        _snapshot: &RenderStateSnapshot<'_>,
         color_texture: &metal::TextureRef,
         depth_texture: &metal::TextureRef,
         tb: &Buffer,
         vpb: &Buffer,
+        ranges: &[FramePrimitiveRange],
     ) -> (u32, u32, u32) {
         let mut prepass_draw_calls = 0u32;
         let mut main_pass_draw_calls = 0u32;
         let mut early_z_reject_estimate = 0u32;
 
-        if self.config.occlusion_culling_enabled && !snapshot.primitive_ranges.is_empty() {
+        if self.config.occlusion_culling_enabled && !ranges.is_empty() {
             // Pass 1 — Z-Prepass (depth-only)
             let pass_desc = RenderPassDescriptor::new();
             let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
@@ -647,7 +786,7 @@ impl MetalBackend {
             encoder.set_depth_stencil_state(&self.depth_state_write);
             encoder.set_vertex_buffer(1, Some(tb), 0);
             encoder.set_vertex_buffer(2, Some(vpb), 0);
-            for range in snapshot.primitive_ranges {
+            for range in ranges {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.draw_indexed_primitives_instanced_base_instance(
@@ -688,7 +827,7 @@ impl MetalBackend {
             encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
             encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
             encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
-            for range in snapshot.primitive_ranges {
+            for range in ranges {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.draw_indexed_primitives_instanced_base_instance(
@@ -733,7 +872,7 @@ impl MetalBackend {
             encoder.set_fragment_buffer(3, Some(&self.stub_buffer), 0);
             encoder.set_fragment_texture(0, Some(&self.stub_shadow_texture));
             encoder.set_fragment_sampler_state(0, Some(&self.stub_shadow_sampler));
-            for range in snapshot.primitive_ranges {
+            for range in ranges {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.draw_indexed_primitives_instanced_base_instance(
@@ -889,11 +1028,13 @@ impl MetalBackend {
             self.transform_buffer.as_ref(),
             self.view_proj_buffer.as_ref(),
         ) {
-            if !snapshot.transforms.is_empty() {
-                let trans_bytes = std::mem::size_of_val(self.instance_scratch.as_slice());
+            let (visible_instances, visible_ranges) = self.cull_and_compact(&snapshot);
+
+            if !visible_instances.is_empty() {
+                let trans_bytes = std::mem::size_of_val(visible_instances.as_slice());
                 unsafe {
                     std::ptr::copy_nonoverlapping(
-                        self.instance_scratch.as_ptr() as *const u8,
+                        visible_instances.as_ptr() as *const u8,
                         tb.contents() as *mut u8,
                         trans_bytes.min(tb.length() as usize),
                     );
@@ -927,6 +1068,7 @@ impl MetalBackend {
                 &self.depth_texture,
                 tb,
                 vpb,
+                &visible_ranges,
             );
             prepass_draw_calls = p;
             main_pass_draw_calls = m;
