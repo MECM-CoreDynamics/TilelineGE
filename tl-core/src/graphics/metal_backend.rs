@@ -206,8 +206,8 @@ pub struct MetalBackend {
     forward_pipeline: RenderPipelineState,
     depth_state_write: DepthStencilState,
     depth_state_equal: DepthStencilState,
-    transform_buffer: Option<Buffer>,
-    view_proj_buffer: Option<Buffer>,
+    transform_buffers: Vec<Buffer>,
+    view_proj_buffers: Vec<Buffer>,
     instance_scratch: Vec<GpuInstance3d>,
     stub_buffer: Buffer,
     stub_shadow_texture: Texture,
@@ -316,15 +316,22 @@ impl MetalBackend {
         }
 
         let max_transforms = config.max_instances.max(1);
-
-        let transform_buffer = Some(device.new_buffer(
-            (max_transforms * std::mem::size_of::<GpuInstance3d>()) as u64,
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        ));
-        let view_proj_buffer = Some(device.new_buffer(
-            std::mem::size_of::<CameraUniform>() as u64,
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        ));
+        let transform_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    (max_transforms * std::mem::size_of::<GpuInstance3d>()) as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
+        let view_proj_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    std::mem::size_of::<CameraUniform>() as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
 
         let stub_buffer = device.new_buffer(
             metal_stub_fragment_buffer_len(),
@@ -365,8 +372,8 @@ impl MetalBackend {
             forward_pipeline,
             depth_state_write,
             depth_state_equal,
-            transform_buffer,
-            view_proj_buffer,
+            transform_buffers,
+            view_proj_buffers,
             instance_scratch: Vec::with_capacity(max_transforms),
             stub_buffer,
             stub_shadow_texture,
@@ -506,10 +513,8 @@ impl MetalBackend {
 
         if let Some(drawable_ref) = drawable.as_ref() {
             // Upload transform and view-proj data if provided
-            if let (Some(tb), Some(vpb)) = (
-                self.transform_buffer.as_ref(),
-                self.view_proj_buffer.as_ref(),
-            ) {
+            let tb = &self.transform_buffers[frame_slot];
+            let vpb = &self.view_proj_buffers[frame_slot];
                 let (visible_instances, visible_ranges) = self.cull_and_compact(&snapshot);
 
                 if !visible_instances.is_empty() {
@@ -549,7 +554,6 @@ impl MetalBackend {
                 prepass_draw_calls = p;
                 main_pass_draw_calls = m;
                 early_z_reject_estimate = e;
-            }
 
             let pacing = self.frame_pacing.clone();
             let concrete = block::ConcreteBlock::new(move |_buffer: &metal::CommandBufferRef| {
@@ -948,14 +952,22 @@ impl MetalBackend {
 
         let max_transforms = config.max_instances.max(1);
 
-        let transform_buffer = Some(device.new_buffer(
-            (max_transforms * std::mem::size_of::<GpuInstance3d>()) as u64,
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        ));
-        let view_proj_buffer = Some(device.new_buffer(
-            std::mem::size_of::<CameraUniform>() as u64,
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        ));
+        let transform_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    (max_transforms * std::mem::size_of::<GpuInstance3d>()) as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
+        let view_proj_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    std::mem::size_of::<CameraUniform>() as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
 
         let stub_buffer = device.new_buffer(
             metal_stub_fragment_buffer_len(),
@@ -996,8 +1008,8 @@ impl MetalBackend {
             forward_pipeline,
             depth_state_write,
             depth_state_equal,
-            transform_buffer,
-            view_proj_buffer,
+            transform_buffers,
+            view_proj_buffers,
             instance_scratch: Vec::with_capacity(max_transforms),
             stub_buffer,
             stub_shadow_texture,
@@ -1024,56 +1036,53 @@ impl MetalBackend {
         let mut main_pass_draw_calls = 0u32;
         let mut early_z_reject_estimate = 0u32;
 
-        if let (Some(tb), Some(vpb)) = (
-            self.transform_buffer.as_ref(),
-            self.view_proj_buffer.as_ref(),
-        ) {
-            let (visible_instances, visible_ranges) = self.cull_and_compact(&snapshot);
+        let tb = &self.transform_buffers[frame_slot];
+        let vpb = &self.view_proj_buffers[frame_slot];
+        let (visible_instances, visible_ranges) = self.cull_and_compact(&snapshot);
 
-            if !visible_instances.is_empty() {
-                let trans_bytes = std::mem::size_of_val(visible_instances.as_slice());
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        visible_instances.as_ptr() as *const u8,
-                        tb.contents() as *mut u8,
-                        trans_bytes.min(tb.length() as usize),
-                    );
-                }
+        if !visible_instances.is_empty() {
+            let trans_bytes = std::mem::size_of_val(visible_instances.as_slice());
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    visible_instances.as_ptr() as *const u8,
+                    tb.contents() as *mut u8,
+                    trans_bytes.min(tb.length() as usize),
+                );
             }
-            {
-                let camera = CameraUniform {
-                    view_proj: snapshot.camera_view_proj,
-                    camera_eye: snapshot.camera_eye,
-                };
-                let vp_bytes = std::mem::size_of::<CameraUniform>();
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        &camera as *const CameraUniform as *const u8,
-                        vpb.contents() as *mut u8,
-                        vp_bytes.min(vpb.length() as usize),
-                    );
-                }
-            }
-
-            let color_texture = create_offscreen_color_texture(
-                &self.device,
-                self.surface_size.width,
-                self.surface_size.height,
-            );
-
-            let (p, m, e) = self.encode_frame(
-                &command_buffer,
-                &snapshot,
-                &color_texture,
-                &self.depth_texture,
-                tb,
-                vpb,
-                &visible_ranges,
-            );
-            prepass_draw_calls = p;
-            main_pass_draw_calls = m;
-            early_z_reject_estimate = e;
         }
+        {
+            let camera = CameraUniform {
+                view_proj: snapshot.camera_view_proj,
+                camera_eye: snapshot.camera_eye,
+            };
+            let vp_bytes = std::mem::size_of::<CameraUniform>();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &camera as *const CameraUniform as *const u8,
+                    vpb.contents() as *mut u8,
+                    vp_bytes.min(vpb.length() as usize),
+                );
+            }
+        }
+
+        let color_texture = create_offscreen_color_texture(
+            &self.device,
+            self.surface_size.width,
+            self.surface_size.height,
+        );
+
+        let (p, m, e) = self.encode_frame(
+            &command_buffer,
+            &snapshot,
+            &color_texture,
+            &self.depth_texture,
+            tb,
+            vpb,
+            &visible_ranges,
+        );
+        prepass_draw_calls = p;
+        main_pass_draw_calls = m;
+        early_z_reject_estimate = e;
 
         command_buffer.commit();
         command_buffer.wait_until_completed();
