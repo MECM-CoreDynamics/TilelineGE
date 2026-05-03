@@ -7,6 +7,8 @@
 
 pub mod frame_snapshot;
 #[cfg(target_os = "macos")]
+pub mod metal;
+#[cfg(target_os = "macos")]
 pub mod metal_backend;
 #[cfg(target_os = "macos")]
 pub mod metal_physics_compute;
