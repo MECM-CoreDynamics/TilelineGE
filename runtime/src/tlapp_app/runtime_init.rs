@@ -653,7 +653,9 @@ impl TlAppRuntime {
                             adapter_info.backend,
                             options.msaa,
                         );
-                        eprintln!("[renderer] using raw Metal runtime adapter + wgpu present path");
+                        eprintln!(
+                            "[renderer] using raw Metal runtime adapter in background + wgpu present path"
+                        );
                         TlAppRenderer::Metal {
                             metal: metal_renderer,
                             present: present_renderer,
