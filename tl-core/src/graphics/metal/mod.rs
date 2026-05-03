@@ -6,3 +6,4 @@ pub mod mesh_slot;
 pub mod render_graph;
 pub mod resource_manager;
 pub mod shader_library;
+pub mod shaders;
