@@ -450,7 +450,7 @@ struct ShadowVSIn {
 
 vertex float4 scene_shadow_vertex(
     ShadowVSIn in [[stage_in]],
-    constant ShadowPassUniform &u_shadow [[buffer(0)]]
+    constant ShadowPassUniform &u_shadow [[buffer(2)]]
 ) {
     float4x4 model = float4x4(in.model_col0, in.model_col1,
                               in.model_col2, in.model_col3);
