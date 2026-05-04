@@ -33,6 +33,7 @@ struct Lighting {
 
 struct ShadowUniform {
     float4x4 light_view_proj[4];
+    float4   atlas_scale_offset[4];
     int4     shadow_light_indices;
     uint     shadow_count;
     uint     _pad0;
@@ -59,7 +60,7 @@ struct VSOut {
     float4 color;
     float3 emissive;
     float3 world_pos;
-    float3 local_pos;
+    float  edge_factor;
     float  primitive_code;
     float  roughness;
     float  metallic;
@@ -81,7 +82,8 @@ vertex VSOut scene_3d_vertex(
     out.color          = in.base_color;
     out.emissive       = in.emissive.xyz;
     out.world_pos      = world_pos.xyz;
-    out.local_pos      = in.position;
+    float edge = max(max(abs(in.position.x), abs(in.position.y)), abs(in.position.z));
+    out.edge_factor    = smoothstep(0.38, 0.50, edge);
     out.primitive_code = in.material_params.w;
     out.roughness      = in.material_params.x;
     out.metallic       = in.material_params.y;
@@ -114,7 +116,7 @@ float sample_shadow(
     float3 light_pos,
     float light_range,
     constant ShadowUniform &u_shadow,
-    depth2d_array<float> shadow_map
+    depth2d<float>       shadow_map
 ) {
     float3 to_light = light_pos - world_pos;
     float light_dist = length(to_light);
@@ -126,24 +128,31 @@ float sample_shadow(
     if (proj.z < -1.0 || proj.z > 1.0) return 1.0;
 
     float wgpu_z = proj.z * 0.5 + 0.5;
-    float bias = 0.001 + light_dist * 0.0001;
+    float bias = 0.000001 + light_dist * 0.000000001;
     float depth_test = wgpu_z - bias;
     float2 uv = proj.xy * float2(0.5, -0.5) + float2(0.5, 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
 
     int map_size = 1024;
     float shadow_sum = 0.0;
-    for (int dx = -1; dx <= 1; ++dx) {
-        for (int dy = -1; dy <= 1; ++dy) {
+    for (int dx = 0; dx <= 1; ++dx) {
+        for (int dy = 0; dy <= 1; ++dy) {
             int2 px = int2(
                 clamp(int(uv.x * float(map_size)) + dx, 0, map_size - 1),
                 clamp(int(uv.y * float(map_size)) + dy, 0, map_size - 1)
             );
-            float stored = shadow_map.read(uint2(px), uint(slot));
+            float2 atlas_scale = u_shadow.atlas_scale_offset[slot].xy;
+            float2 atlas_offset = u_shadow.atlas_scale_offset[slot].zw;
+            float2 atlas_uv = uv * atlas_scale + atlas_offset;
+            int2 atlas_px = int2(
+                clamp(int(atlas_uv.x * float(map_size)), 0, map_size - 1),
+                clamp(int(atlas_uv.y * float(map_size)), 0, map_size - 1)
+            );
+            float stored = shadow_map.read(uint2(atlas_px));
             shadow_sum += select(0.0, 1.0, stored >= depth_test);
         }
     }
-    float shadow_val = shadow_sum / 9.0;
+    float shadow_val = shadow_sum / 4.0;
     float fade = 1.0 - smoothstep(light_range * 0.8, light_range, light_dist);
     return mix(1.0, shadow_val, fade);
 }
@@ -157,7 +166,7 @@ float3 evaluate_light(
     float     roughness,
     float     metallic,
     constant ShadowUniform &u_shadow,
-    depth2d_array<float>   shadow_map
+    depth2d<float>         shadow_map
 ) {
     float3 to_light  = light.position_kind.xyz - world_pos;
     float  distance  = max(length(to_light), 1e-4);
@@ -211,7 +220,7 @@ fragment float4 scene_3d_fragment(
     constant LightData     *u_lights      [[buffer(1)]],
     constant Lighting      &u_lighting    [[buffer(2)]],
     constant ShadowUniform &u_shadow       [[buffer(3)]],
-    depth2d_array<float>   shadow_map     [[texture(0)]],
+    depth2d<float>         shadow_map     [[texture(0)]],
     bool                    is_front       [[front_facing]]
 ) {
     float3 dpx = dfdx(in.world_pos);
@@ -249,10 +258,8 @@ fragment float4 scene_3d_fragment(
     float alpha = in.color.a;
 
     if (in.primitive_code > 0.5) {
-        float edge = max(max(abs(in.local_pos.x), abs(in.local_pos.y)), abs(in.local_pos.z));
-        float edge_boost = smoothstep(0.38, 0.50, edge);
-        lit += float3(0.08, 0.12, 0.18) * edge_boost;
-        alpha = clamp(alpha + edge_boost * 0.32, 0.0, 1.0);
+        lit += float3(0.08, 0.12, 0.18) * in.edge_factor;
+        alpha = clamp(alpha + in.edge_factor * 0.32, 0.0, 1.0);
     }
     return float4(lit, alpha);
 }
