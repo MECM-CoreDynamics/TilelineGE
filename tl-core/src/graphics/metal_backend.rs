@@ -333,7 +333,7 @@ impl MetalBackend {
 
         let depth_state_write = build_depth_state(&device, MTLCompareFunction::Less, true)
             .map_err(MetalBackendError::PipelineCreation)?;
-        let depth_state_equal = build_depth_state(&device, MTLCompareFunction::Equal, false)
+        let depth_state_equal = build_depth_state(&device, MTLCompareFunction::LessEqual, false)
             .map_err(MetalBackendError::PipelineCreation)?;
         let depth_state_read = build_depth_state(&device, MTLCompareFunction::LessEqual, false)
             .map_err(MetalBackendError::PipelineCreation)?;
@@ -1536,7 +1536,7 @@ impl MetalBackend {
 
         let depth_state_write = build_depth_state(&device, MTLCompareFunction::Less, true)
             .map_err(MetalBackendError::PipelineCreation)?;
-        let depth_state_equal = build_depth_state(&device, MTLCompareFunction::Equal, false)
+        let depth_state_equal = build_depth_state(&device, MTLCompareFunction::LessEqual, false)
             .map_err(MetalBackendError::PipelineCreation)?;
         let depth_state_read = build_depth_state(&device, MTLCompareFunction::LessEqual, false)
             .map_err(MetalBackendError::PipelineCreation)?;

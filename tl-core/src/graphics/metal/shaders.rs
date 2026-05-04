@@ -120,7 +120,7 @@ float sample_shadow(
     if (proj.z < -1.0 || proj.z > 1.0) return 1.0;
 
     float wgpu_z = proj.z * 0.5 + 0.5;
-    float depth_test = wgpu_z - 0.0001;
+    float depth_test = wgpu_z - 0.001;
     float2 uv = proj.xy * float2(0.5, -0.5) + float2(0.5, 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
 
