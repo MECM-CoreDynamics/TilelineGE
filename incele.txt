@@ -1,11 +1,13 @@
-Özel Metal arka uç sistemimizde gölge haritalama projeksiyonunda bir sorun yaşıyoruz. Uzaktaki nesnelerin gölgeleri, projeksiyon sarmalaması veya yanlış görüş alanı kırpması nedeniyle, amaçlanan ortam sınırlarının dışına taşarak veya 'dışarıya' doğru uzanarak görünüyor.
+Önceki düzeltme durumu iyileştirdi, ancak gölge sızıntısı/sarma sorunu Metal arka uç sistemimizde belirli bir mesafe eşiğinin ötesinde devam ediyor. Bu, mesafede derinlik hassasiyeti veya gölge haritası çözünürlüğü sorununa işaret ediyor.
 
-Lütfen aşağıdakileri inceleyelim ve düzeltelim:
+Lütfen aşağıdaki teknik düzeltmeleri uygulayın:
 
-Örnekleyici Adres Modu: Gölge haritası için kullanılan MTLSamplerDescriptor'ın hem sAddressMode hem de tAddressMode değerlerinin kesinlikle MTLSamplerAddressModeClampToEdge olarak ayarlandığından emin ol (veya ışık görüş alanının dışına gölge düşmesini önlemek için beyaz/1.0 kenar rengine sabitle).
+Gölge Haritası Derinlik Aralığı: MTLRenderCommandEncoder'da, derinlik kırpma modunun MTLDepthClipModeClamp olarak ayarlandığından emin olun. Bu, uzak düzlemin ötesindeki parçaların atılmasını veya sarılmasını önler.
 
-Işık Projeksiyon Matrisi: Işık kaynağı için ortografik veya perspektif projeksiyon matrisini kontrol et. Derinlik hassasiyetini en üst düzeye çıkarmak ve sınır dışı gölge oluşumunu önlemek için near_plane ve far_plane'in sahneyi sıkıca sınırladığından emin ol.
+Kademeli Gölge Haritaları (CSM) veya Mesafe Zayıflaması: Tek bir gölge haritası kullanıyorsak, gölgelendiricide basit bir mesafe tabanlı zayıflama uygulayın. Işığın etkili yarıçapının ötesindeki parçalar manuel olarak 'gölge yok' durumuna (1.0 görünürlük) ayarlanmalıdır.
 
-Derinlik Testi ve Sapma: Gölge tıkanıklığını ve arka plan derinlik kırpmasını önlemek için derinlik şablonu durumunu (MTLDepthStencilDescriptor) doğrulayın ve uygun bir derinlik sapması uygula.
+Derinlik Sapması Eğim Ölçeklendirmesi: Kutunun uzak kenarlarında 'gölge sivilcesi' ve 'peter-panning' oluşmasını önlemek için derinlik sapmasını ışık kaynağından uzaklığa göre dinamik olarak ayarlayın.
 
-Lütfen gerekli Metal/Rust düzeltmesini oluştur. Tüm yeni değişken adlarının ve kod yorumlarının tamamen İngilizce olduğundan emin ol.
+Karşılaştırma Fonksiyonu: MTLDepthStencilDescriptor'daki compareFunction'ın kesinlikle MTLCompareFunctionLessEqual olduğundan ve gölge örnekleyicisinin mesafedeki yanlış derinlik değerlerini filtrelemek için özel bir karşılaştırma örnekleyicisi kullandığından emin olun.
+
+Bu mantık için Rust/Metal kodunu oluşturun.

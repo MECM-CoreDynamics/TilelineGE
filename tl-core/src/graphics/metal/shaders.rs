@@ -111,16 +111,23 @@ float3 env_sample(float3 r) {
 float sample_shadow(
     int slot,
     float3 world_pos,
+    float3 light_pos,
+    float light_range,
     constant ShadowUniform &u_shadow,
     depth2d_array<float> shadow_map
 ) {
+    float3 to_light = light_pos - world_pos;
+    float light_dist = length(to_light);
+    if (light_dist > light_range) return 1.0;
+
     float4 light_space = u_shadow.light_view_proj[slot] * float4(world_pos, 1.0);
     if (light_space.w <= 0.0) return 1.0;
     float3 proj = light_space.xyz / light_space.w;
     if (proj.z < -1.0 || proj.z > 1.0) return 1.0;
 
     float wgpu_z = proj.z * 0.5 + 0.5;
-    float depth_test = wgpu_z - 0.001;
+    float bias = 0.001 + light_dist * 0.0001;
+    float depth_test = wgpu_z - bias;
     float2 uv = proj.xy * float2(0.5, -0.5) + float2(0.5, 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
 
@@ -136,7 +143,9 @@ float sample_shadow(
             shadow_sum += select(0.0, 1.0, stored >= depth_test);
         }
     }
-    return shadow_sum / 9.0;
+    float shadow_val = shadow_sum / 9.0;
+    float fade = 1.0 - smoothstep(light_range * 0.8, light_range, light_dist);
+    return mix(1.0, shadow_val, fade);
 }
 
 float3 evaluate_light(
@@ -186,7 +195,7 @@ float3 evaluate_light(
     float shadow_term = 1.0;
     int   shadow_slot = int(round(light.shadow.y));
     if (shadow_slot >= 0 && uint(shadow_slot) < u_shadow.shadow_count) {
-        shadow_term = sample_shadow(shadow_slot, world_pos, u_shadow, shadow_map);
+        shadow_term = sample_shadow(shadow_slot, world_pos, light.position_kind.xyz, light.params.x, u_shadow, shadow_map);
     } else if (light.shadow.x > 0.5) {
         float penumbra_floor = mix(0.35, 0.80, 1.0 - light.params.z);
         shadow_term = mix(penumbra_floor, 1.0, ndotl);

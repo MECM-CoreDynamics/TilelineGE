@@ -780,6 +780,7 @@ impl MetalBackend {
             encoder.set_render_pipeline_state(&self.shadow_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_write);
             encoder.set_cull_mode(metal::MTLCullMode::Back);
+            encoder.set_depth_clip_mode(metal::MTLDepthClipMode::Clamp);
             encoder.set_depth_bias(0.001, 1.0, 0.001);
             encoder.set_vertex_buffer(1, Some(tb), 0);
             let offset = (layer * std::mem::size_of::<ShadowPassUniform>()) as u64;
