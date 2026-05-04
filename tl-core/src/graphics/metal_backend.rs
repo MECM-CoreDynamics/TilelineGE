@@ -1201,6 +1201,25 @@ impl MetalBackend {
         let mut ranges = Vec::with_capacity(snapshot.primitive_ranges.len());
 
         for range in snapshot.primitive_ranges {
+            // Transparent ranges are never frustum-culled because they may act
+            // as occluders (e.g. container walls) that must be drawn even when
+            // their bounding sphere would otherwise be rejected at distance.
+            if Self::is_transparent_range(range) {
+                let visible_start = visible.len() as u32;
+                for i in range.first_instance..range.first_instance + range.instance_count {
+                    visible.push(self.instance_scratch[i as usize]);
+                }
+                if range.instance_count > 0 {
+                    ranges.push(FramePrimitiveRange {
+                        primitive_code: range.primitive_code,
+                        first_instance: visible_start,
+                        instance_count: range.instance_count,
+                        flags: range.flags,
+                    });
+                }
+                continue;
+            }
+
             let base_radius_sq = Self::primitive_radius_sq(range.primitive_code);
             let start = range.first_instance;
             let end = range.first_instance + range.instance_count;
