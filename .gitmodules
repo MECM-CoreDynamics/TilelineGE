@@ -2,3 +2,6 @@
 	path = mps
 	url = https://github.com/berrycomp/mps
 	branch = main
+[submodule "sxrc"]
+	path = sxrc
+	url = https://github.com/eilhanzy/sxrc
