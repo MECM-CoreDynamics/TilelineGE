@@ -643,23 +643,10 @@ impl TlAppRuntime {
                 };
                 match MetalSceneRenderer::new(window.clone(), metal_config) {
                     Ok(metal_renderer) => {
-                        let format = ensure_wgpu_surface()?;
-                        let present_renderer = WgpuSceneRenderer::new(
-                            &device,
-                            &queue,
-                            format,
-                            size.width,
-                            size.height,
-                            adapter_info.backend,
-                            options.msaa,
-                        );
                         eprintln!(
-                            "[renderer] using raw Metal runtime adapter in background + wgpu present path"
+                            "[renderer] using raw Metal runtime adapter"
                         );
-                        TlAppRenderer::Metal {
-                            metal: metal_renderer,
-                            present: present_renderer,
-                        }
+                        TlAppRenderer::Metal(metal_renderer)
                     }
                     Err(err) => {
                         eprintln!(

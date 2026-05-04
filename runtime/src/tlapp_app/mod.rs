@@ -1271,10 +1271,7 @@ struct PhysicsBacklogState {
 enum TlAppRenderer {
     Wgpu(WgpuSceneRenderer),
     #[cfg(target_os = "macos")]
-    Metal {
-        metal: MetalSceneRenderer,
-        present: WgpuSceneRenderer,
-    },
+    Metal(MetalSceneRenderer),
     #[cfg(target_os = "linux")]
     Vulkan(VulkanSceneRenderer),
 }
@@ -1284,7 +1281,7 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(_) => "wgpu",
             #[cfg(target_os = "macos")]
-            Self::Metal { .. } => "metal",
+            Self::Metal(_) => "metal",
             #[cfg(target_os = "linux")]
             Self::Vulkan(_) => "vulkan",
         }
@@ -1294,11 +1291,10 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.resize(device, queue, width, height),
             #[cfg(target_os = "macos")]
-            Self::Metal { metal, present } => {
-                if let Err(err) = metal.resize(PhysicalSize::new(width, height)) {
+            Self::Metal(renderer) => {
+                if let Err(err) = renderer.resize(PhysicalSize::new(width, height)) {
                     eprintln!("[metal renderer] resize failed: {err}");
                 }
-                present.resize(device, queue, width, height);
             }
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => {
@@ -1320,9 +1316,8 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.set_camera_view(queue, width, height, eye, target),
             #[cfg(target_os = "macos")]
-            Self::Metal { metal, present } => {
-                metal.set_camera_view(width, height, eye, target);
-                present.set_camera_view(queue, width, height, eye, target);
+            Self::Metal(renderer) => {
+                renderer.set_camera_view(width, height, eye, target);
             }
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.set_camera_view(width, height, eye, target),
@@ -1333,9 +1328,8 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.set_ray_tracing_mode(queue, mode),
             #[cfg(target_os = "macos")]
-            Self::Metal { metal, present } => {
-                metal.set_ray_tracing_mode(mode);
-                present.set_ray_tracing_mode(queue, mode);
+            Self::Metal(renderer) => {
+                renderer.set_ray_tracing_mode(mode);
             }
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.set_ray_tracing_mode(mode),
@@ -1346,9 +1340,8 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.set_fsr_config(queue, config),
             #[cfg(target_os = "macos")]
-            Self::Metal { metal, present } => {
-                metal.set_fsr_config(config);
-                present.set_fsr_config(queue, config);
+            Self::Metal(renderer) => {
+                renderer.set_fsr_config(config);
             }
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.set_fsr_config(config),
@@ -1359,9 +1352,8 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.set_msaa_sample_count(device, count),
             #[cfg(target_os = "macos")]
-            Self::Metal { metal, present } => {
-                metal.set_msaa_sample_count(count);
-                present.set_msaa_sample_count(device, count);
+            Self::Metal(renderer) => {
+                renderer.set_msaa_sample_count(count);
             }
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.set_msaa_sample_count(count),
@@ -1372,7 +1364,7 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.msaa_sample_count(),
             #[cfg(target_os = "macos")]
-            Self::Metal { present, .. } => present.msaa_sample_count(),
+            Self::Metal(renderer) => renderer.msaa_sample_count(),
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.msaa_sample_count(),
         }
@@ -1382,9 +1374,8 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.set_force_full_fbx_sphere(force),
             #[cfg(target_os = "macos")]
-            Self::Metal { metal, present } => {
-                metal.set_force_full_fbx_sphere(force);
-                present.set_force_full_fbx_sphere(force);
+            Self::Metal(renderer) => {
+                renderer.set_force_full_fbx_sphere(force);
             }
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.set_force_full_fbx_sphere(force),
@@ -1400,10 +1391,7 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.bind_fbx_mesh_slot_from_path(device, slot, path),
             #[cfg(target_os = "macos")]
-            Self::Metal { metal, present } => {
-                metal.bind_fbx_mesh_slot_from_path(slot, path)?;
-                present.bind_fbx_mesh_slot_from_path(device, slot, path)
-            }
+            Self::Metal(renderer) => renderer.bind_fbx_mesh_slot_from_path(slot, path),
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.bind_fbx_mesh_slot_from_path(slot, path),
         }
@@ -1418,10 +1406,7 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.bind_sprite_texture_slot_from_path(queue, slot, path),
             #[cfg(target_os = "macos")]
-            Self::Metal { metal, present } => {
-                metal.bind_sprite_texture_slot_from_path(slot, path)?;
-                present.bind_sprite_texture_slot_from_path(queue, slot, path)
-            }
+            Self::Metal(renderer) => renderer.bind_sprite_texture_slot_from_path(slot, path),
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.bind_sprite_texture_slot_from_path(slot, path),
         }
@@ -1438,9 +1423,8 @@ impl TlAppRenderer {
                 renderer.bind_builtin_sphere_mesh_slot(device, slot, high_quality)
             }
             #[cfg(target_os = "macos")]
-            Self::Metal { metal, present } => {
-                metal.bind_builtin_sphere_mesh_slot(slot, high_quality);
-                present.bind_builtin_sphere_mesh_slot(device, slot, high_quality);
+            Self::Metal(renderer) => {
+                renderer.bind_builtin_sphere_mesh_slot(slot, high_quality);
             }
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.bind_builtin_sphere_mesh_slot(slot, high_quality),
@@ -1451,7 +1435,7 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.ray_tracing_status(),
             #[cfg(target_os = "macos")]
-            Self::Metal { present, .. } => present.ray_tracing_status(),
+            Self::Metal(renderer) => renderer.ray_tracing_status(),
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.ray_tracing_status(),
         }
@@ -1461,7 +1445,7 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.fsr_status(),
             #[cfg(target_os = "macos")]
-            Self::Metal { present, .. } => present.fsr_status(),
+            Self::Metal(renderer) => renderer.fsr_status(),
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.fsr_status(),
         }
@@ -1471,7 +1455,7 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.world_to_ndc(world_pos),
             #[cfg(target_os = "macos")]
-            Self::Metal { present, .. } => present.world_to_ndc(world_pos),
+            Self::Metal(renderer) => renderer.world_to_ndc(world_pos),
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.world_to_ndc(world_pos),
         }
@@ -1481,7 +1465,7 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.camera_eye(),
             #[cfg(target_os = "macos")]
-            Self::Metal { present, .. } => present.camera_eye(),
+            Self::Metal(renderer) => renderer.camera_eye(),
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.camera_eye(),
         }
@@ -1491,8 +1475,8 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.world_radius_to_ndc_half_size(world_radius, clip_w),
             #[cfg(target_os = "macos")]
-            Self::Metal { present, .. } => {
-                present.world_radius_to_ndc_half_size(world_radius, clip_w)
+            Self::Metal(renderer) => {
+                renderer.world_radius_to_ndc_half_size(world_radius, clip_w)
             }
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.world_radius_to_ndc_half_size(world_radius, clip_w),

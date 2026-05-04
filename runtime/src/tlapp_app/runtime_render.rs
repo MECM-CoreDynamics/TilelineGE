@@ -1180,7 +1180,7 @@ impl TlAppRuntime {
                 (upload, rt_status, fsr_status, upload_us, 0)
             }
             #[cfg(target_os = "macos")]
-            TlAppRenderer::Metal { metal, .. } => {
+            TlAppRenderer::Metal(renderer) => {
                 if !self.console_overlay_sprites.is_empty() {
                     draw.sprites.extend(self.console_overlay_sprites.iter().cloned());
                     draw.stats.sprite_instances = draw.sprites.len();
@@ -1188,13 +1188,13 @@ impl TlAppRuntime {
                         + draw.stats.transparent_batches
                         + usize::from(draw.stats.sprite_instances > 0);
                 }
-                let _frame_result = metal.render_draw_frame(self.script_frame_index, &draw)?;
-                let upload = metal.last_upload_stats();
-                let rt_status = metal.ray_tracing_status();
-                let fsr_status = metal.fsr_status();
+                let _frame_result = renderer.render_draw_frame(self.script_frame_index, &draw)?;
+                let upload = renderer.last_upload_stats();
+                let rt_status = renderer.ray_tracing_status();
+                let fsr_status = renderer.fsr_status();
                 if !self.logged_metal_first_frame {
                     eprintln!(
-                        "[renderer] presenting via raw Metal path — wgpu reference still available via TILELINE_RENDERER=wgpu"
+                        "[renderer] presenting via raw Metal path"
                     );
                     self.logged_metal_first_frame = true;
                 }
