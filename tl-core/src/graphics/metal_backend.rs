@@ -44,6 +44,8 @@ pub struct MetalBackendConfig {
     pub occlusion_culling_enabled: bool,
     /// Maximum sprite instances accepted per frame.
     pub max_sprites: usize,
+    /// Enable SXRC runtime compression for snapshot instance data.
+    pub enable_snapshot_compression: bool,
 }
 
 impl Default for MetalBackendConfig {
@@ -53,6 +55,7 @@ impl Default for MetalBackendConfig {
             max_instances: 32_768,
             occlusion_culling_enabled: true,
             max_sprites: 4096,
+            enable_snapshot_compression: false,
         }
     }
 }
@@ -66,6 +69,8 @@ pub struct MetalSnapshotSlotState {
     pub texture_count: u32,
     pub light_count: u32,
     pub byte_len: usize,
+    /// Byte length after SXRC compression (0 if compression disabled).
+    pub compressed_byte_len: usize,
 }
 
 /// Submit telemetry for one recorded frame.
@@ -99,13 +104,15 @@ struct SnapshotSlot {
     texture_capacity: usize,
     light_capacity: usize,
     last_state: MetalSnapshotSlotState,
+    /// SXRC-compressed instance data retained as a cold tier.
+    compressed_instance_data: Option<Vec<sxrc::SxrcCompressedPage>>,
 }
 
 /// Errors produced by the raw Metal backend.
 #[derive(Debug)]
 pub enum MetalBackendError {
     NoMetalDevice,
-    InvalidConfig(&'static str),
+    InvalidConfig(std::borrow::Cow<'static, str>),
     SnapshotCapacityExceeded { requested: usize, capacity: usize },
     SnapshotMaterialCapacityExceeded { requested: usize, capacity: usize },
     SnapshotTextureCapacityExceeded { requested: usize, capacity: usize },
@@ -201,6 +208,7 @@ struct ShadowPassUniform {
 #[derive(Debug, Clone, Copy)]
 struct ShadowUniform {
     light_view_proj: [[[f32; 4]; 4]; METAL_SHADOW_LAYERS],
+    atlas_scale_offset: [[f32; 4]; METAL_SHADOW_LAYERS],
     shadow_light_indices: [i32; 4],
     shadow_count: u32,
     _pad0: u32,
@@ -248,14 +256,13 @@ pub struct MetalBackend {
     lighting_uniform_buffers: Vec<Buffer>,
     instance_scratch: Vec<GpuInstance3d>,
     shadow_texture: Texture,
-    shadow_layer_views: Vec<Texture>,
     shadow_sampler: SamplerState,
     shadow_pipeline: RenderPipelineState,
     shadow_pass_uniform_buffers: Vec<Buffer>,
     shadow_uniform_buffers: Vec<Buffer>,
     offscreen_color_texture: Texture,
     upscale_pipeline: RenderPipelineState,
-    upscale_uniform_buffer: Buffer,
+    upscale_uniform_buffers: Vec<Buffer>,
     upscale_sampler: SamplerState,
     sprite_pipeline: RenderPipelineState,
     sprite_vertex_buffer: Buffer,
@@ -264,6 +271,7 @@ pub struct MetalBackend {
     sprite_sampler: SamplerState,
     mesh_slots: std::collections::HashMap<u8, MeshSlot>,
     frame_pacing: FramePacing,
+    snapshot_compressor: Option<crate::compression::SnapshotCompressor>,
 }
 
 #[derive(Clone)]
@@ -302,12 +310,12 @@ impl MetalBackend {
     pub fn new(window: Arc<Window>, config: MetalBackendConfig) -> Result<Self, MetalBackendError> {
         if config.frames_in_flight == 0 {
             return Err(MetalBackendError::InvalidConfig(
-                "frames_in_flight must be greater than zero",
+                "frames_in_flight must be greater than zero".into(),
             ));
         }
         if config.max_instances == 0 {
             return Err(MetalBackendError::InvalidConfig(
-                "max_instances must be greater than zero",
+                "max_instances must be greater than zero".into(),
             ));
         }
 
@@ -318,6 +326,14 @@ impl MetalBackend {
         let max_materials = config.max_instances.max(256);
         let max_textures = config.max_instances.max(128);
         let max_lights = METAL_MAX_LIGHTS;
+        let snapshot_compressor = if config.enable_snapshot_compression {
+            Some(crate::compression::SnapshotCompressor::new().map_err(|e| {
+                MetalBackendError::InvalidConfig(format!("SXRC init failed: {e}").into())
+            })?)
+        } else {
+            None
+        };
+
         let frame_slots = (0..config.frames_in_flight)
             .map(|_| SnapshotSlot {
                 instance_capacity: config.max_instances,
@@ -325,6 +341,7 @@ impl MetalBackend {
                 texture_capacity: max_textures,
                 light_capacity: max_lights,
                 last_state: MetalSnapshotSlotState::default(),
+                compressed_instance_data: None,
             })
             .collect::<Vec<_>>();
 
@@ -357,10 +374,10 @@ impl MetalBackend {
         let view = {
             let handle = window
                 .window_handle()
-                .map_err(|_| MetalBackendError::InvalidConfig("failed to get window handle"))?;
+                .map_err(|_| MetalBackendError::InvalidConfig("failed to get window handle".into()))?;
             match handle.as_raw() {
                 RawWindowHandle::AppKit(appkit) => appkit.ns_view.as_ptr() as *mut Object,
-                _ => return Err(MetalBackendError::InvalidConfig("not a macOS window")),
+                _ => return Err(MetalBackendError::InvalidConfig("not a macOS window".into())),
             }
         };
         unsafe {
@@ -403,23 +420,12 @@ impl MetalBackend {
             .collect();
 
         let shadow_desc = TextureDescriptor::new();
-        shadow_desc.set_texture_type(MTLTextureType::D2Array);
-        shadow_desc.set_width(1024);
-        shadow_desc.set_height(1024);
-        shadow_desc.set_array_length(METAL_SHADOW_LAYERS as u64);
+        shadow_desc.set_texture_type(MTLTextureType::D2);
+        shadow_desc.set_width(2048);
+        shadow_desc.set_height(2048);
         shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
         shadow_desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
         let shadow_texture = device.new_texture(&shadow_desc);
-        let shadow_layer_views: Vec<Texture> = (0..METAL_SHADOW_LAYERS)
-            .map(|layer| {
-                shadow_texture.new_texture_view_from_slice(
-                    MTLPixelFormat::Depth32Float,
-                    MTLTextureType::D2,
-                    metal::NSRange { location: 0, length: 1 },
-                    metal::NSRange { location: layer as u64, length: 1 },
-                )
-            })
-            .collect();
         let shadow_sampler_desc = SamplerDescriptor::new();
         shadow_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
         shadow_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
@@ -447,10 +453,14 @@ impl MetalBackend {
         let offscreen_color_texture =
             create_offscreen_color_texture(&device, surface_size.width, surface_size.height);
         let upscale_pipeline = build_upscale_pipeline(&device)?;
-        let upscale_uniform_buffer = device.new_buffer(
-            std::mem::size_of::<UpscaleUniform>() as u64,
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        );
+        let upscale_uniform_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    std::mem::size_of::<UpscaleUniform>() as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
         let upscale_sampler_desc = SamplerDescriptor::new();
         upscale_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
         upscale_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
@@ -519,14 +529,13 @@ impl MetalBackend {
             lighting_uniform_buffers,
             instance_scratch: Vec::with_capacity(max_transforms),
             shadow_texture,
-            shadow_layer_views,
             shadow_sampler,
             shadow_pipeline,
             shadow_pass_uniform_buffers,
             shadow_uniform_buffers,
             offscreen_color_texture,
             upscale_pipeline,
-            upscale_uniform_buffer,
+            upscale_uniform_buffers,
             upscale_sampler,
             sprite_pipeline,
             sprite_vertex_buffer,
@@ -535,6 +544,7 @@ impl MetalBackend {
             sprite_sampler,
             mesh_slots: std::collections::HashMap::new(),
             frame_pacing,
+            snapshot_compressor,
         })
     }
 
@@ -584,7 +594,7 @@ impl MetalBackend {
         let slot = self
             .frame_slots
             .get_mut(frame_slot)
-            .ok_or(MetalBackendError::InvalidConfig("frame slot out of range"))?;
+            .ok_or(MetalBackendError::InvalidConfig("frame slot out of range".into()))?;
 
         if snapshot.transforms.len() > slot.instance_capacity {
             return Err(MetalBackendError::SnapshotCapacityExceeded {
@@ -623,6 +633,7 @@ impl MetalBackend {
             texture_count: snapshot.textures.len() as u32,
             light_count: snapshot.lights.len() as u32,
             byte_len,
+            compressed_byte_len: slot.last_state.compressed_byte_len,
         };
 
         Ok(slot.last_state)
@@ -696,6 +707,7 @@ impl MetalBackend {
 
         let mut shadow_uniform = ShadowUniform {
             light_view_proj: [[[0.0; 4]; 4]; METAL_SHADOW_LAYERS],
+            atlas_scale_offset: [[0.0; 4]; METAL_SHADOW_LAYERS],
             shadow_light_indices: [-1; 4],
             shadow_count: 0,
             _pad0: 0,
@@ -736,6 +748,12 @@ impl MetalBackend {
                 }
 
                 shadow_uniform.light_view_proj[slot] = vp;
+                shadow_uniform.atlas_scale_offset[slot] = [
+                    0.5,
+                    0.5,
+                    if slot % 2 == 0 { 0.0 } else { 0.5 },
+                    if slot / 2 == 0 { 0.0 } else { 0.5 },
+                ];
                 shadow_uniform.shadow_light_indices[slot] = i as i32;
 
                 let pass_uniform = ShadowPassUniform { light_view_proj: vp };
@@ -768,21 +786,32 @@ impl MetalBackend {
         spub: &Buffer,
         ranges: &[FramePrimitiveRange],
     ) {
-        for layer in 0..METAL_SHADOW_LAYERS {
-            let pass_desc = RenderPassDescriptor::new();
-            let depth_attachment = pass_desc.depth_attachment().unwrap();
-            depth_attachment.set_texture(Some(&self.shadow_layer_views[layer]));
-            depth_attachment.set_load_action(MTLLoadAction::Clear);
-            depth_attachment.set_store_action(MTLStoreAction::Store);
-            depth_attachment.set_clear_depth(1.0);
+        let pass_desc = RenderPassDescriptor::new();
+        let depth_attachment = pass_desc.depth_attachment().unwrap();
+        depth_attachment.set_texture(Some(&self.shadow_texture));
+        depth_attachment.set_load_action(MTLLoadAction::Clear);
+        depth_attachment.set_store_action(MTLStoreAction::Store);
+        depth_attachment.set_clear_depth(1.0);
 
-            let encoder = command_buffer.new_render_command_encoder(&pass_desc);
-            encoder.set_render_pipeline_state(&self.shadow_pipeline);
-            encoder.set_depth_stencil_state(&self.depth_state_write);
-            encoder.set_cull_mode(metal::MTLCullMode::Back);
-            encoder.set_depth_clip_mode(metal::MTLDepthClipMode::Clamp);
-            encoder.set_depth_bias(0.001, 1.0, 0.001);
-            encoder.set_vertex_buffer(1, Some(tb), 0);
+        let encoder = command_buffer.new_render_command_encoder(&pass_desc);
+        encoder.set_render_pipeline_state(&self.shadow_pipeline);
+        encoder.set_depth_stencil_state(&self.depth_state_write);
+        encoder.set_cull_mode(metal::MTLCullMode::Back);
+        encoder.set_depth_clip_mode(metal::MTLDepthClipMode::Clamp);
+        encoder.set_depth_bias(0.001, 1.0, 0.001);
+        encoder.set_vertex_buffer(1, Some(tb), 0);
+
+        for layer in 0..METAL_SHADOW_LAYERS {
+            let offset_x = if layer % 2 == 0 { 0.0 } else { 1024.0 };
+            let offset_y = if layer / 2 == 0 { 0.0 } else { 1024.0 };
+            encoder.set_viewport(metal::MTLViewport {
+                originX: offset_x,
+                originY: offset_y,
+                width: 1024.0,
+                height: 1024.0,
+                znear: 0.0,
+                zfar: 1.0,
+            });
             let offset = (layer * std::mem::size_of::<ShadowPassUniform>()) as u64;
             encoder.set_vertex_buffer(2, Some(spub), offset);
             for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
@@ -800,8 +829,8 @@ impl MetalBackend {
                     );
                 }
             }
-            encoder.end_encoding();
         }
+        encoder.end_encoding();
     }
 
     fn encode_sprite_pass(
@@ -846,6 +875,7 @@ impl MetalBackend {
         source_height: u32,
         target_width: u32,
         target_height: u32,
+        frame_slot: usize,
     ) {
         let pass_desc = RenderPassDescriptor::new();
         let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
@@ -873,11 +903,11 @@ impl MetalBackend {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 &uniform as *const UpscaleUniform as *const u8,
-                self.upscale_uniform_buffer.contents() as *mut u8,
+                self.upscale_uniform_buffers[frame_slot].contents() as *mut u8,
                 std::mem::size_of::<UpscaleUniform>(),
             );
         }
-        encoder.set_fragment_buffer(0, Some(&self.upscale_uniform_buffer), 0);
+        encoder.set_fragment_buffer(0, Some(&self.upscale_uniform_buffers[frame_slot]), 0);
         encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, 3);
         encoder.end_encoding();
     }
@@ -906,7 +936,8 @@ impl MetalBackend {
             let tb = &self.transform_buffers[frame_slot];
             let vpb = &self.view_proj_buffers[frame_slot];
             let cull_result = if self.config.occlusion_culling_enabled {
-                Some(self.cull_and_compact(&snapshot))
+                let planes = Self::extract_frustum_planes(snapshot.camera_view_proj);
+                Some(self.cull_and_compact(&snapshot, &planes))
             } else {
                 None
             };
@@ -948,6 +979,27 @@ impl MetalBackend {
                         tb.contents() as *mut u8,
                         trans_bytes.min(tb.length() as usize),
                     );
+                }
+                if let Some(ref compressor) = self.snapshot_compressor {
+                    let instance_bytes = unsafe {
+                        std::slice::from_raw_parts(
+                            instance_data.as_ptr() as *const u8,
+                            trans_bytes,
+                        )
+                    };
+                    match compressor.compress(instance_bytes) {
+                        Ok(pages) => {
+                            let compressed_len: usize = pages.iter().map(|p| p.encoded.len()).sum();
+                            let slot = &mut self.frame_slots[frame_slot];
+                            slot.compressed_instance_data = Some(pages);
+                            slot.last_state.compressed_byte_len = compressed_len;
+                        }
+                        Err(_) => {
+                            let slot = &mut self.frame_slots[frame_slot];
+                            slot.compressed_instance_data = None;
+                            slot.last_state.compressed_byte_len = 0;
+                        }
+                    }
                 }
             }
             {
@@ -1019,6 +1071,7 @@ impl MetalBackend {
                 self.surface_size.height,
                 self.surface_size.width,
                 self.surface_size.height,
+                frame_slot,
             );
 
             let pacing = self.frame_pacing.clone();
@@ -1142,8 +1195,8 @@ impl MetalBackend {
     fn cull_and_compact(
         &self,
         snapshot: &RenderStateSnapshot<'_>,
+        planes: &[[f32; 4]; 6],
     ) -> (Vec<GpuInstance3d>, Vec<FramePrimitiveRange>) {
-        let planes = Self::extract_frustum_planes(snapshot.camera_view_proj);
         let mut visible = Vec::with_capacity(self.instance_scratch.len());
         let mut ranges = Vec::with_capacity(snapshot.primitive_ranges.len());
 
@@ -1167,7 +1220,7 @@ impl MetalBackend {
                     + inst.model_col2[2] * inst.model_col2[2];
                 let radius_sq = base_radius_sq * sx.max(sy).max(sz);
 
-                if Self::is_sphere_visible(center, radius_sq, &planes) {
+                if Self::is_sphere_visible(center, radius_sq, planes) {
                     visible.push(*inst);
                     if block_start.is_none() {
                         block_start = Some((visible.len() - 1) as u32);
@@ -1507,12 +1560,12 @@ impl MetalBackend {
     pub fn new_for_test(config: MetalBackendConfig) -> Result<Self, MetalBackendError> {
         if config.frames_in_flight == 0 {
             return Err(MetalBackendError::InvalidConfig(
-                "frames_in_flight must be greater than zero",
+                "frames_in_flight must be greater than zero".into(),
             ));
         }
         if config.max_instances == 0 {
             return Err(MetalBackendError::InvalidConfig(
-                "max_instances must be greater than zero",
+                "max_instances must be greater than zero".into(),
             ));
         }
 
@@ -1523,6 +1576,14 @@ impl MetalBackend {
         let max_materials = config.max_instances.max(256);
         let max_textures = config.max_instances.max(128);
         let max_lights = METAL_MAX_LIGHTS;
+        let snapshot_compressor = if config.enable_snapshot_compression {
+            Some(crate::compression::SnapshotCompressor::new().map_err(|e| {
+                MetalBackendError::InvalidConfig(format!("SXRC init failed: {e}").into())
+            })?)
+        } else {
+            None
+        };
+
         let frame_slots = (0..config.frames_in_flight)
             .map(|_| SnapshotSlot {
                 instance_capacity: config.max_instances,
@@ -1530,6 +1591,7 @@ impl MetalBackend {
                 texture_capacity: max_textures,
                 light_capacity: max_lights,
                 last_state: MetalSnapshotSlotState::default(),
+                compressed_instance_data: None,
             })
             .collect::<Vec<_>>();
 
@@ -1591,22 +1653,12 @@ impl MetalBackend {
 
         let shadow_desc = TextureDescriptor::new();
         shadow_desc.set_texture_type(MTLTextureType::D2Array);
-        shadow_desc.set_width(1024);
-        shadow_desc.set_height(1024);
-        shadow_desc.set_array_length(METAL_SHADOW_LAYERS as u64);
+        shadow_desc.set_texture_type(MTLTextureType::D2);
+        shadow_desc.set_width(2048);
+        shadow_desc.set_height(2048);
         shadow_desc.set_pixel_format(MTLPixelFormat::Depth32Float);
         shadow_desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
         let shadow_texture = device.new_texture(&shadow_desc);
-        let shadow_layer_views: Vec<Texture> = (0..METAL_SHADOW_LAYERS)
-            .map(|layer| {
-                shadow_texture.new_texture_view_from_slice(
-                    MTLPixelFormat::Depth32Float,
-                    MTLTextureType::D2,
-                    metal::NSRange { location: 0, length: 1 },
-                    metal::NSRange { location: layer as u64, length: 1 },
-                )
-            })
-            .collect();
         let shadow_sampler_desc = SamplerDescriptor::new();
         shadow_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
         shadow_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
@@ -1634,10 +1686,14 @@ impl MetalBackend {
         let offscreen_color_texture =
             create_offscreen_color_texture(&device, surface_size.width, surface_size.height);
         let upscale_pipeline = build_upscale_pipeline(&device)?;
-        let upscale_uniform_buffer = device.new_buffer(
-            std::mem::size_of::<UpscaleUniform>() as u64,
-            MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
-        );
+        let upscale_uniform_buffers: Vec<Buffer> = (0..config.frames_in_flight)
+            .map(|_| {
+                device.new_buffer(
+                    std::mem::size_of::<UpscaleUniform>() as u64,
+                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                )
+            })
+            .collect();
         let upscale_sampler_desc = SamplerDescriptor::new();
         upscale_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
         upscale_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
@@ -1706,14 +1762,13 @@ impl MetalBackend {
             lighting_uniform_buffers,
             instance_scratch: Vec::with_capacity(max_transforms),
             shadow_texture,
-            shadow_layer_views,
             shadow_sampler,
             shadow_pipeline,
             shadow_pass_uniform_buffers,
             shadow_uniform_buffers,
             offscreen_color_texture,
             upscale_pipeline,
-            upscale_uniform_buffer,
+            upscale_uniform_buffers,
             upscale_sampler,
             sprite_pipeline,
             sprite_vertex_buffer,
@@ -1722,6 +1777,7 @@ impl MetalBackend {
             sprite_sampler,
             mesh_slots: std::collections::HashMap::new(),
             frame_pacing,
+            snapshot_compressor,
         })
     }
 
@@ -1745,7 +1801,8 @@ impl MetalBackend {
         let tb = &self.transform_buffers[frame_slot];
         let vpb = &self.view_proj_buffers[frame_slot];
         let cull_result = if self.config.occlusion_culling_enabled {
-            Some(self.cull_and_compact(&snapshot))
+            let planes = Self::extract_frustum_planes(snapshot.camera_view_proj);
+            Some(self.cull_and_compact(&snapshot, &planes))
         } else {
             None
         };
@@ -1785,6 +1842,27 @@ impl MetalBackend {
                     tb.contents() as *mut u8,
                     trans_bytes.min(tb.length() as usize),
                 );
+            }
+            if let Some(ref compressor) = self.snapshot_compressor {
+                let instance_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        instance_data.as_ptr() as *const u8,
+                        trans_bytes,
+                    )
+                };
+                match compressor.compress(instance_bytes) {
+                    Ok(pages) => {
+                        let compressed_len: usize = pages.iter().map(|p| p.encoded.len()).sum();
+                        let slot = &mut self.frame_slots[frame_slot];
+                        slot.compressed_instance_data = Some(pages);
+                        slot.last_state.compressed_byte_len = compressed_len;
+                    }
+                    Err(_) => {
+                        let slot = &mut self.frame_slots[frame_slot];
+                        slot.compressed_instance_data = None;
+                        slot.last_state.compressed_byte_len = 0;
+                    }
+                }
             }
         }
         {
@@ -2283,6 +2361,7 @@ mod tests {
             max_instances: 4,
             occlusion_culling_enabled: true,
             max_sprites: 4096,
+            enable_snapshot_compression: false,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2310,6 +2389,7 @@ mod tests {
             max_instances: 4,
             occlusion_culling_enabled: true,
             max_sprites: 4096,
+            enable_snapshot_compression: false,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2343,6 +2423,7 @@ mod tests {
             max_instances: 4,
             occlusion_culling_enabled: false,
             max_sprites: 4096,
+            enable_snapshot_compression: false,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2376,6 +2457,7 @@ mod tests {
             max_instances: 4,
             occlusion_culling_enabled: false,
             max_sprites: 4096,
+            enable_snapshot_compression: false,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2407,6 +2489,7 @@ mod tests {
             max_instances: 4,
             occlusion_culling_enabled: true,
             max_sprites: 4096,
+            enable_snapshot_compression: false,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2439,6 +2522,7 @@ mod tests {
             max_instances: 4,
             occlusion_culling_enabled: true,
             max_sprites: 4096,
+            enable_snapshot_compression: false,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2500,6 +2584,7 @@ mod tests {
             max_instances: 4,
             occlusion_culling_enabled: true,
             max_sprites: 4096,
+            enable_snapshot_compression: false,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2583,6 +2668,7 @@ mod tests {
             max_instances: 4,
             occlusion_culling_enabled: true,
             max_sprites: 4096,
+            enable_snapshot_compression: false,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,

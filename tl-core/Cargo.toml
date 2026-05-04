@@ -13,6 +13,7 @@ mps = { path = "../mps" }
 gms = { path = "../gms" }
 mgs = { path = "../mgs" }
 paradoxpe = { path = "../paradoxpe" }
+sxrc = { path = "../sxrc" }
 nalgebra.workspace = true
 wasm-encoder = "0.224.0"
 

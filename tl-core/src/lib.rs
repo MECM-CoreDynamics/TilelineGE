@@ -17,6 +17,7 @@ pub const MODULE_ID: &str = "tl-core";
 /// Crate version resolved at compile time.
 pub const MODULE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod compression;
 pub mod core;
 pub mod graphics;
 pub mod mls;
