@@ -726,7 +726,7 @@ impl MetalBackend {
                     .clamp(10.0, 170.0)
                     .to_radians();
                 let range = light.params[0].max(1.0);
-                let proj = Perspective3::new(1.0, fov_y, 0.5, range * 1.1);
+                let proj = Perspective3::new(1.0, fov_y, 0.1, range);
 
                 let view_proj = proj.to_homogeneous() * view.to_homogeneous();
                 let slice = view_proj.as_slice();
@@ -780,6 +780,7 @@ impl MetalBackend {
             encoder.set_render_pipeline_state(&self.shadow_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_write);
             encoder.set_cull_mode(metal::MTLCullMode::Back);
+            encoder.set_depth_bias(0.001, 1.0, 0.001);
             encoder.set_vertex_buffer(1, Some(tb), 0);
             let offset = (layer * std::mem::size_of::<ShadowPassUniform>()) as u64;
             encoder.set_vertex_buffer(2, Some(spub), offset);

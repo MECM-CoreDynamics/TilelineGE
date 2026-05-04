@@ -1,0 +1,11 @@
+Özel Metal arka uç sistemimizde gölge haritalama projeksiyonunda bir sorun yaşıyoruz. Uzaktaki nesnelerin gölgeleri, projeksiyon sarmalaması veya yanlış görüş alanı kırpması nedeniyle, amaçlanan ortam sınırlarının dışına taşarak veya 'dışarıya' doğru uzanarak görünüyor.
+
+Lütfen aşağıdakileri inceleyelim ve düzeltelim:
+
+Örnekleyici Adres Modu: Gölge haritası için kullanılan MTLSamplerDescriptor'ın hem sAddressMode hem de tAddressMode değerlerinin kesinlikle MTLSamplerAddressModeClampToEdge olarak ayarlandığından emin ol (veya ışık görüş alanının dışına gölge düşmesini önlemek için beyaz/1.0 kenar rengine sabitle).
+
+Işık Projeksiyon Matrisi: Işık kaynağı için ortografik veya perspektif projeksiyon matrisini kontrol et. Derinlik hassasiyetini en üst düzeye çıkarmak ve sınır dışı gölge oluşumunu önlemek için near_plane ve far_plane'in sahneyi sıkıca sınırladığından emin ol.
+
+Derinlik Testi ve Sapma: Gölge tıkanıklığını ve arka plan derinlik kırpmasını önlemek için derinlik şablonu durumunu (MTLDepthStencilDescriptor) doğrulayın ve uygun bir derinlik sapması uygula.
+
+Lütfen gerekli Metal/Rust düzeltmesini oluştur. Tüm yeni değişken adlarının ve kod yorumlarının tamamen İngilizce olduğundan emin ol.
