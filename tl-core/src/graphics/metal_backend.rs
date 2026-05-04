@@ -29,8 +29,8 @@ use winit::window::Window;
 
 use super::metal::mesh_slot::MeshSlot;
 use crate::graphics::frame_snapshot::{
-    FrameLightRecord, FramePrimitiveRange, FrameSpriteRecord, RenderStateSnapshot,
-    FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+    FrameInstanceTransform, FrameLightRecord, FramePrimitiveRange, FrameSpriteRecord,
+    RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 
 /// Runtime configuration for the raw Metal backend.
@@ -785,7 +785,7 @@ impl MetalBackend {
             encoder.set_vertex_buffer(1, Some(tb), 0);
             let offset = (layer * std::mem::size_of::<ShadowPassUniform>()) as u64;
             encoder.set_vertex_buffer(2, Some(spub), offset);
-            for range in ranges {
+            for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.draw_indexed_primitives_instanced_base_instance(
@@ -910,12 +910,35 @@ impl MetalBackend {
             } else {
                 None
             };
-            let (instance_data, draw_ranges): (&[GpuInstance3d], &[FramePrimitiveRange]) =
-                if let Some((visible_instances, visible_ranges)) = cull_result.as_ref() {
-                    (visible_instances.as_slice(), visible_ranges.as_slice())
-                } else {
-                    (self.instance_scratch.as_slice(), snapshot.primitive_ranges)
-                };
+            let mut draw_ranges: Vec<FramePrimitiveRange> = match &cull_result {
+                Some((_, visible_ranges)) => visible_ranges.clone(),
+                None => snapshot.primitive_ranges.to_vec(),
+            };
+            let instance_data: &[GpuInstance3d] = match &cull_result {
+                Some((visible_instances, _)) => visible_instances.as_slice(),
+                None => self.instance_scratch.as_slice(),
+            };
+
+            // Back-to-front transparent sorting: farther surfaces are drawn first
+            // so that nearer transparent pixels blend over them correctly.
+            if draw_ranges.iter().any(|r| Self::is_transparent_range(r)) {
+                let camera_eye = snapshot.camera_eye;
+                let transforms = snapshot.transforms;
+                draw_ranges.sort_by(|a, b| {
+                    let a_trans = Self::is_transparent_range(a);
+                    let b_trans = Self::is_transparent_range(b);
+                    match (a_trans, b_trans) {
+                        (true, true) => {
+                            let dist_a = Self::range_camera_distance(a, transforms, camera_eye);
+                            let dist_b = Self::range_camera_distance(b, transforms, camera_eye);
+                            dist_b.partial_cmp(&dist_a).unwrap_or(std::cmp::Ordering::Equal)
+                        }
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) => std::cmp::Ordering::Equal,
+                    }
+                });
+            }
 
             if !instance_data.is_empty() {
                 let trans_bytes = std::mem::size_of_val(instance_data);
@@ -950,7 +973,7 @@ impl MetalBackend {
             self.upload_shadows(frame_slot, spub, sub, &snapshot);
 
             if METAL_REAL_SHADOW_MAPS_ENABLED {
-                self.encode_shadow_pass(&command_buffer, tb, spub, draw_ranges);
+                self.encode_shadow_pass(&command_buffer, tb, spub, &draw_ranges);
             }
 
             let (p, m, e) = self.encode_frame(
@@ -963,7 +986,7 @@ impl MetalBackend {
                 lb,
                 lub,
                 sub,
-                draw_ranges,
+                &draw_ranges,
             );
             prepass_draw_calls = p;
             main_pass_draw_calls = m;
@@ -1199,6 +1222,39 @@ impl MetalBackend {
     #[inline]
     fn is_transparent_range(range: &FramePrimitiveRange) -> bool {
         range.flags & FRAME_PRIMITIVE_RANGE_TRANSPARENT != 0
+    }
+
+    /// Approximate squared camera distance for a primitive range, averaged over
+    /// its instances. Used for back-to-front transparent sorting.
+    fn range_camera_distance(
+        range: &FramePrimitiveRange,
+        transforms: &[FrameInstanceTransform],
+        camera_eye: [f32; 4],
+    ) -> f32 {
+        if transforms.is_empty() {
+            return 0.0;
+        }
+        let start = range.first_instance as usize;
+        let end = (range.first_instance + range.instance_count) as usize;
+        let mut avg = [0.0f32; 3];
+        let mut count = 0usize;
+        for i in start..end.min(transforms.len()) {
+            let model = transforms[i].model;
+            avg[0] += model[3][0];
+            avg[1] += model[3][1];
+            avg[2] += model[3][2];
+            count += 1;
+        }
+        if count > 0 {
+            let inv = 1.0 / count as f32;
+            avg[0] *= inv;
+            avg[1] *= inv;
+            avg[2] *= inv;
+        }
+        let dx = avg[0] - camera_eye[0];
+        let dy = avg[1] - camera_eye[1];
+        let dz = avg[2] - camera_eye[2];
+        dx * dx + dy * dy + dz * dz
     }
 
     fn encode_frame(
@@ -1690,12 +1746,33 @@ impl MetalBackend {
         } else {
             None
         };
-        let (instance_data, draw_ranges): (&[GpuInstance3d], &[FramePrimitiveRange]) =
-            if let Some((visible_instances, visible_ranges)) = cull_result.as_ref() {
-                (visible_instances.as_slice(), visible_ranges.as_slice())
-            } else {
-                (self.instance_scratch.as_slice(), snapshot.primitive_ranges)
-            };
+        let mut draw_ranges: Vec<FramePrimitiveRange> = match &cull_result {
+            Some((_, visible_ranges)) => visible_ranges.clone(),
+            None => snapshot.primitive_ranges.to_vec(),
+        };
+        let instance_data: &[GpuInstance3d] = match &cull_result {
+            Some((visible_instances, _)) => visible_instances.as_slice(),
+            None => self.instance_scratch.as_slice(),
+        };
+
+        if draw_ranges.iter().any(|r| Self::is_transparent_range(r)) {
+            let camera_eye = snapshot.camera_eye;
+            let transforms = snapshot.transforms;
+            draw_ranges.sort_by(|a, b| {
+                let a_trans = Self::is_transparent_range(a);
+                let b_trans = Self::is_transparent_range(b);
+                match (a_trans, b_trans) {
+                    (true, true) => {
+                        let dist_a = Self::range_camera_distance(a, transforms, camera_eye);
+                        let dist_b = Self::range_camera_distance(b, transforms, camera_eye);
+                        dist_b.partial_cmp(&dist_a).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    (false, false) => std::cmp::Ordering::Equal,
+                }
+            });
+        }
 
         if !instance_data.is_empty() {
             let trans_bytes = std::mem::size_of_val(instance_data);
@@ -1736,7 +1813,7 @@ impl MetalBackend {
         self.upload_shadows(frame_slot, spub, sub, &snapshot);
 
         if METAL_REAL_SHADOW_MAPS_ENABLED {
-            self.encode_shadow_pass(&command_buffer, tb, spub, draw_ranges);
+            self.encode_shadow_pass(&command_buffer, tb, spub, &draw_ranges);
         }
 
         let (p, m, e) = self.encode_frame(
@@ -1749,7 +1826,7 @@ impl MetalBackend {
             lb,
             lub,
             sub,
-            draw_ranges,
+            &draw_ranges,
         );
         prepass_draw_calls = p;
         main_pass_draw_calls = m;
