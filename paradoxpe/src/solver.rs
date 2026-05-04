@@ -26,7 +26,10 @@ struct CachedContactImpulse {
 /// Solver tuning configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContactSolverConfig {
+    /// Maximum solver iterations under normal load.
     pub iterations: u32,
+    /// Minimum solver iterations regardless of load scaling.
+    pub min_iterations: u32,
     pub baumgarte: f32,
     pub penetration_slop: f32,
     /// Maximum per-contact position correction applied in one sequential impulse iteration.
@@ -61,6 +64,7 @@ impl Default for ContactSolverConfig {
     fn default() -> Self {
         Self {
             iterations: 4,
+            min_iterations: 1,
             baumgarte: 0.2,
             penetration_slop: 0.005,
             max_position_correction_per_iteration: 0.08,
@@ -221,9 +225,8 @@ impl ContactSolver {
             self.apply_warmstart(bodies, manifolds);
         }
 
-        // Use the full iteration budget in parallel mode (the push pre-pass is integrated into
-        // each Jacobi iteration). In sequential mode subtract one iteration when the separate
-        // push pass activates so total work stays comparable.
+        // Apply manifold-count-based iteration scaling in both parallel and serial paths
+        // so heavy contact sets do not explode solver cost.
         let use_parallel =
             worker_count() > 1 && manifolds.len() >= self.config.parallel_contact_push_threshold;
         let solve_mode = if use_parallel {
@@ -235,11 +238,7 @@ impl ContactSolver {
         };
         self.stats.solve_mode = solve_mode;
         self.stats.solve_serial_fallback_reason = solve_mode.serial_fallback_reason();
-        let iterations = if use_parallel {
-            self.config.iterations.max(1)
-        } else {
-            self.effective_iteration_budget(manifolds.len())
-        };
+        let iterations = self.effective_iteration_budget(manifolds.len());
         self.stats.iterations = iterations;
 
         if use_parallel {
@@ -429,8 +428,21 @@ impl ContactSolver {
     }
 
     fn effective_iteration_budget(&self, manifold_count: usize) -> u32 {
-        let mut iterations = self.config.iterations.max(1);
-        if iterations > 2
+        let base = self.config.iterations.max(self.config.min_iterations);
+        let scale = if manifold_count >= 4096 {
+            0.25
+        } else if manifold_count >= 2048 {
+            0.5
+        } else if manifold_count >= 1024 {
+            0.75
+        } else if manifold_count >= 512 {
+            0.875
+        } else {
+            1.0
+        };
+        let mut iterations = ((base as f32 * scale) as u32).max(self.config.min_iterations);
+        // Additional serial-path penalty when parallel push is active.
+        if iterations > self.config.min_iterations + 1
             && self.config.parallel_contact_push_strength > 0.0
             && manifold_count >= self.config.parallel_contact_push_threshold
         {

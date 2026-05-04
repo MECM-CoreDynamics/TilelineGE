@@ -128,7 +128,7 @@ impl NarrowphasePipeline {
     }
 
     pub fn sync_for_pair_capacity(&mut self, pair_capacity: usize) {
-        let target = self.config.max_manifolds.max(pair_capacity);
+        let target = self.config.max_manifolds;
         if self.manifolds.capacity() < target {
             self.manifolds
                 .reserve(target.saturating_sub(self.manifolds.capacity()));
