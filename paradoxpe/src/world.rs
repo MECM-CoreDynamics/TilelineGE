@@ -187,6 +187,7 @@ pub struct PhysicsStepTimings {
     pub solver_mode: ParallelExecutionMode,
     pub solver_serial_fallback_reason: Option<&'static str>,
     pub sleep_us: u64,
+    pub flat_2d_us: u64,
     pub snapshot_us: u64,
 }
 
@@ -198,6 +199,7 @@ impl PhysicsStepTimings {
             + self.narrowphase_us
             + self.solver_us
             + self.sleep_us
+            + self.flat_2d_us
             + self.snapshot_us
     }
 }
@@ -883,6 +885,29 @@ impl PhysicsWorld {
         step_index: u32,
         timings: &mut PhysicsStepTimings,
     ) {
+        self.execute_integrate_phase(plan, step_index, timings);
+        self.execute_broadphase_phase(plan, timings);
+        self.execute_narrowphase_and_solver_phase(plan, timings);
+
+        let is_last = step_index + 1 == plan.substeps;
+        let on_stride = plan.substeps as usize > plan.sleep_update_stride
+            && step_index as usize % plan.sleep_update_stride == 0;
+        if is_last || on_stride {
+            self.execute_sleep_phase(plan, timings);
+        }
+
+        if self.config.simulation_mode.is_flat_2d() {
+            self.execute_flat_2d_phase(timings);
+        }
+    }
+
+    /// Phase 1 — integration: update body velocities and positions.
+    fn execute_integrate_phase(
+        &mut self,
+        plan: &PhysicsStepExecutionPlan,
+        step_index: u32,
+        timings: &mut PhysicsStepTimings,
+    ) {
         let integrate_started = Instant::now();
         let integrate_offloaded = self.try_dispatch_integrate_stage(plan, step_index, timings);
         if !integrate_offloaded {
@@ -898,7 +923,14 @@ impl PhysicsWorld {
             timings.integrate_mode = ParallelExecutionMode::Parallel;
             timings.integrate_serial_fallback_reason = None;
         }
+    }
 
+    /// Phase 2 — broadphase: rebuild collision candidate pairs.
+    fn execute_broadphase_phase(
+        &mut self,
+        plan: &PhysicsStepExecutionPlan,
+        timings: &mut PhysicsStepTimings,
+    ) {
         let t = Instant::now();
         self.broadphase.set_predictive_dt(plan.fixed_dt);
         self.narrowphase.set_predictive_dt(plan.fixed_dt);
@@ -909,55 +941,64 @@ impl PhysicsWorld {
         timings.broadphase_mode = broadphase_stats.pair_scan_mode;
         timings.broadphase_serial_fallback_reason =
             broadphase_stats.pair_scan_serial_fallback_reason;
+    }
 
-        let is_last = step_index + 1 == plan.substeps;
-        let on_stride = plan.substeps as usize > plan.sleep_update_stride
-            && step_index as usize % plan.sleep_update_stride == 0;
+    /// Phase 3 — narrowphase + solver: build manifolds, solve contacts and joints.
+    fn execute_narrowphase_and_solver_phase(
+        &mut self,
+        plan: &PhysicsStepExecutionPlan,
+        timings: &mut PhysicsStepTimings,
+    ) {
+        let t = Instant::now();
+        let candidate_pairs = self.broadphase.candidate_pairs();
+        let colliders = &self.colliders;
+        let bodies = &self.bodies;
+        let manifolds = self
+            .narrowphase
+            .rebuild_manifolds(bodies, candidate_pairs, |body| {
+                primary_shape_for_body(colliders, bodies, body)
+            });
+        timings.narrowphase_us += duration_us(t.elapsed());
 
-        {
-            let t = Instant::now();
-            let candidate_pairs = self.broadphase.candidate_pairs();
-            let colliders = &self.colliders;
-            let manifolds = self
-                .narrowphase
-                .rebuild_manifolds(bodies, candidate_pairs, |body| {
-                    primary_shape_for_body(colliders, bodies, body)
-                });
-            timings.narrowphase_us += duration_us(t.elapsed());
+        let t = Instant::now();
+        self.solver
+            .solve(&mut self.bodies, manifolds, plan.fixed_dt);
+        self.joint_solver
+            .solve(&mut self.bodies, &self.active_joints, plan.fixed_dt);
+        Self::rebuild_contacts_from_manifolds(&mut self.contacts, manifolds);
+        timings.solver_us += duration_us(t.elapsed());
 
-            let t = Instant::now();
-            self.solver
-                .solve(&mut self.bodies, manifolds, plan.fixed_dt);
-            self.joint_solver
-                .solve(&mut self.bodies, &self.active_joints, plan.fixed_dt);
-            Self::rebuild_contacts_from_manifolds(&mut self.contacts, manifolds);
-            timings.solver_us += duration_us(t.elapsed());
+        let narrowphase_stats = self.narrowphase.stats();
+        timings.narrowphase_mode = narrowphase_stats.manifold_build_mode;
+        timings.narrowphase_serial_fallback_reason =
+            narrowphase_stats.manifold_serial_fallback_reason;
+        let solver_stats = self.solver.stats();
+        timings.solver_mode = solver_stats.solve_mode;
+        timings.solver_serial_fallback_reason = solver_stats.solve_serial_fallback_reason;
+    }
 
-            if is_last || on_stride {
-                let t = Instant::now();
-                self.sleep_manager.update(
-                    &mut self.bodies,
-                    manifolds,
-                    &self.active_joints,
-                    plan.fixed_dt,
-                );
-                timings.sleep_us += duration_us(t.elapsed());
-            }
+    /// Phase 4 — sleep: update sleep islands and cull dormant bodies.
+    fn execute_sleep_phase(
+        &mut self,
+        plan: &PhysicsStepExecutionPlan,
+        timings: &mut PhysicsStepTimings,
+    ) {
+        let t = Instant::now();
+        let manifolds = self.narrowphase.manifolds();
+        self.sleep_manager.update(
+            &mut self.bodies,
+            manifolds,
+            &self.active_joints,
+            plan.fixed_dt,
+        );
+        timings.sleep_us += duration_us(t.elapsed());
+    }
 
-            let narrowphase_stats = self.narrowphase.stats();
-            timings.narrowphase_mode = narrowphase_stats.manifold_build_mode;
-            timings.narrowphase_serial_fallback_reason =
-                narrowphase_stats.manifold_serial_fallback_reason;
-            let solver_stats = self.solver.stats();
-            timings.solver_mode = solver_stats.solve_mode;
-            timings.solver_serial_fallback_reason = solver_stats.solve_serial_fallback_reason;
-        }
-
-        if self.config.simulation_mode.is_flat_2d() {
-            let t = Instant::now();
-            let _ = self.enforce_flat_2d_constraints();
-            timings.sleep_us += duration_us(t.elapsed());
-        }
+    /// Phase 5 — flat 2D enforcement: clamp Z-axis for 2D simulation modes.
+    fn execute_flat_2d_phase(&mut self, timings: &mut PhysicsStepTimings) {
+        let t = Instant::now();
+        let _ = self.enforce_flat_2d_constraints();
+        timings.flat_2d_us += duration_us(t.elapsed());
     }
 
     fn try_dispatch_integrate_stage(
