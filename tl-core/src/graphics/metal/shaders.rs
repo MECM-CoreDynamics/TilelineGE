@@ -449,6 +449,8 @@ vertex float4 scene_shadow_vertex(
     float4x4 model = float4x4(in.model_col0, in.model_col1,
                               in.model_col2, in.model_col3);
     float4 world_pos = model * float4(in.position, 1.0);
-    return u_shadow.light_view_proj * world_pos;
+    float4 pos = u_shadow.light_view_proj * world_pos;
+    pos.z = pos.z * 0.5 + pos.w * 0.5;
+    return pos;
 }
 "#;
