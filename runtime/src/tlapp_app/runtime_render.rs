@@ -1180,72 +1180,26 @@ impl TlAppRuntime {
                 (upload, rt_status, fsr_status, upload_us, 0)
             }
             #[cfg(target_os = "macos")]
-            TlAppRenderer::Metal { present, .. } => {
-                // Visible output on macOS currently comes from the wgpu present path.
-                // Submitting the same scene into the raw CAMetalLayer as well causes the
-                // scene and additive light glow to stack visually, which shows up as
-                // "light explosions" on launch. Keep the native Metal adapter initialized
-                // for the ongoing backend migration, but leave presentation to one path.
-                let upload = present.upload_draw_frame(&self.device, &self.queue, &draw);
-                present.upload_overlay_sprites(
-                    &self.device,
-                    &self.queue,
-                    self.console_overlay_sprites.as_slice(),
-                );
-                let rt_status = present.ray_tracing_status();
-                let fsr_status = present.fsr_status();
-
-                let surface = self
-                    .surface
-                    .as_ref()
-                    .ok_or("metal renderer selected without a configured surface")?;
-                let config = self
-                    .config
-                    .as_ref()
-                    .ok_or("metal renderer selected without a configured surface config")?;
-                let output = match surface.get_current_texture() {
-                    Ok(frame) => frame,
-                    Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                        surface.configure(&self.device, config);
-                        return Ok(());
-                    }
-                    Err(wgpu::SurfaceError::OutOfMemory) => {
-                        return Err("wgpu surface out of memory".into());
-                    }
-                    Err(wgpu::SurfaceError::Timeout) => {
-                        return Ok(());
-                    }
-                    Err(wgpu::SurfaceError::Other) => {
-                        return Ok(());
-                    }
-                };
-
-                let view = output
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
-                let mut encoder =
-                    self.device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("tlapp-metal-present-encoder"),
-                        });
-                present.build_rt_acceleration_structures(&mut encoder);
-                present.encode(
-                    &mut encoder,
-                    &view,
-                    wgpu::Color {
-                        r: 0.07,
-                        g: 0.09,
-                        b: 0.12,
-                        a: 1.0,
-                    },
-                );
-                present.encode_overlay_sprites(&mut encoder, &view);
-                self.queue.submit(Some(encoder.finish()));
-                let t_present_begin = Instant::now();
-                let upload_us = (t_present_begin - t_upload_begin).as_micros() as u64;
-                output.present();
-                let present_us = (Instant::now() - t_present_begin).as_micros() as u64;
-                (upload, rt_status, fsr_status, upload_us, present_us)
+            TlAppRenderer::Metal { metal, .. } => {
+                if !self.console_overlay_sprites.is_empty() {
+                    draw.sprites.extend(self.console_overlay_sprites.iter().cloned());
+                    draw.stats.sprite_instances = draw.sprites.len();
+                    draw.stats.total_draw_calls = draw.stats.opaque_batches
+                        + draw.stats.transparent_batches
+                        + usize::from(draw.stats.sprite_instances > 0);
+                }
+                let _frame_result = metal.render_draw_frame(self.script_frame_index, &draw)?;
+                let upload = metal.last_upload_stats();
+                let rt_status = metal.ray_tracing_status();
+                let fsr_status = metal.fsr_status();
+                if !self.logged_metal_first_frame {
+                    eprintln!(
+                        "[renderer] presenting via raw Metal path — wgpu reference still available via TILELINE_RENDERER=wgpu"
+                    );
+                    self.logged_metal_first_frame = true;
+                }
+                let upload_us = (Instant::now() - t_upload_begin).as_micros() as u64;
+                (upload, rt_status, fsr_status, upload_us, 0)
             }
         };
 

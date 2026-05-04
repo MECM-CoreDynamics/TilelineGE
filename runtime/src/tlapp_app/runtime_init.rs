@@ -950,6 +950,7 @@ impl TlAppRuntime {
             fsr_dynamo_config: FsrDynamoConfig::default(),
             fsr_dynamo_scale: 1.0,
             shutdown_prepared: false,
+            logged_metal_first_frame: false,
         };
         runtime.sync_console_quick_fields_from_runtime();
         Ok(runtime)

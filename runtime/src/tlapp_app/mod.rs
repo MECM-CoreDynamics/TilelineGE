@@ -1253,6 +1253,7 @@ struct TlAppRuntime {
     /// Current smoothed render scale maintained by Dynamo FSR (starts at 1.0 = native).
     fsr_dynamo_scale: f32,
     shutdown_prepared: bool,
+    logged_metal_first_frame: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
