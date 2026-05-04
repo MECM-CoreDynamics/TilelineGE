@@ -1098,7 +1098,7 @@ impl MetalBackend {
             p[1][c] = view_proj[c][3] - view_proj[c][0]; // right  = row3 - row0
             p[2][c] = view_proj[c][1] + view_proj[c][3]; // bottom = row1 + row3
             p[3][c] = view_proj[c][3] - view_proj[c][1]; // top    = row3 - row1
-            p[4][c] = view_proj[c][2];                   // near   = row2     (Metal z ∈ [0,w])
+            p[4][c] = view_proj[c][2] + view_proj[c][3]; // near   = row2 + row3 (Metal z ∈ [0,w])
             p[5][c] = view_proj[c][3] - view_proj[c][2]; // far    = row3 - row2
         }
         for plane in &mut p {
