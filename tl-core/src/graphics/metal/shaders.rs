@@ -73,8 +73,11 @@ vertex VSOut scene_3d_vertex(
                               in.model_col2, in.model_col3);
     float4 world_pos = model * float4(in.position, 1.0);
 
+    float4 pos = camera.view_proj * world_pos;
+    pos.z = pos.z * 0.5 + pos.w * 0.5;
+
     VSOut out;
-    out.position       = camera.view_proj * world_pos;
+    out.position       = pos;
     out.color          = in.base_color;
     out.emissive       = in.emissive.xyz;
     out.world_pos      = world_pos.xyz;
