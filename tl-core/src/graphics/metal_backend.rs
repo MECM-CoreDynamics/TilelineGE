@@ -28,7 +28,10 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
 use super::metal::mesh_slot::MeshSlot;
-use crate::graphics::frame_snapshot::{FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange, FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot};
+use crate::graphics::frame_snapshot::{
+    FrameLightRecord, FramePrimitiveRange, FrameSpriteRecord, RenderStateSnapshot,
+    FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+};
 
 /// Runtime configuration for the raw Metal backend.
 #[derive(Debug, Clone)]
@@ -218,6 +221,9 @@ struct UpscaleUniform {
 
 const METAL_MAX_LIGHTS: usize = 64;
 const METAL_SHADOW_LAYERS: usize = 4;
+// Keep Metal on the shader fallback shadow term until the native shadow map path
+// matches WGPU's depth projection closely enough for runtime use.
+const METAL_REAL_SHADOW_MAPS_ENABLED: bool = false;
 
 /// Raw Metal backend MVP used by runtime integration layers.
 pub struct MetalBackend {
@@ -234,8 +240,10 @@ pub struct MetalBackend {
     depth_texture: Texture,
     z_prepass_pipeline: RenderPipelineState,
     forward_pipeline: RenderPipelineState,
+    forward_transparent_pipeline: RenderPipelineState,
     depth_state_write: DepthStencilState,
     depth_state_equal: DepthStencilState,
+    depth_state_read: DepthStencilState,
     transform_buffers: Vec<Buffer>,
     view_proj_buffers: Vec<Buffer>,
     light_data_buffers: Vec<Buffer>,
@@ -322,11 +330,14 @@ impl MetalBackend {
             })
             .collect::<Vec<_>>();
 
-        let (z_prepass_pipeline, forward_pipeline) = build_scene_pipelines(&device)?;
+        let (z_prepass_pipeline, forward_pipeline, forward_transparent_pipeline) =
+            build_scene_pipelines(&device)?;
 
         let depth_state_write = build_depth_state(&device, MTLCompareFunction::Less, true)
             .map_err(MetalBackendError::PipelineCreation)?;
         let depth_state_equal = build_depth_state(&device, MTLCompareFunction::Equal, false)
+            .map_err(MetalBackendError::PipelineCreation)?;
+        let depth_state_read = build_depth_state(&device, MTLCompareFunction::LessEqual, false)
             .map_err(MetalBackendError::PipelineCreation)?;
 
         let surface_size = window.inner_size();
@@ -435,13 +446,8 @@ impl MetalBackend {
                 )
             })
             .collect();
-        let offscreen_color_desc = TextureDescriptor::new();
-        offscreen_color_desc.set_texture_type(MTLTextureType::D2);
-        offscreen_color_desc.set_width(surface_size.width as u64);
-        offscreen_color_desc.set_height(surface_size.height as u64);
-        offscreen_color_desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        offscreen_color_desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
-        let offscreen_color_texture = device.new_texture(&offscreen_color_desc);
+        let offscreen_color_texture =
+            create_offscreen_color_texture(&device, surface_size.width, surface_size.height);
         let upscale_pipeline = build_upscale_pipeline(&device)?;
         let upscale_uniform_buffer = device.new_buffer(
             std::mem::size_of::<UpscaleUniform>() as u64,
@@ -505,8 +511,10 @@ impl MetalBackend {
             depth_texture,
             z_prepass_pipeline,
             forward_pipeline,
+            forward_transparent_pipeline,
             depth_state_write,
             depth_state_equal,
+            depth_state_read,
             transform_buffers,
             view_proj_buffers,
             light_data_buffers,
@@ -562,6 +570,8 @@ impl MetalBackend {
         }
         self.surface_size = new_size;
         self.depth_texture = create_depth_texture(&self.device, new_size.width, new_size.height);
+        self.offscreen_color_texture =
+            create_offscreen_color_texture(&self.device, new_size.width, new_size.height);
         self.layer
             .set_drawable_size(CGSize::new(new_size.width as f64, new_size.height as f64));
         Ok(())
@@ -702,7 +712,7 @@ impl MetalBackend {
             }
             let casts_shadow = light.shadow[0] > 0.5;
             let kind = light.position_kind[3] as u32;
-            if casts_shadow && kind == 1 {
+            if METAL_REAL_SHADOW_MAPS_ENABLED && casts_shadow && kind == 1 {
                 let pos = Point3::new(light.position_kind[0], light.position_kind[1], light.position_kind[2]);
                 let dir = Vector3::new(light.direction_inner[0], light.direction_inner[1], light.direction_inner[2]).normalize();
                 let up = if dir.y.abs() < 0.99 {
@@ -939,7 +949,9 @@ impl MetalBackend {
             self.upload_lights(frame_slot, lb, lub, &snapshot);
             self.upload_shadows(frame_slot, spub, sub, &snapshot);
 
-            self.encode_shadow_pass(&command_buffer, tb, spub, draw_ranges);
+            if METAL_REAL_SHADOW_MAPS_ENABLED {
+                self.encode_shadow_pass(&command_buffer, tb, spub, draw_ranges);
+            }
 
             let (p, m, e) = self.encode_frame(
                 &command_buffer,
@@ -1184,6 +1196,11 @@ impl MetalBackend {
         ranges.truncate(write + 1);
     }
 
+    #[inline]
+    fn is_transparent_range(range: &FramePrimitiveRange) -> bool {
+        range.flags & FRAME_PRIMITIVE_RANGE_TRANSPARENT != 0
+    }
+
     fn encode_frame(
         &self,
         command_buffer: &metal::CommandBufferRef,
@@ -1201,104 +1218,198 @@ impl MetalBackend {
         let mut main_pass_draw_calls = 0u32;
         let mut early_z_reject_estimate = 0u32;
 
-        if self.config.occlusion_culling_enabled && !ranges.is_empty() {
-            // Pass 1 — Z-Prepass (depth-only)
+        let has_opaque = ranges
+            .iter()
+            .any(|range| range.instance_count > 0 && !Self::is_transparent_range(range));
+        let has_transparent = ranges
+            .iter()
+            .any(|range| range.instance_count > 0 && Self::is_transparent_range(range));
+
+        if !has_opaque && !has_transparent {
             let pass_desc = RenderPassDescriptor::new();
             let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
             color_attachment.set_texture(Some(color_texture));
             color_attachment.set_load_action(MTLLoadAction::Clear);
-            color_attachment.set_store_action(MTLStoreAction::DontCare);
-            color_attachment.set_clear_color(MTLClearColor::new(0.0, 0.0, 0.0, 1.0));
+            color_attachment.set_store_action(MTLStoreAction::Store);
+            color_attachment.set_clear_color(scene_clear_color());
 
             let depth_attachment = pass_desc.depth_attachment().unwrap();
             depth_attachment.set_texture(Some(depth_texture));
             depth_attachment.set_load_action(MTLLoadAction::Clear);
-            depth_attachment.set_store_action(MTLStoreAction::Store);
-            depth_attachment.set_clear_depth(1.0);
-
-            let encoder = command_buffer.new_render_command_encoder(&pass_desc);
-            encoder.set_render_pipeline_state(&self.z_prepass_pipeline);
-            encoder.set_depth_stencil_state(&self.depth_state_write);
-            encoder.set_vertex_buffer(1, Some(tb), 0);
-            encoder.set_vertex_buffer(2, Some(vpb), 0);
-            for range in ranges {
-                if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
-                    encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
-                    encoder.draw_indexed_primitives_instanced_base_instance(
-                        MTLPrimitiveType::Triangle,
-                        mesh.index_count as u64,
-                        mesh.index_type,
-                        &mesh.index_buffer,
-                        0,
-                        range.instance_count as u64,
-                        0,
-                        range.first_instance as u64,
-                    );
-                    prepass_draw_calls += 1;
-                }
-            }
-            encoder.end_encoding();
-
-            // Pass 2 — Forward Shading (equal-depth, no write)
-            let pass_desc = RenderPassDescriptor::new();
-            let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
-            color_attachment.set_texture(Some(color_texture));
-            color_attachment.set_load_action(MTLLoadAction::Load);
-            color_attachment.set_store_action(MTLStoreAction::Store);
-
-            let depth_attachment = pass_desc.depth_attachment().unwrap();
-            depth_attachment.set_texture(Some(depth_texture));
-            depth_attachment.set_load_action(MTLLoadAction::Load);
             depth_attachment.set_store_action(MTLStoreAction::DontCare);
+            depth_attachment.set_clear_depth(1.0);
 
-            let encoder = command_buffer.new_render_command_encoder(&pass_desc);
-            encoder.set_render_pipeline_state(&self.forward_pipeline);
-            encoder.set_depth_stencil_state(&self.depth_state_equal);
-            encoder.set_vertex_buffer(1, Some(tb), 0);
-            encoder.set_vertex_buffer(2, Some(vpb), 0);
-            encoder.set_fragment_buffer(0, Some(vpb), 0);
-            encoder.set_fragment_buffer(1, Some(lb), 0);
-            encoder.set_fragment_buffer(2, Some(lub), 0);
-            encoder.set_fragment_buffer(3, Some(sub), 0);
-            encoder.set_fragment_texture(0, Some(&self.shadow_texture));
-            encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
-            for range in ranges {
-                if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
-                    encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
-                    encoder.draw_indexed_primitives_instanced_base_instance(
-                        MTLPrimitiveType::Triangle,
-                        mesh.index_count as u64,
-                        mesh.index_type,
-                        &mesh.index_buffer,
-                        0,
-                        range.instance_count as u64,
-                        0,
-                        range.first_instance as u64,
-                    );
-                    main_pass_draw_calls += 1;
+            command_buffer
+                .new_render_command_encoder(&pass_desc)
+                .end_encoding();
+            return (0, 0, 0);
+        }
+
+        if has_opaque {
+            if self.config.occlusion_culling_enabled {
+                // Pass 1 — Z-Prepass for opaque geometry only.
+                let pass_desc = RenderPassDescriptor::new();
+                let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
+                color_attachment.set_texture(Some(color_texture));
+                color_attachment.set_load_action(MTLLoadAction::Clear);
+                color_attachment.set_store_action(MTLStoreAction::DontCare);
+                color_attachment.set_clear_color(scene_clear_color());
+
+                let depth_attachment = pass_desc.depth_attachment().unwrap();
+                depth_attachment.set_texture(Some(depth_texture));
+                depth_attachment.set_load_action(MTLLoadAction::Clear);
+                depth_attachment.set_store_action(MTLStoreAction::Store);
+                depth_attachment.set_clear_depth(1.0);
+
+                let encoder = command_buffer.new_render_command_encoder(&pass_desc);
+                encoder.set_render_pipeline_state(&self.z_prepass_pipeline);
+                encoder.set_depth_stencil_state(&self.depth_state_write);
+                encoder.set_vertex_buffer(1, Some(tb), 0);
+                encoder.set_vertex_buffer(2, Some(vpb), 0);
+                for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
+                    if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
+                        encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
+                        encoder.draw_indexed_primitives_instanced_base_instance(
+                            MTLPrimitiveType::Triangle,
+                            mesh.index_count as u64,
+                            mesh.index_type,
+                            &mesh.index_buffer,
+                            0,
+                            range.instance_count as u64,
+                            0,
+                            range.first_instance as u64,
+                        );
+                        prepass_draw_calls += 1;
+                    }
                 }
-            }
-            encoder.end_encoding();
+                encoder.end_encoding();
 
-            early_z_reject_estimate = prepass_draw_calls.saturating_sub(main_pass_draw_calls);
-        } else {
-            // Single pass forward when occlusion culling is disabled or no geometry
+                let pass_desc = RenderPassDescriptor::new();
+                let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
+                color_attachment.set_texture(Some(color_texture));
+                // The prepass is depth-only, so the color buffer contents are undefined here.
+                color_attachment.set_load_action(MTLLoadAction::Clear);
+                color_attachment.set_store_action(MTLStoreAction::Store);
+                color_attachment.set_clear_color(scene_clear_color());
+
+                let depth_attachment = pass_desc.depth_attachment().unwrap();
+                depth_attachment.set_texture(Some(depth_texture));
+                depth_attachment.set_load_action(MTLLoadAction::Load);
+                depth_attachment.set_store_action(if has_transparent {
+                    MTLStoreAction::Store
+                } else {
+                    MTLStoreAction::DontCare
+                });
+
+                let encoder = command_buffer.new_render_command_encoder(&pass_desc);
+                encoder.set_render_pipeline_state(&self.forward_pipeline);
+                encoder.set_depth_stencil_state(&self.depth_state_equal);
+                encoder.set_vertex_buffer(1, Some(tb), 0);
+                encoder.set_vertex_buffer(2, Some(vpb), 0);
+                encoder.set_fragment_buffer(0, Some(vpb), 0);
+                encoder.set_fragment_buffer(1, Some(lb), 0);
+                encoder.set_fragment_buffer(2, Some(lub), 0);
+                encoder.set_fragment_buffer(3, Some(sub), 0);
+                encoder.set_fragment_texture(0, Some(&self.shadow_texture));
+                encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
+                for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
+                    if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
+                        encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
+                        encoder.draw_indexed_primitives_instanced_base_instance(
+                            MTLPrimitiveType::Triangle,
+                            mesh.index_count as u64,
+                            mesh.index_type,
+                            &mesh.index_buffer,
+                            0,
+                            range.instance_count as u64,
+                            0,
+                            range.first_instance as u64,
+                        );
+                        main_pass_draw_calls += 1;
+                    }
+                }
+                encoder.end_encoding();
+
+                early_z_reject_estimate =
+                    prepass_draw_calls.saturating_sub(main_pass_draw_calls);
+            } else {
+                let pass_desc = RenderPassDescriptor::new();
+                let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
+                color_attachment.set_texture(Some(color_texture));
+                color_attachment.set_load_action(MTLLoadAction::Clear);
+                color_attachment.set_store_action(MTLStoreAction::Store);
+                color_attachment.set_clear_color(scene_clear_color());
+
+                let depth_attachment = pass_desc.depth_attachment().unwrap();
+                depth_attachment.set_texture(Some(depth_texture));
+                depth_attachment.set_load_action(MTLLoadAction::Clear);
+                depth_attachment.set_store_action(if has_transparent {
+                    MTLStoreAction::Store
+                } else {
+                    MTLStoreAction::DontCare
+                });
+                depth_attachment.set_clear_depth(1.0);
+
+                let encoder = command_buffer.new_render_command_encoder(&pass_desc);
+                encoder.set_render_pipeline_state(&self.forward_pipeline);
+                encoder.set_depth_stencil_state(&self.depth_state_write);
+                encoder.set_vertex_buffer(1, Some(tb), 0);
+                encoder.set_vertex_buffer(2, Some(vpb), 0);
+                encoder.set_fragment_buffer(0, Some(vpb), 0);
+                encoder.set_fragment_buffer(1, Some(lb), 0);
+                encoder.set_fragment_buffer(2, Some(lub), 0);
+                encoder.set_fragment_buffer(3, Some(sub), 0);
+                encoder.set_fragment_texture(0, Some(&self.shadow_texture));
+                encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
+                for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
+                    if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
+                        encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
+                        encoder.draw_indexed_primitives_instanced_base_instance(
+                            MTLPrimitiveType::Triangle,
+                            mesh.index_count as u64,
+                            mesh.index_type,
+                            &mesh.index_buffer,
+                            0,
+                            range.instance_count as u64,
+                            0,
+                            range.first_instance as u64,
+                        );
+                        main_pass_draw_calls += 1;
+                    }
+                }
+                encoder.end_encoding();
+            }
+        }
+
+        if has_transparent {
             let pass_desc = RenderPassDescriptor::new();
             let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
             color_attachment.set_texture(Some(color_texture));
-            color_attachment.set_load_action(MTLLoadAction::Clear);
+            color_attachment.set_load_action(if has_opaque {
+                MTLLoadAction::Load
+            } else {
+                MTLLoadAction::Clear
+            });
             color_attachment.set_store_action(MTLStoreAction::Store);
-            color_attachment.set_clear_color(MTLClearColor::new(0.0, 0.0, 0.0, 1.0));
+            if !has_opaque {
+                color_attachment.set_clear_color(scene_clear_color());
+            }
 
             let depth_attachment = pass_desc.depth_attachment().unwrap();
             depth_attachment.set_texture(Some(depth_texture));
-            depth_attachment.set_load_action(MTLLoadAction::Clear);
-            depth_attachment.set_store_action(MTLStoreAction::Store);
-            depth_attachment.set_clear_depth(1.0);
+            depth_attachment.set_load_action(if has_opaque {
+                MTLLoadAction::Load
+            } else {
+                MTLLoadAction::Clear
+            });
+            depth_attachment.set_store_action(MTLStoreAction::DontCare);
+            if !has_opaque {
+                depth_attachment.set_clear_depth(1.0);
+            }
 
             let encoder = command_buffer.new_render_command_encoder(&pass_desc);
-            encoder.set_render_pipeline_state(&self.forward_pipeline);
-            encoder.set_depth_stencil_state(&self.depth_state_write);
+            encoder.set_render_pipeline_state(&self.forward_transparent_pipeline);
+            encoder.set_depth_stencil_state(&self.depth_state_read);
             encoder.set_vertex_buffer(1, Some(tb), 0);
             encoder.set_vertex_buffer(2, Some(vpb), 0);
             encoder.set_fragment_buffer(0, Some(vpb), 0);
@@ -1307,7 +1418,7 @@ impl MetalBackend {
             encoder.set_fragment_buffer(3, Some(sub), 0);
             encoder.set_fragment_texture(0, Some(&self.shadow_texture));
             encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
-            for range in ranges {
+            for range in ranges.iter().filter(|range| Self::is_transparent_range(range)) {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.draw_indexed_primitives_instanced_base_instance(
@@ -1363,11 +1474,14 @@ impl MetalBackend {
             })
             .collect::<Vec<_>>();
 
-        let (z_prepass_pipeline, forward_pipeline) = build_scene_pipelines(&device)?;
+        let (z_prepass_pipeline, forward_pipeline, forward_transparent_pipeline) =
+            build_scene_pipelines(&device)?;
 
         let depth_state_write = build_depth_state(&device, MTLCompareFunction::Less, true)
             .map_err(MetalBackendError::PipelineCreation)?;
         let depth_state_equal = build_depth_state(&device, MTLCompareFunction::Equal, false)
+            .map_err(MetalBackendError::PipelineCreation)?;
+        let depth_state_read = build_depth_state(&device, MTLCompareFunction::LessEqual, false)
             .map_err(MetalBackendError::PipelineCreation)?;
 
         let surface_size = PhysicalSize::new(64, 64);
@@ -1458,13 +1572,8 @@ impl MetalBackend {
                 )
             })
             .collect();
-        let offscreen_color_desc = TextureDescriptor::new();
-        offscreen_color_desc.set_texture_type(MTLTextureType::D2);
-        offscreen_color_desc.set_width(surface_size.width as u64);
-        offscreen_color_desc.set_height(surface_size.height as u64);
-        offscreen_color_desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        offscreen_color_desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
-        let offscreen_color_texture = device.new_texture(&offscreen_color_desc);
+        let offscreen_color_texture =
+            create_offscreen_color_texture(&device, surface_size.width, surface_size.height);
         let upscale_pipeline = build_upscale_pipeline(&device)?;
         let upscale_uniform_buffer = device.new_buffer(
             std::mem::size_of::<UpscaleUniform>() as u64,
@@ -1528,8 +1637,10 @@ impl MetalBackend {
             depth_texture,
             z_prepass_pipeline,
             forward_pipeline,
+            forward_transparent_pipeline,
             depth_state_write,
             depth_state_equal,
+            depth_state_read,
             transform_buffers,
             view_proj_buffers,
             light_data_buffers,
@@ -1624,7 +1735,9 @@ impl MetalBackend {
         self.upload_lights(frame_slot, lb, lub, &snapshot);
         self.upload_shadows(frame_slot, spub, sub, &snapshot);
 
-        self.encode_shadow_pass(&command_buffer, tb, spub, draw_ranges);
+        if METAL_REAL_SHADOW_MAPS_ENABLED {
+            self.encode_shadow_pass(&command_buffer, tb, spub, draw_ranges);
+        }
 
         let (p, m, e) = self.encode_frame(
             &command_buffer,
@@ -1672,7 +1785,14 @@ impl MetalBackend {
 
 fn build_scene_pipelines(
     device: &Device,
-) -> Result<(RenderPipelineState, RenderPipelineState), MetalBackendError> {
+) -> Result<
+    (
+        RenderPipelineState,
+        RenderPipelineState,
+        RenderPipelineState,
+    ),
+    MetalBackendError,
+> {
     let mut shader_library =
         ShaderLibrary::new(device, SCENE_3D_MSL).map_err(MetalBackendError::ShaderCompilation)?;
     let scene_3d_layout = scene_3d_vertex_layout();
@@ -1706,7 +1826,20 @@ fn build_scene_pipelines(
         .map_err(MetalBackendError::PipelineCreation)?
         .clone();
 
-    Ok((z_prepass_pipeline, forward_pipeline))
+    let transparent_key = PipelineKey {
+        blend_mode: BlendMode::Alpha,
+        ..forward_key
+    };
+    let forward_transparent_pipeline = shader_library
+        .get_pipeline(&transparent_key, &scene_3d_layout)
+        .map_err(MetalBackendError::PipelineCreation)?
+        .clone();
+
+    Ok((
+        z_prepass_pipeline,
+        forward_pipeline,
+        forward_transparent_pipeline,
+    ))
 }
 
 fn build_shadow_pipeline(
@@ -1904,15 +2037,19 @@ fn create_depth_texture(device: &Device, width: u32, height: u32) -> Texture {
     device.new_texture(&desc)
 }
 
-#[cfg(test)]
 fn create_offscreen_color_texture(device: &Device, width: u32, height: u32) -> Texture {
     let desc = TextureDescriptor::new();
+    desc.set_texture_type(MTLTextureType::D2);
     desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
     desc.set_width(width as u64);
     desc.set_height(height as u64);
-    desc.set_usage(MTLTextureUsage::RenderTarget);
+    desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
     desc.set_storage_mode(metal::MTLStorageMode::Private);
     device.new_texture(&desc)
+}
+
+fn scene_clear_color() -> MTLClearColor {
+    MTLClearColor::new(0.07, 0.09, 0.12, 1.0)
 }
 
 fn build_depth_state(
@@ -1979,55 +2116,12 @@ mod tests {
         assert!(build_scene_pipelines(&device).is_ok());
     }
 
-    fn dummy_snapshot_with_instances(instance_count: usize) -> RenderStateSnapshot<'static> {
-        let transforms: Vec<FrameInstanceTransform> = (0..instance_count)
-            .map(|_| FrameInstanceTransform {
-                model: [
-                    [1.0, 0.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0, 0.0],
-                    [0.0, 0.0, 1.0, 0.0],
-                    [0.0, 0.0, 0.0, 1.0],
-                ],
-                color_rgba: [1.0; 4],
-                material_index: 0,
-                texture_index: 0,
-                flags: 0,
-                _padding: 0,
-            })
-            .collect();
-        let primitive_ranges = Box::leak(vec![FramePrimitiveRange {
-            primitive_code: 0,
-            first_instance: 0,
-            instance_count: instance_count as u32,
-            flags: 0,
-        }].into_boxed_slice());
-        let transforms = Box::leak(transforms.into_boxed_slice());
-        RenderStateSnapshot {
-            frame_id: 1,
-            camera_view_proj: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            camera_eye: [0.0, 12.0, 36.0, 1.0],
-            opaque_instance_count: instance_count as u32,
-            transparent_instance_count: 0,
-            primitive_ranges,
-            transforms,
-            materials: &[],
-            textures: &[],
-            lights: &[],
-            sprites: &[],
-            instance_bounds: &[],
-            vertices: &[],
-            indices: &[],
-        }
-    }
-
-    fn dummy_snapshot_with_translation(
+    fn dummy_snapshot(
         instance_count: usize,
         translation: [f32; 3],
+        range_flags: u32,
+        opaque_instance_count: u32,
+        transparent_instance_count: u32,
     ) -> RenderStateSnapshot<'static> {
         let transforms: Vec<FrameInstanceTransform> = (0..instance_count)
             .map(|_| FrameInstanceTransform {
@@ -2048,7 +2142,7 @@ mod tests {
             primitive_code: 0,
             first_instance: 0,
             instance_count: instance_count as u32,
-            flags: 0,
+            flags: range_flags,
         }].into_boxed_slice());
         let transforms = Box::leak(transforms.into_boxed_slice());
         RenderStateSnapshot {
@@ -2060,8 +2154,8 @@ mod tests {
                 [0.0, 0.0, 0.0, 1.0],
             ],
             camera_eye: [0.0, 12.0, 36.0, 1.0],
-            opaque_instance_count: instance_count as u32,
-            transparent_instance_count: 0,
+            opaque_instance_count,
+            transparent_instance_count,
             primitive_ranges,
             transforms,
             materials: &[],
@@ -2072,6 +2166,33 @@ mod tests {
             vertices: &[],
             indices: &[],
         }
+    }
+
+    fn dummy_snapshot_with_instances(instance_count: usize) -> RenderStateSnapshot<'static> {
+        dummy_snapshot(
+            instance_count,
+            [0.0, 0.0, 0.0],
+            0,
+            instance_count as u32,
+            0,
+        )
+    }
+
+    fn dummy_snapshot_with_translation(
+        instance_count: usize,
+        translation: [f32; 3],
+    ) -> RenderStateSnapshot<'static> {
+        dummy_snapshot(instance_count, translation, 0, instance_count as u32, 0)
+    }
+
+    fn dummy_transparent_snapshot(instance_count: usize) -> RenderStateSnapshot<'static> {
+        dummy_snapshot(
+            instance_count,
+            [0.0, 0.0, 0.0],
+            FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+            0,
+            instance_count as u32,
+        )
     }
 
     #[test]
@@ -2196,5 +2317,112 @@ mod tests {
             .expect("headless render failed");
         assert_eq!(telemetry.prepass_draw_calls, 0);
         assert_eq!(telemetry.main_pass_draw_calls, 1);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn headless_transparent_range_skips_opaque_prepass() {
+        let mut backend = match MetalBackend::new_for_test(MetalBackendConfig {
+            frames_in_flight: 1,
+            max_instances: 4,
+            occlusion_culling_enabled: true,
+            max_sprites: 4096,
+        }) {
+            Ok(backend) => backend,
+            Err(MetalBackendError::NoMetalDevice) => return,
+            Err(err) => panic!("unexpected Metal backend init error: {err}"),
+        };
+
+        let vertices: Vec<f32> = vec![
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
+            0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+        ];
+        let indices: Vec<u32> = vec![0, 1, 2];
+        let mesh = MeshSlot::new(backend.device(), &vertices, &indices, MTLIndexType::UInt32);
+        backend.bind_mesh_slot(0, mesh);
+
+        let snapshot = dummy_transparent_snapshot(1);
+        let telemetry = backend
+            .render_n_headless(snapshot)
+            .expect("headless render failed");
+        assert_eq!(telemetry.prepass_draw_calls, 0);
+        assert_eq!(telemetry.main_pass_draw_calls, 1);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn metal_shadow_maps_stay_disabled_until_projection_matches_wgpu() {
+        let backend = match MetalBackend::new_for_test(MetalBackendConfig {
+            frames_in_flight: 1,
+            max_instances: 4,
+            occlusion_culling_enabled: true,
+            max_sprites: 4096,
+        }) {
+            Ok(backend) => backend,
+            Err(MetalBackendError::NoMetalDevice) => return,
+            Err(err) => panic!("unexpected Metal backend init error: {err}"),
+        };
+
+        let lights = Box::leak(vec![FrameLightRecord {
+            position_kind: [0.0, 4.0, 0.0, 1.0],
+            direction_inner: [0.0, -1.0, 0.0, 0.9],
+            color_intensity: [1.0, 0.9, 0.7, 8.0],
+            params: [32.0, 0.8, 0.35, 1.0],
+            shadow: [1.0, 0.0, 0.0, 0.0],
+        }]
+        .into_boxed_slice());
+        let snapshot = RenderStateSnapshot {
+            frame_id: 1,
+            camera_view_proj: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            camera_eye: [0.0, 12.0, 36.0, 1.0],
+            opaque_instance_count: 0,
+            transparent_instance_count: 0,
+            primitive_ranges: &[],
+            transforms: &[],
+            materials: &[],
+            textures: &[],
+            lights,
+            sprites: &[],
+            instance_bounds: &[],
+            vertices: &[],
+            indices: &[],
+        };
+
+        let spub = &backend.shadow_pass_uniform_buffers[0];
+        let sub = &backend.shadow_uniform_buffers[0];
+        backend.upload_shadows(0, spub, sub, &snapshot);
+        let stored = unsafe { std::ptr::read_unaligned(sub.contents() as *const ShadowUniform) };
+        assert_eq!(stored.shadow_count, 0);
+        assert_eq!(stored.shadow_light_indices, [-1; 4]);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn resize_recreates_offscreen_color_target() {
+        let mut backend = match MetalBackend::new_for_test(MetalBackendConfig {
+            frames_in_flight: 1,
+            max_instances: 4,
+            occlusion_culling_enabled: true,
+            max_sprites: 4096,
+        }) {
+            Ok(backend) => backend,
+            Err(MetalBackendError::NoMetalDevice) => return,
+            Err(err) => panic!("unexpected Metal backend init error: {err}"),
+        };
+
+        backend
+            .resize(PhysicalSize::new(128, 96))
+            .expect("resize should recreate attachments");
+
+        assert_eq!(backend.offscreen_color_texture.width(), 128);
+        assert_eq!(backend.offscreen_color_texture.height(), 96);
+        assert_eq!(backend.depth_texture.width(), 128);
+        assert_eq!(backend.depth_texture.height(), 96);
     }
 }

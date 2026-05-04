@@ -19,6 +19,7 @@ const FLAG_TRANSPARENT: u32 = 1 << 0;
 const FLAG_MESH: u32 = 1 << 1;
 const FLAG_BOX: u32 = 1 << 2;
 const MATERIAL_FLAG_UNLIT: u32 = 1 << 0;
+const MAX_SHADOW_LIGHTS: usize = 4;
 
 /// Summary of one runtime-to-Vulkan snapshot build.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -117,8 +118,19 @@ pub fn build_vulkan_render_snapshot<'a>(
             });
         }
     }
-    for light in &draw.lights {
-        light_scratch.push(pack_light(light));
+    let mut shadow_slots = vec![-1i32; draw.lights.len()];
+    let mut shadow_slot = 0usize;
+    for (index, light) in draw.lights.iter().enumerate() {
+        if light.casts_shadow
+            && matches!(light.kind, SceneLightKind::Spot)
+            && shadow_slot < MAX_SHADOW_LIGHTS
+        {
+            shadow_slots[index] = shadow_slot as i32;
+            shadow_slot += 1;
+        }
+    }
+    for (index, light) in draw.lights.iter().enumerate() {
+        light_scratch.push(pack_light(light, shadow_slots[index]));
     }
     for sprite in &draw.sprites {
         sprite_scratch.push(pack_sprite(sprite));
@@ -322,15 +334,29 @@ fn instance_material_record(
     }
 }
 
-fn pack_light(light: &SceneLight) -> FrameLightRecord {
+fn normalize_vec3(vec: [f32; 3]) -> [f32; 3] {
+    let len_sq = vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2];
+    if len_sq <= 1e-12 {
+        return [0.0, -1.0, 0.0];
+    }
+    let inv_len = len_sq.sqrt().recip();
+    [vec[0] * inv_len, vec[1] * inv_len, vec[2] * inv_len]
+}
+
+fn pack_light(light: &SceneLight, shadow_slot: i32) -> FrameLightRecord {
     let (position_kind_w, inner_cos, outer_cos) = match light.kind {
         SceneLightKind::Point => (0.0, 1.0, 0.0),
         SceneLightKind::Spot => (
             1.0,
             light.inner_cone_deg.to_radians().cos(),
-            light.outer_cone_deg.to_radians().cos(),
+            light
+                .outer_cone_deg
+                .max(light.inner_cone_deg + 0.01)
+                .to_radians()
+                .cos(),
         ),
     };
+    let direction = normalize_vec3(light.direction);
     FrameLightRecord {
         position_kind: [
             light.position[0],
@@ -339,24 +365,33 @@ fn pack_light(light: &SceneLight) -> FrameLightRecord {
             position_kind_w,
         ],
         direction_inner: [
-            light.direction[0],
-            light.direction[1],
-            light.direction[2],
+            direction[0],
+            direction[1],
+            direction[2],
             inner_cos,
         ],
         color_intensity: [
-            light.color[0],
-            light.color[1],
-            light.color[2],
-            light.intensity,
+            light.color[0].clamp(0.0, 16.0),
+            light.color[1].clamp(0.0, 16.0),
+            light.color[2].clamp(0.0, 16.0),
+            if light.enabled {
+                light.intensity.max(0.0)
+            } else {
+                0.0
+            },
         ],
         params: [
-            light.range,
+            light.range.max(0.05),
             outer_cos,
-            light.softness,
-            light.specular_strength,
+            light.softness.clamp(0.0, 1.0),
+            light.specular_strength.clamp(0.0, 8.0),
         ],
-        shadow: [if light.casts_shadow { 1.0 } else { 0.0 }, -1.0, 0.0, 0.0],
+        shadow: [
+            if light.casts_shadow { 1.0 } else { 0.0 },
+            shadow_slot as f32,
+            0.0,
+            0.0,
+        ],
     }
 }
 
@@ -694,5 +729,84 @@ mod tests {
         assert!(snapshot.instance_bounds.is_empty());
         assert!(snapshot.vertices.is_empty());
         assert!(snapshot.indices.is_empty());
+    }
+
+    #[test]
+    fn light_snapshot_matches_wgpu_shadow_slot_and_clamps() {
+        let draw = RuntimeDrawFrame {
+            mode: RuntimeSceneMode::Spatial3d,
+            view_2d: None,
+            opaque_batches: Vec::new(),
+            transparent_batches: Vec::new(),
+            sprites: Vec::new(),
+            lights: vec![
+                SceneLight {
+                    id: 10,
+                    enabled: true,
+                    kind: SceneLightKind::Spot,
+                    direction: [0.0, -2.0, 0.0],
+                    color: [24.0, 0.5, -1.0],
+                    intensity: 6.0,
+                    range: 0.0,
+                    inner_cone_deg: 18.0,
+                    outer_cone_deg: 12.0,
+                    softness: 2.0,
+                    casts_shadow: true,
+                    specular_strength: 99.0,
+                    ..SceneLight::default()
+                },
+                SceneLight {
+                    id: 11,
+                    enabled: false,
+                    kind: SceneLightKind::Point,
+                    color: [0.2, 0.3, 0.4],
+                    intensity: 9.0,
+                    casts_shadow: false,
+                    ..SceneLight::default()
+                },
+            ],
+            stats: crate::draw_path::DrawFrameStats {
+                opaque_instances: 0,
+                transparent_instances: 0,
+                sprite_instances: 0,
+                light_instances: 2,
+                opaque_batches: 0,
+                transparent_batches: 0,
+                total_draw_calls: 0,
+            },
+        };
+
+        let mut transform_scratch = Vec::new();
+        let mut material_scratch = Vec::new();
+        let mut texture_scratch = Vec::new();
+        let mut light_scratch = Vec::new();
+        let mut primitive_range_scratch = Vec::new();
+        let mut sprite_scratch = Vec::new();
+        let mut sort_scratch = Vec::new();
+        let (snapshot, stats) = build_vulkan_render_snapshot(
+            5,
+            [[1.0, 0.0, 0.0, 0.0]; 4],
+            [0.0, 0.0, 0.0],
+            &draw,
+            &mut transform_scratch,
+            &mut material_scratch,
+            &mut texture_scratch,
+            &mut light_scratch,
+            &mut primitive_range_scratch,
+            &mut sprite_scratch,
+            &mut sort_scratch,
+        );
+
+        assert_eq!(stats.light_records, 2);
+        assert_eq!(snapshot.lights.len(), 2);
+        assert_eq!(snapshot.lights[0].shadow[1], 0.0);
+        assert_eq!(snapshot.lights[0].direction_inner[1], -1.0);
+        assert_eq!(snapshot.lights[0].color_intensity, [16.0, 0.5, 0.0, 6.0]);
+        assert_eq!(snapshot.lights[0].params[0], 0.05);
+        assert!(snapshot.lights[0].params[1] < snapshot.lights[0].direction_inner[3]);
+        assert_eq!(snapshot.lights[0].params[2], 1.0);
+        assert_eq!(snapshot.lights[0].params[3], 8.0);
+        assert_eq!(snapshot.lights[1].shadow[1], -1.0);
+        assert_eq!(snapshot.lights[1].color_intensity[3], 0.0);
     }
 }
