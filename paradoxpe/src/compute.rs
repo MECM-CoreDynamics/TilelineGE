@@ -177,9 +177,9 @@ impl PhysicsComputeStats {
 
 /// Engine-owned compute backend contract used by ParadoxPE hot phases.
 ///
-/// The first shipping slice only wires `dispatch_integrate` into the world step. Broadphase,
-/// narrowphase, and solver are intentionally left as staged follow-up work so the engine can land
-/// fail-soft integration before the native Vulkan compute path is fully authored.
+/// The first shipping slice wires `dispatch_integrate`. Broadphase, narrowphase, and solver
+/// are provided as default-fallback stubs so backends can opt-in incrementally without breaking
+/// the fail-soft contract.
 pub trait PhysicsComputeBackend: Send + Sync {
     fn backend_name(&self) -> &str;
 
@@ -197,4 +197,37 @@ pub trait PhysicsComputeBackend: Send + Sync {
         gravity: Vector3<f32>,
         fixed_dt: f32,
     ) -> PhysicsComputeDispatchResult;
+
+    /// Staged compute offload for broadphase (default: immediate CPU fallback).
+    fn dispatch_broadphase(
+        &self,
+        _request: PhysicsComputeDispatchRequest,
+        _bodies: &BodyRegistry,
+    ) -> PhysicsComputeDispatchResult {
+        PhysicsComputeDispatchResult::Fallback {
+            reason: Cow::Borrowed("broadphase compute not yet implemented"),
+        }
+    }
+
+    /// Staged compute offload for narrowphase (default: immediate CPU fallback).
+    fn dispatch_narrowphase(
+        &self,
+        _request: PhysicsComputeDispatchRequest,
+        _bodies: &BodyRegistry,
+    ) -> PhysicsComputeDispatchResult {
+        PhysicsComputeDispatchResult::Fallback {
+            reason: Cow::Borrowed("narrowphase compute not yet implemented"),
+        }
+    }
+
+    /// Staged compute offload for solver (default: immediate CPU fallback).
+    fn dispatch_solver(
+        &self,
+        _request: PhysicsComputeDispatchRequest,
+        _bodies: &mut BodyRegistry,
+    ) -> PhysicsComputeDispatchResult {
+        PhysicsComputeDispatchResult::Fallback {
+            reason: Cow::Borrowed("solver compute not yet implemented"),
+        }
+    }
 }
