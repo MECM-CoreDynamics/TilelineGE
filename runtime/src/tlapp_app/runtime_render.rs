@@ -193,10 +193,13 @@ impl TlAppRuntime {
             .queue_saturation_events
             .saturating_sub(self.last_physics_queue_saturation_events);
         self.last_physics_queue_saturation_events = tick_tuning_metrics.queue_saturation_events;
+        let step_timings = self.world.borrow().last_step_timings;
         let mut physics_backlog = evaluate_physics_backlog(
             &tick_tuning_metrics,
             recent_queue_saturation_events,
             self.physics_backlog_hold_timer > 0.0,
+            step_timings.candidate_pairs,
+            step_timings.manifold_count,
         );
         if physics_backlog.severe {
             self.physics_backlog_hold_timer =
@@ -211,6 +214,8 @@ impl TlAppRuntime {
             &tick_tuning_metrics,
             recent_queue_saturation_events,
             self.physics_backlog_hold_timer > 0.0,
+            step_timings.candidate_pairs,
+            step_timings.manifold_count,
         );
 
         self.poll_input_devices();

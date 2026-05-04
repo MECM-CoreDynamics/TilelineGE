@@ -189,6 +189,10 @@ pub struct PhysicsStepTimings {
     pub sleep_us: u64,
     pub flat_2d_us: u64,
     pub snapshot_us: u64,
+    /// Number of broadphase candidate pairs produced this step.
+    pub candidate_pairs: usize,
+    /// Number of manifolds actually built by narrowphase this step.
+    pub manifold_count: usize,
 }
 
 impl PhysicsStepTimings {
@@ -941,6 +945,7 @@ impl PhysicsWorld {
         timings.broadphase_mode = broadphase_stats.pair_scan_mode;
         timings.broadphase_serial_fallback_reason =
             broadphase_stats.pair_scan_serial_fallback_reason;
+        timings.candidate_pairs = broadphase_stats.candidate_pairs;
     }
 
     /// Phase 3 — narrowphase + solver: build manifolds, solve contacts and joints.
@@ -959,6 +964,7 @@ impl PhysicsWorld {
                 primary_shape_for_body(colliders, bodies, body)
             });
         timings.narrowphase_us += duration_us(t.elapsed());
+        timings.manifold_count = manifolds.len();
 
         let t = Instant::now();
         self.solver

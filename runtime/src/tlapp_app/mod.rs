@@ -2300,6 +2300,8 @@ fn evaluate_physics_backlog(
     metrics: &MpsThreadPoolMetrics,
     recent_queue_saturation_events: u64,
     hold_timer_active: bool,
+    candidate_pairs: usize,
+    manifold_count: usize,
 ) -> PhysicsBacklogState {
     let worker_count = metrics.worker_count.max(1) as f32;
     let queue_pressure = metrics.queued_jobs as f32 / worker_count;
@@ -2319,23 +2321,31 @@ fn evaluate_physics_backlog(
         0.0
     };
     let hold_pressure = if hold_timer_active { 0.35 } else { 0.0 };
+    // Contact pressure: high candidate pair / manifold counts add independent
+    // load that the MPS queue metrics alone do not capture.
+    let pair_pressure = (candidate_pairs as f32 / 10_000.0).clamp(0.0, 2.0);
+    let manifold_pressure = (manifold_count as f32 / 4_000.0).clamp(0.0, 2.0);
+    let contact_pressure = pair_pressure * 0.30 + manifold_pressure * 0.70;
     let score = queue_pressure * 0.95
         + inflight_pressure * 0.30
         + (hot_worker_ratio - 1.0).max(0.0) * 1.75
         + (phase_skew - 1.0).max(0.0) * 1.45
         + active_frame_pressure
         + saturation_pressure
-        + hold_pressure;
+        + hold_pressure
+        + contact_pressure * 0.55;
     let moderate = score > 0.95
         || queue_pressure > 0.35
         || hot_worker_ratio > 1.35
         || phase_skew > 1.30
-        || recent_queue_saturation_events > 0;
+        || recent_queue_saturation_events > 0
+        || contact_pressure > 0.45;
     let severe = score > 2.10
         || queue_pressure > 1.10
         || hot_worker_ratio > 1.70
         || phase_skew > 1.70
-        || recent_queue_saturation_events > 2;
+        || recent_queue_saturation_events > 2
+        || contact_pressure > 1.10;
     let block_ramp_up = hold_timer_active
         || moderate
         || (metrics.active_frame_id.is_some() && metrics.queued_jobs > 0);
