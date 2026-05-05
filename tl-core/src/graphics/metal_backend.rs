@@ -175,8 +175,6 @@ struct GpuInstance3d {
     base_color: [f32; 4],
     material_params: [f32; 4],
     emissive: [f32; 4],
-    texture_slot: u32,
-    _pad: u32,
 }
 
 #[repr(C)]
@@ -280,8 +278,6 @@ pub struct MetalBackend {
     sprite_instance_buffers: Vec<Buffer>,
     sprite_atlas_texture: Texture,
     sprite_sampler: SamplerState,
-    diffuse_texture_array: Texture,
-    diffuse_sampler: SamplerState,
     mesh_slots: std::collections::HashMap<u8, MeshSlot>,
     frame_pacing: FramePacing,
     snapshot_compressor: Option<crate::compression::SnapshotCompressor>,
@@ -509,13 +505,6 @@ impl MetalBackend {
         sprite_atlas_desc.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
         sprite_atlas_desc.set_usage(MTLTextureUsage::ShaderRead);
         let sprite_atlas_texture = device.new_texture(&sprite_atlas_desc);
-        let diffuse_texture_array = create_diffuse_texture_array(&device);
-        let diffuse_sampler_desc = SamplerDescriptor::new();
-        diffuse_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
-        diffuse_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
-        diffuse_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::Repeat);
-        diffuse_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::Repeat);
-        let diffuse_sampler = device.new_sampler(&diffuse_sampler_desc);
         let sprite_sampler_desc = SamplerDescriptor::new();
         sprite_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
         sprite_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
@@ -562,8 +551,6 @@ impl MetalBackend {
             sprite_instance_buffers,
             sprite_atlas_texture,
             sprite_sampler,
-            diffuse_texture_array,
-            diffuse_sampler,
             mesh_slots: std::collections::HashMap::new(),
             frame_pacing,
             snapshot_compressor,
@@ -605,22 +592,6 @@ impl MetalBackend {
         self.layer
             .set_drawable_size(CGSize::new(new_size.width as f64, new_size.height as f64));
         Ok(())
-    }
-
-    pub fn upload_diffuse_texture_slot(&mut self, slot: u32, rgba_pixels: &[u8]) {
-        let expected = (METAL_DIFFUSE_TILE_SIZE * METAL_DIFFUSE_TILE_SIZE * 4) as usize;
-        if rgba_pixels.len() != expected {
-            return;
-        }
-        let region = metal::MTLRegion::new_2d(0, 0, METAL_DIFFUSE_TILE_SIZE, METAL_DIFFUSE_TILE_SIZE);
-        self.diffuse_texture_array.replace_region_in_slice(
-            region,
-            0,
-            slot as u64,
-            rgba_pixels.as_ptr() as *const _,
-            (4 * METAL_DIFFUSE_TILE_SIZE) as u64,
-            (4 * METAL_DIFFUSE_TILE_SIZE * METAL_DIFFUSE_TILE_SIZE) as u64,
-        );
     }
 
     /// Write one render-visible snapshot into the selected frame slot.
@@ -686,12 +657,6 @@ impl MetalBackend {
                 .get(transform.material_index as usize)
                 .map(|material| (material.material_params, material.emissive_rgb))
                 .unwrap_or(([0.55, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0]));
-            let texture_slot = snapshot
-                .materials
-                .get(transform.material_index as usize)
-                .and_then(|m| snapshot.textures.get(m.texture_index as usize))
-                .map(|t| t.texture_slot)
-                .unwrap_or(0);
             self.instance_scratch.push(GpuInstance3d {
                 model_col0: transform.model[0],
                 model_col1: transform.model[1],
@@ -700,8 +665,6 @@ impl MetalBackend {
                 base_color: transform.color_rgba,
                 material_params,
                 emissive: [emissive_rgb[0], emissive_rgb[1], emissive_rgb[2], 0.0],
-                texture_slot,
-                _pad: 0,
             });
         }
     }
@@ -742,10 +705,10 @@ impl MetalBackend {
                 .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         });
         let cull_dist_sq = self.config.light_cull_distance * self.config.light_cull_distance;
-        let kept: Vec<&FrameLightRecord> = lights
+        let kept: Vec<FrameLightRecord> = lights
             .into_iter()
             .filter(|(dist_sq, _, _)| *dist_sq <= cull_dist_sq)
-            .map(|(_, _, light)| light)
+            .map(|(_, _, light)| *light)
             .take(self.config.max_lights)
             .collect();
         let lights_dropped = snapshot.lights.len().saturating_sub(kept.len());
@@ -1532,8 +1495,6 @@ impl MetalBackend {
                 encoder.set_fragment_buffer(3, Some(sub), 0);
                 encoder.set_fragment_texture(0, Some(&self.shadow_texture));
                 encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
-                encoder.set_fragment_texture(1, Some(&self.diffuse_texture_array));
-                encoder.set_fragment_sampler_state(1, Some(&self.diffuse_sampler));
                 for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
                     if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                         encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
@@ -1583,8 +1544,6 @@ impl MetalBackend {
                 encoder.set_fragment_buffer(3, Some(sub), 0);
                 encoder.set_fragment_texture(0, Some(&self.shadow_texture));
                 encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
-                encoder.set_fragment_texture(1, Some(&self.diffuse_texture_array));
-                encoder.set_fragment_sampler_state(1, Some(&self.diffuse_sampler));
                 for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
                     if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                         encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
@@ -1643,8 +1602,6 @@ impl MetalBackend {
             encoder.set_fragment_buffer(3, Some(sub), 0);
             encoder.set_fragment_texture(0, Some(&self.shadow_texture));
             encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
-            encoder.set_fragment_texture(1, Some(&self.diffuse_texture_array));
-            encoder.set_fragment_sampler_state(1, Some(&self.diffuse_sampler));
             for range in ranges.iter().filter(|range| Self::is_transparent_range(range)) {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
@@ -1844,13 +1801,6 @@ impl MetalBackend {
         sprite_atlas_desc.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
         sprite_atlas_desc.set_usage(MTLTextureUsage::ShaderRead);
         let sprite_atlas_texture = device.new_texture(&sprite_atlas_desc);
-        let diffuse_texture_array = create_diffuse_texture_array(&device);
-        let diffuse_sampler_desc = SamplerDescriptor::new();
-        diffuse_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
-        diffuse_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
-        diffuse_sampler_desc.set_address_mode_s(metal::MTLSamplerAddressMode::Repeat);
-        diffuse_sampler_desc.set_address_mode_t(metal::MTLSamplerAddressMode::Repeat);
-        let diffuse_sampler = device.new_sampler(&diffuse_sampler_desc);
         let sprite_sampler_desc = SamplerDescriptor::new();
         sprite_sampler_desc.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
         sprite_sampler_desc.set_mag_filter(metal::MTLSamplerMinMagFilter::Linear);
@@ -1897,8 +1847,6 @@ impl MetalBackend {
             sprite_instance_buffers,
             sprite_atlas_texture,
             sprite_sampler,
-            diffuse_texture_array,
-            diffuse_sampler,
             mesh_slots: std::collections::HashMap::new(),
             frame_pacing,
             snapshot_compressor,
@@ -2312,11 +2260,6 @@ fn scene_3d_vertex_layout() -> VertexLayout {
                         offset: 96,
                         buffer_index: 1,
                     },
-                    VertexAttributeDesc {
-                        format: MTLVertexFormat::UInt,
-                        offset: 112,
-                        buffer_index: 1,
-                    },
                 ],
             },
         ],
@@ -2336,39 +2279,12 @@ fn create_depth_texture(device: &Device, width: u32, height: u32) -> Texture {
 fn create_offscreen_color_texture(device: &Device, width: u32, height: u32) -> Texture {
     let desc = TextureDescriptor::new();
     desc.set_texture_type(MTLTextureType::D2);
-    desc.set_pixel_format(MTLPixelFormat::RGBA16Float);
+    desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
     desc.set_width(width as u64);
     desc.set_height(height as u64);
     desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
     desc.set_storage_mode(metal::MTLStorageMode::Private);
     device.new_texture(&desc)
-}
-
-const METAL_DIFFUSE_TILE_SIZE: u64 = 64;
-const METAL_DIFFUSE_LAYER_COUNT: u64 = 128;
-
-fn create_diffuse_texture_array(device: &Device) -> Texture {
-    let desc = TextureDescriptor::new();
-    desc.set_texture_type(MTLTextureType::D2Array);
-    desc.set_pixel_format(MTLPixelFormat::RGBA8Unorm);
-    desc.set_width(METAL_DIFFUSE_TILE_SIZE);
-    desc.set_height(METAL_DIFFUSE_TILE_SIZE);
-    desc.set_array_length(METAL_DIFFUSE_LAYER_COUNT);
-    desc.set_usage(MTLTextureUsage::ShaderRead);
-    desc.set_storage_mode(metal::MTLStorageMode::Shared);
-    let texture = device.new_texture(&desc);
-    // Initialize layer 0 to opaque white so un-textured instances render correctly.
-    let white = [255u8; 4 * 64 * 64];
-    let region = metal::MTLRegion::new_2d(0, 0, METAL_DIFFUSE_TILE_SIZE, METAL_DIFFUSE_TILE_SIZE);
-    texture.replace_region_in_slice(
-        region,
-        0,
-        0,
-        white.as_ptr() as *const _,
-        (4 * METAL_DIFFUSE_TILE_SIZE) as u64,
-        (4 * METAL_DIFFUSE_TILE_SIZE * METAL_DIFFUSE_TILE_SIZE) as u64,
-    );
-    texture
 }
 
 fn scene_clear_color() -> MTLClearColor {
