@@ -280,6 +280,7 @@ pub struct VulkanFrameExecutionTelemetry {
     pub multi_gpu_active: bool,
     pub multi_gpu_reason: String,
     pub shadow_pass_us: u64,
+    pub postfx_pass_us: u64,
 }
 
 #[derive(Debug)]
@@ -1205,6 +1206,8 @@ impl VulkanBackend {
             secondary_queue_executed,
             multi_gpu_active: plan.native_multi_gpu_active && self.secondary_device.is_some(),
             multi_gpu_reason: plan.native_multi_gpu_reason.clone(),
+            shadow_pass_us: 0,
+            postfx_pass_us: 0,
         })
     }
 }

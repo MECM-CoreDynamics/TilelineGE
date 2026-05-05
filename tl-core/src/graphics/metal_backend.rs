@@ -102,6 +102,7 @@ pub struct MetalFrameExecutionTelemetry {
     pub main_pass_draw_calls: u32,
     pub early_z_reject_estimate: u32,
     pub shadow_pass_us: u64,
+    pub postfx_pass_us: u64,
 }
 
 #[derive(Debug)]
@@ -1109,6 +1110,7 @@ impl MetalBackend {
                 lub,
             );
 
+            let postfx_start = std::time::Instant::now();
             self.encode_upscale_pass(
                 &command_buffer,
                 &self.offscreen_color_texture,
@@ -1119,6 +1121,7 @@ impl MetalBackend {
                 self.surface_size.height,
                 frame_slot,
             );
+            let postfx_pass_us = postfx_start.elapsed().as_micros() as u64;
 
             let pacing = self.frame_pacing.clone();
             let concrete = block::ConcreteBlock::new(move |_buffer: &metal::CommandBufferRef| {
@@ -1151,6 +1154,7 @@ impl MetalBackend {
                 main_pass_draw_calls,
                 early_z_reject_estimate,
                 shadow_pass_us,
+                postfx_pass_us,
             })
         } else {
             // No drawable available – return the pacing token immediately
@@ -1172,6 +1176,7 @@ impl MetalBackend {
                 main_pass_draw_calls: 0,
                 early_z_reject_estimate: 0,
                 shadow_pass_us: 0,
+                postfx_pass_us: 0,
             })
         }
     }
@@ -2007,6 +2012,7 @@ impl MetalBackend {
             main_pass_draw_calls,
             early_z_reject_estimate,
             shadow_pass_us,
+            postfx_pass_us: 0,
         })
     }
 }
@@ -2273,7 +2279,7 @@ fn create_depth_texture(device: &Device, width: u32, height: u32) -> Texture {
 fn create_offscreen_color_texture(device: &Device, width: u32, height: u32) -> Texture {
     let desc = TextureDescriptor::new();
     desc.set_texture_type(MTLTextureType::D2);
-    desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+    desc.set_pixel_format(MTLPixelFormat::RGBA16Float);
     desc.set_width(width as u64);
     desc.set_height(height as u64);
     desc.set_usage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);

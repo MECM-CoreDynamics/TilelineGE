@@ -91,6 +91,15 @@ vec2 scene_texture_uv(vec3 world_position) {
     return fract(abs(world_position.xz) * 0.17 + vec2(0.125, 0.375));
 }
 
+vec3 aces_tonemap(vec3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
 void main() {
     vec3 base_color = v_color.rgb;
     float alpha = v_color.a;
@@ -137,5 +146,7 @@ void main() {
         alpha = clamp(alpha + edge_boost * 0.32, 0.0, 1.0);
     }
 
-    out_color = vec4(lit_color, alpha);
+    vec3 tone_mapped = aces_tonemap(lit_color);
+    vec3 gamma_corrected = pow(tone_mapped, vec3(1.0 / 2.2));
+    out_color = vec4(gamma_corrected, alpha);
 }

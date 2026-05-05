@@ -420,6 +420,19 @@ vertex UpscaleVSOut upscale_vertex(uint vid [[vertex_id]]) {
     return out;
 }
 
+float3 aces_tonemap(float3 x) {
+    float a = 2.51;
+    float b = 0.03;
+    float c = 2.43;
+    float d = 0.59;
+    float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+float3 gamma_correct(float3 x) {
+    return pow(x, 1.0 / 2.2);
+}
+
 fragment float4 upscale_fragment(
     UpscaleVSOut in          [[stage_in]],
     texture2d<float> src_tex [[texture(0)]],
@@ -436,7 +449,10 @@ fragment float4 upscale_fragment(
     float4 s3 = src_tex.sample(src_smp, uv + float2(0.0, -texel.y));
     float4 neighborhood = (s0 + s1 + s2 + s3) * 0.25;
     float3 sharpened = center.rgb + (center.rgb - neighborhood.rgb) * (u_upscale.sharpness * 1.65);
-    return float4(max(sharpened, float3(0.0)), center.a);
+
+    float3 tone_mapped = aces_tonemap(max(sharpened, float3(0.0)));
+    float3 gamma_corrected = gamma_correct(tone_mapped);
+    return float4(gamma_corrected, center.a);
 }
 "#;
 
