@@ -101,6 +101,7 @@ pub struct MetalFrameExecutionTelemetry {
     pub prepass_draw_calls: u32,
     pub main_pass_draw_calls: u32,
     pub early_z_reject_estimate: u32,
+    pub shadow_pass_us: u64,
 }
 
 #[derive(Debug)]
@@ -1067,9 +1068,11 @@ impl MetalBackend {
             self.upload_lights(frame_slot, lb, lub, &snapshot);
             self.upload_shadows(frame_slot, spub, sub, &snapshot);
 
+            let shadow_start = std::time::Instant::now();
             if METAL_REAL_SHADOW_MAPS_ENABLED {
                 self.encode_shadow_pass(&command_buffer, tb, spub, &draw_ranges);
             }
+            let shadow_pass_us = shadow_start.elapsed().as_micros() as u64;
 
             let (p, m, e) = self.encode_frame(
                 &command_buffer,
@@ -1147,6 +1150,7 @@ impl MetalBackend {
                 prepass_draw_calls,
                 main_pass_draw_calls,
                 early_z_reject_estimate,
+                shadow_pass_us,
             })
         } else {
             // No drawable available – return the pacing token immediately
@@ -1167,6 +1171,7 @@ impl MetalBackend {
                 prepass_draw_calls: 0,
                 main_pass_draw_calls: 0,
                 early_z_reject_estimate: 0,
+                shadow_pass_us: 0,
             })
         }
     }
@@ -1955,9 +1960,11 @@ impl MetalBackend {
         self.upload_lights(frame_slot, lb, lub, &snapshot);
         self.upload_shadows(frame_slot, spub, sub, &snapshot);
 
+        let shadow_start = std::time::Instant::now();
         if METAL_REAL_SHADOW_MAPS_ENABLED {
             self.encode_shadow_pass(&command_buffer, tb, spub, &draw_ranges);
         }
+        let shadow_pass_us = shadow_start.elapsed().as_micros() as u64;
 
         let (p, m, e) = self.encode_frame(
             &command_buffer,
@@ -1999,6 +2006,7 @@ impl MetalBackend {
             prepass_draw_calls,
             main_pass_draw_calls,
             early_z_reject_estimate,
+            shadow_pass_us,
         })
     }
 }
@@ -2429,6 +2437,8 @@ mod tests {
             occlusion_culling_enabled: true,
             max_sprites: 4096,
             enable_snapshot_compression: false,
+            max_lights: 8,
+            light_cull_distance: 100.0,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2457,6 +2467,8 @@ mod tests {
             occlusion_culling_enabled: true,
             max_sprites: 4096,
             enable_snapshot_compression: false,
+            max_lights: 8,
+            light_cull_distance: 100.0,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2491,6 +2503,8 @@ mod tests {
             occlusion_culling_enabled: false,
             max_sprites: 4096,
             enable_snapshot_compression: false,
+            max_lights: 8,
+            light_cull_distance: 100.0,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2525,6 +2539,8 @@ mod tests {
             occlusion_culling_enabled: false,
             max_sprites: 4096,
             enable_snapshot_compression: false,
+            max_lights: 8,
+            light_cull_distance: 100.0,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2557,6 +2573,8 @@ mod tests {
             occlusion_culling_enabled: true,
             max_sprites: 4096,
             enable_snapshot_compression: false,
+            max_lights: 8,
+            light_cull_distance: 100.0,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2590,6 +2608,8 @@ mod tests {
             occlusion_culling_enabled: true,
             max_sprites: 4096,
             enable_snapshot_compression: false,
+            max_lights: 8,
+            light_cull_distance: 100.0,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2652,6 +2672,8 @@ mod tests {
             occlusion_culling_enabled: true,
             max_sprites: 4096,
             enable_snapshot_compression: false,
+            max_lights: 8,
+            light_cull_distance: 100.0,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,
@@ -2736,6 +2758,8 @@ mod tests {
             occlusion_culling_enabled: true,
             max_sprites: 4096,
             enable_snapshot_compression: false,
+            max_lights: 8,
+            light_cull_distance: 100.0,
         }) {
             Ok(backend) => backend,
             Err(MetalBackendError::NoMetalDevice) => return,

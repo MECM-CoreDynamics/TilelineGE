@@ -469,6 +469,11 @@ impl TlAppRuntime {
                 bridge.set_gms_budget(GmsScalerDomain::Ui, pct);
             }
         }
+        if self.gms_cli_override_light_budget_pct.is_none() {
+            if let Some(pct) = overrides.light_budget_pct {
+                bridge.set_gms_budget(GmsScalerDomain::Light, pct);
+            }
+        }
         if self.gms_cli_override_render_gpu.is_none() {
             if let Some(gpu) = overrides.render_gpu {
                 bridge.set_gms_gpu(GmsScalerDomain::Render, Some(gpu));
@@ -492,6 +497,11 @@ impl TlAppRuntime {
         if self.gms_cli_override_ui_gpu.is_none() {
             if let Some(gpu) = overrides.ui_gpu {
                 bridge.set_gms_gpu(GmsScalerDomain::Ui, Some(gpu));
+            }
+        }
+        if self.gms_cli_override_light_gpu.is_none() {
+            if let Some(gpu) = overrides.light_gpu {
+                bridge.set_gms_gpu(GmsScalerDomain::Light, Some(gpu));
             }
         }
         if self.gms_cli_override_auto_gpu_routing.is_none() {
@@ -577,6 +587,7 @@ impl TlAppRuntime {
             GmsScalerDomain::AiMl => self.gms_cli_override_ai_ml_budget_pct = Some(clamped),
             GmsScalerDomain::PostFx => self.gms_cli_override_postfx_budget_pct = Some(clamped),
             GmsScalerDomain::Ui => self.gms_cli_override_ui_budget_pct = Some(clamped),
+            GmsScalerDomain::Light => self.gms_cli_override_light_budget_pct = Some(clamped),
         }
         bridge.set_gms_budget(domain, clamped);
         self.runtime_bridge_metrics = bridge.metrics();
@@ -606,6 +617,7 @@ impl TlAppRuntime {
             GmsScalerDomain::AiMl => self.gms_cli_override_ai_ml_gpu = gpu,
             GmsScalerDomain::PostFx => self.gms_cli_override_postfx_gpu = gpu,
             GmsScalerDomain::Ui => self.gms_cli_override_ui_gpu = gpu,
+            GmsScalerDomain::Light => self.gms_cli_override_light_gpu = gpu,
         }
         bridge.set_gms_gpu(domain, gpu);
         self.runtime_bridge_metrics = bridge.metrics();

@@ -495,6 +495,20 @@ pub fn parse_tlpfile(source: &str) -> TlpfileParseOutcome {
                         message: format!("invalid gms_scaler.ui_budget_pct '{value}'"),
                     }),
                 },
+                "light_budget_pct" => match value.parse::<u8>() {
+                    Ok(v) if v <= 100 => project_gms_scaler.budgets.light_budget_pct = v,
+                    Ok(_) => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: "gms_scaler.light_budget_pct must be in 0..=100".to_string(),
+                    }),
+                    Err(_) => diagnostics.push(TlpfileDiagnostic {
+                        level: TlpfileDiagnosticLevel::Error,
+                        line: line_no,
+                        message: format!("invalid gms_scaler.light_budget_pct '{value}'"),
+                    }),
+                },
+                "light_gpu" => project_gms_scaler.budgets.light_gpu = parse_gpu_index(value, line_no, &mut diagnostics),
                 "render_gpu" => project_gms_scaler.budgets.render_gpu = parse_gpu_index(value, line_no, &mut diagnostics),
                 "physics_gpu" => project_gms_scaler.budgets.physics_gpu = parse_gpu_index(value, line_no, &mut diagnostics),
                 "ai_ml_gpu" => project_gms_scaler.budgets.ai_ml_gpu = parse_gpu_index(value, line_no, &mut diagnostics),

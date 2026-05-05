@@ -1377,7 +1377,7 @@ impl TlAppRuntime {
                 .map(|budgets| {
                     let gpu = |g: Option<u8>| g.map(|v| format!("@{v}")).unwrap_or_else(|| "@a".to_string());
                     format!(
-                        "r{}{}-p{}{}-a{}{}-x{}{}-u{}{}",
+                        "r{}{}-p{}{}-a{}{}-x{}{}-u{}{}-l{}{}",
                         budgets.render_budget_pct,
                         gpu(budgets.render_gpu),
                         budgets.physics_budget_pct,
@@ -1388,6 +1388,8 @@ impl TlAppRuntime {
                         gpu(budgets.postfx_gpu),
                         budgets.ui_budget_pct,
                         gpu(budgets.ui_gpu),
+                        budgets.light_budget_pct,
+                        gpu(budgets.light_gpu),
                     )
                 })
                 .unwrap_or_else(|| "n/a".to_string());

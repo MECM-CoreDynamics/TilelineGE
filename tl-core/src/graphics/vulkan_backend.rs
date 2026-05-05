@@ -279,6 +279,7 @@ pub struct VulkanFrameExecutionTelemetry {
     pub secondary_queue_executed: bool,
     pub multi_gpu_active: bool,
     pub multi_gpu_reason: String,
+    pub shadow_pass_us: u64,
 }
 
 #[derive(Debug)]

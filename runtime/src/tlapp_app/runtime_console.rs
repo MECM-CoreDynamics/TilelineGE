@@ -1165,7 +1165,7 @@ impl TlAppRuntime {
                             "gms.status",
                             "gms.mode <adaptive|fixed>",
                             "gms.target_fps <n>",
-                            "gms.budget <render|physics|ai_ml|postfx|ui> <pct>",
+                            "gms.budget <render|physics|ai_ml|postfx|ui|light> <pct>",
                             "gms.guardrail <balanced|aggressive|relaxed>",
                         ]),
                         "perf" => Some(vec![
@@ -1296,7 +1296,7 @@ impl TlAppRuntime {
             "gms.budget" => {
                 let Some(raw_domain) = parts.next() else {
                     self.console_feedback(
-                        "usage: gms.budget <render|physics|ai_ml|postfx|ui> <pct>",
+                        "usage: gms.budget <render|physics|ai_ml|postfx|ui|light> <pct>",
                     );
                     return RuntimeCommand::Consumed;
                 };
@@ -1308,7 +1308,7 @@ impl TlAppRuntime {
                 };
                 let Some(domain) = GmsScalerDomain::parse(raw_domain) else {
                     self.console_feedback(
-                        "invalid domain (expected render|physics|ai_ml|postfx|ui)",
+                        "invalid domain (expected render|physics|ai_ml|postfx|ui|light)",
                     );
                     return RuntimeCommand::Consumed;
                 };
@@ -1327,7 +1327,7 @@ impl TlAppRuntime {
             "gms.gpu" => {
                 let Some(raw_domain) = parts.next() else {
                     self.console_feedback(
-                        "usage: gms.gpu <render|physics|ai_ml|postfx|ui> <auto|0|1|2|...>",
+                        "usage: gms.gpu <render|physics|ai_ml|postfx|ui|light> <auto|0|1|2|...>",
                     );
                     return RuntimeCommand::Consumed;
                 };

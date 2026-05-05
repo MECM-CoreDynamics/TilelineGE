@@ -244,6 +244,7 @@ pub enum GmsScalerDomain {
     AiMl,
     PostFx,
     Ui,
+    Light,
 }
 
 impl GmsScalerDomain {
@@ -254,6 +255,7 @@ impl GmsScalerDomain {
             "ai_ml" | "aiml" | "ml" | "ai" => Some(Self::AiMl),
             "postfx" | "post_fx" | "post" => Some(Self::PostFx),
             "ui" => Some(Self::Ui),
+            "light" | "lights" => Some(Self::Light),
             _ => None,
         }
     }
@@ -265,6 +267,7 @@ impl GmsScalerDomain {
             Self::AiMl => "ai_ml",
             Self::PostFx => "postfx",
             Self::Ui => "ui",
+            Self::Light => "light",
         }
     }
 }
@@ -276,12 +279,14 @@ pub struct GmsDomainBudgets {
     pub ai_ml_budget_pct: u8,
     pub postfx_budget_pct: u8,
     pub ui_budget_pct: u8,
+    pub light_budget_pct: u8,
     /// Optional per-domain GPU pinning. `None` means follow auto-routing.
     pub render_gpu: Option<u8>,
     pub physics_gpu: Option<u8>,
     pub ai_ml_gpu: Option<u8>,
     pub postfx_gpu: Option<u8>,
     pub ui_gpu: Option<u8>,
+    pub light_gpu: Option<u8>,
 }
 
 impl Default for GmsDomainBudgets {
@@ -292,11 +297,13 @@ impl Default for GmsDomainBudgets {
             ai_ml_budget_pct: 20,
             postfx_budget_pct: 10,
             ui_budget_pct: 0,
+            light_budget_pct: 10,
             render_gpu: None,
             physics_gpu: None,
             ai_ml_gpu: None,
             postfx_gpu: None,
             ui_gpu: None,
+            light_gpu: None,
         }
     }
 }
@@ -337,6 +344,7 @@ impl GmsScalerConfig {
             GmsScalerDomain::AiMl => self.budgets.ai_ml_budget_pct = pct.min(100),
             GmsScalerDomain::PostFx => self.budgets.postfx_budget_pct = pct.min(100),
             GmsScalerDomain::Ui => self.budgets.ui_budget_pct = pct.min(100),
+            GmsScalerDomain::Light => self.budgets.light_budget_pct = pct.min(100),
         }
     }
 
@@ -347,6 +355,7 @@ impl GmsScalerConfig {
             GmsScalerDomain::AiMl => self.budgets.ai_ml_gpu = gpu,
             GmsScalerDomain::PostFx => self.budgets.postfx_gpu = gpu,
             GmsScalerDomain::Ui => self.budgets.ui_gpu = gpu,
+            GmsScalerDomain::Light => self.budgets.light_gpu = gpu,
         }
     }
 }
@@ -573,7 +582,7 @@ impl RuntimeBridgeOrchestrator {
             1.0 - (self.gms_ai_ml_kept_jobs as f64 / requested as f64).clamp(0.0, 1.0);
         let gpu_str = |gpu: Option<u8>| gpu.map(|g| format!("@GPU{g}")).unwrap_or_else(|| "@auto".to_string());
         Some(format!(
-            "gms scaler | mode={} target_fps={} guardrail={} profile={} auto_gpu={} budgets[render={}{} physics={}{} ai_ml={}{} postfx={}{} ui={}{}] min_physics={} lane_q={} sm_cu_utilization={:.2} ai_ml_drop_rate={:.3}{}",
+            "gms scaler | mode={} target_fps={} guardrail={} profile={} auto_gpu={} budgets[render={}{} physics={}{} ai_ml={}{} postfx={}{} ui={}{} light={}{}] min_physics={} lane_q={} sm_cu_utilization={:.2} ai_ml_drop_rate={:.3}{}",
             self.gms_scaler.mode.as_str(),
             self.gms_scaler.target_fps,
             self.gms_scaler.guardrail.as_str(),
@@ -589,6 +598,8 @@ impl RuntimeBridgeOrchestrator {
             gpu_str(self.gms_scaler.budgets.postfx_gpu),
             self.gms_scaler.budgets.ui_budget_pct,
             gpu_str(self.gms_scaler.budgets.ui_gpu),
+            self.gms_scaler.budgets.light_budget_pct,
+            gpu_str(self.gms_scaler.budgets.light_gpu),
             self.gms_scaler.min_physics_budget_pct,
             self.gms_last_lane_queue_depth,
             self.gms_last_sm_cu_utilization,

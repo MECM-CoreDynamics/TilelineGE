@@ -920,6 +920,8 @@ impl TlAppRuntime {
             gms_cli_override_ai_ml_gpu: None,
             gms_cli_override_postfx_gpu: None,
             gms_cli_override_ui_gpu: None,
+            gms_cli_override_light_budget_pct: None,
+            gms_cli_override_light_gpu: None,
             gms_cli_override_auto_gpu_routing: None,
             mls_cli_override_mode: None,
             mls_cli_override_backend: None,

@@ -481,11 +481,13 @@ pub struct TlscriptGmsScalerOverride {
     pub ai_ml_budget_pct: Option<u8>,
     pub postfx_budget_pct: Option<u8>,
     pub ui_budget_pct: Option<u8>,
+    pub light_budget_pct: Option<u8>,
     pub render_gpu: Option<u8>,
     pub physics_gpu: Option<u8>,
     pub ai_ml_gpu: Option<u8>,
     pub postfx_gpu: Option<u8>,
     pub ui_gpu: Option<u8>,
+    pub light_gpu: Option<u8>,
     pub auto_gpu_routing: Option<bool>,
 }
 
@@ -497,6 +499,7 @@ impl TlscriptGmsScalerOverride {
             GmsScalerDomain::AiMl => self.ai_ml_budget_pct = Some(value.min(100)),
             GmsScalerDomain::PostFx => self.postfx_budget_pct = Some(value.min(100)),
             GmsScalerDomain::Ui => self.ui_budget_pct = Some(value.min(100)),
+            GmsScalerDomain::Light => self.light_budget_pct = Some(value.min(100)),
         }
     }
 
@@ -507,6 +510,7 @@ impl TlscriptGmsScalerOverride {
             GmsScalerDomain::AiMl => self.ai_ml_gpu = value,
             GmsScalerDomain::PostFx => self.postfx_gpu = value,
             GmsScalerDomain::Ui => self.ui_gpu = value,
+            GmsScalerDomain::Light => self.light_gpu = value,
         }
     }
 }
