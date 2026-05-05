@@ -419,6 +419,7 @@ fn resolve_rt_status(mode: RayTracingMode, supports_ray_query: bool) -> SceneRay
             rt_dynamic_count: 0,
             rt_dynamic_cap: RT_DYNAMIC_CAP,
             supports_ray_query,
+            as_build_us: 0,
         },
         RayTracingMode::Auto => SceneRayTracingStatus {
             mode,
@@ -432,6 +433,7 @@ fn resolve_rt_status(mode: RayTracingMode, supports_ray_query: bool) -> SceneRay
             rt_dynamic_count: 0,
             rt_dynamic_cap: RT_DYNAMIC_CAP,
             supports_ray_query,
+            as_build_us: 0,
         },
         RayTracingMode::On => SceneRayTracingStatus {
             mode,
@@ -445,6 +447,7 @@ fn resolve_rt_status(mode: RayTracingMode, supports_ray_query: bool) -> SceneRay
             rt_dynamic_count: 0,
             rt_dynamic_cap: RT_DYNAMIC_CAP,
             supports_ray_query,
+            as_build_us: 0,
         },
     }
 }

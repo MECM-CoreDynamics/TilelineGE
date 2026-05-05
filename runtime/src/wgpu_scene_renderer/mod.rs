@@ -217,6 +217,8 @@ pub struct SceneRayTracingStatus {
     pub rt_dynamic_count: u32,
     pub rt_dynamic_cap: u32,
     pub supports_ray_query: bool,
+    /// CPU-side AS build command recording time in microseconds (last frame).
+    pub as_build_us: u64,
 }
 
 struct GpuMesh {
@@ -307,6 +309,10 @@ pub struct WgpuSceneRenderer {
     pipeline_transparent_rt: Option<wgpu::RenderPipeline>,
     /// CPU-side instance list rebuilt every upload_draw_frame call; fed into the TLAS.
     rt_instances: Vec<RtInstance>,
+    /// CPU-side AS build recording time for the last frame (microseconds).
+    last_rt_build_us: u64,
+    /// True if the last frame's AS build exceeded the 2ms budget.
+    rt_budget_exceeded: bool,
     fsr_config: FsrConfig,
     fsr_status: FsrStatus,
     surface_width: u32,
@@ -859,6 +865,8 @@ impl WgpuSceneRenderer {
             shadow_pass_buffers,
             shadow_pass_bind_groups,
             pipeline_shadow,
+            last_rt_build_us: 0,
+            rt_budget_exceeded: false,
             shadow_active_count: 0,
         };
         renderer.write_camera_uniform(queue, surface_width.max(1), surface_height.max(1));
@@ -1253,6 +1261,14 @@ impl WgpuSceneRenderer {
             return;
         }
 
+        // Budget guard: if last frame exceeded the 2ms AS build budget, skip this frame
+        // and keep using the stale TLAS.
+        if self.rt_budget_exceeded {
+            self.ray_tracing_status.fallback_reason = "stale_tlas: as build budget exceeded last frame".to_string();
+            self.last_rt_build_us = 0;
+            return;
+        }
+
         let cap = self.ray_tracing_status.rt_dynamic_cap as usize;
         let inst_count = self.rt_instances.len().min(cap);
 
@@ -1280,10 +1296,27 @@ impl WgpuSceneRenderer {
             tlas[i] = None;
         }
 
+        let start = std::time::Instant::now();
         encoder.build_acceleration_structures(
             std::iter::empty::<&wgpu::BlasBuildEntry>(),
             std::iter::once(&*tlas),
         );
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        self.last_rt_build_us = elapsed_us;
+
+        const AS_BUILD_BUDGET_US: u64 = 2000;
+        if elapsed_us > AS_BUILD_BUDGET_US {
+            self.rt_budget_exceeded = true;
+            self.ray_tracing_status.fallback_reason =
+                format!("budget_exceeded: as build took {elapsed_us}us (budget {AS_BUILD_BUDGET_US}us)");
+        } else {
+            self.rt_budget_exceeded = false;
+            if self.ray_tracing_status.fallback_reason.starts_with("budget_exceeded")
+                || self.ray_tracing_status.fallback_reason.starts_with("stale_tlas")
+            {
+                self.ray_tracing_status.fallback_reason.clear();
+            }
+        }
     }
 
     /// Upload console/UI overlay sprites that must be rendered at native surface resolution.
@@ -1355,7 +1388,9 @@ impl WgpuSceneRenderer {
 
     /// Current renderer RT status snapshot.
     pub fn ray_tracing_status(&self) -> SceneRayTracingStatus {
-        self.ray_tracing_status.clone()
+        let mut status = self.ray_tracing_status.clone();
+        status.as_build_us = self.last_rt_build_us;
+        status
     }
 
     /// Configure FSR policy (mode/quality/sharpness) with fail-soft backend fallback.
@@ -2019,6 +2054,7 @@ fn resolve_rt_status(mode: RayTracingMode, supports_ray_query: bool) -> SceneRay
             rt_dynamic_count: 0,
             rt_dynamic_cap: RT_DYNAMIC_CAP,
             supports_ray_query,
+            as_build_us: 0,
         },
         RayTracingMode::Auto => SceneRayTracingStatus {
             mode,
@@ -2032,6 +2068,7 @@ fn resolve_rt_status(mode: RayTracingMode, supports_ray_query: bool) -> SceneRay
             rt_dynamic_count: 0,
             rt_dynamic_cap: RT_DYNAMIC_CAP,
             supports_ray_query,
+            as_build_us: 0,
         },
         RayTracingMode::On => SceneRayTracingStatus {
             mode,
@@ -2045,6 +2082,7 @@ fn resolve_rt_status(mode: RayTracingMode, supports_ray_query: bool) -> SceneRay
             rt_dynamic_count: 0,
             rt_dynamic_cap: RT_DYNAMIC_CAP,
             supports_ray_query,
+            as_build_us: 0,
         },
     }
 }
