@@ -1264,6 +1264,8 @@ struct TlAppRuntime {
     shutdown_prepared: bool,
     logged_metal_first_frame: bool,
     phase_order: RuntimePhaseOrderTracker,
+    network_transport: Option<crate::network_transport::NetworkTransportRuntime>,
+    network_socket: Option<tokio::net::UdpSocket>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

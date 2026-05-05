@@ -3,6 +3,7 @@
 //! This module appends deterministic HUD sprites directly onto `SceneFrameInstances::sprites`.
 //! It is renderer-agnostic and can be consumed by either GMS/MGS draw paths.
 
+use crate::network_transport::NetworkPumpResult;
 use crate::scene::{RayTracingMode, SpriteInstance, SpriteKind};
 
 /// Input telemetry for HUD composition.
@@ -17,6 +18,7 @@ pub struct TelemetryHudSample {
     pub rt_active: bool,
     pub rt_dynamic_count: u32,
     pub rt_fallback: bool,
+    pub network_pump: Option<NetworkPumpResult>,
 }
 
 /// HUD configuration.
@@ -88,7 +90,7 @@ impl TelemetryHudComposer {
                 cfg.anchor_top_left[1] - 0.092,
                 0.0,
             ],
-            size: [cfg.width, 0.205],
+            size: [cfg.width, 0.235],
             rotation_rad: 0.0,
             color_rgba: [0.05, 0.07, 0.10, 0.70],
             texture_slot: 0,
@@ -168,6 +170,28 @@ impl TelemetryHudComposer {
             [0.20, 0.16, 0.26, 0.82],
         );
 
+        // Network transport health bar.
+        let net_fill = if let Some(pump) = sample.network_pump {
+            let total = pump.recv_datagrams + pump.sent_datagrams;
+            if total > 0 { 0.75 } else { 0.15 }
+        } else {
+            0.05
+        };
+        let net_color = if sample.network_pump.is_some() {
+            [0.36, 0.92, 0.72, 0.92]
+        } else {
+            [0.44, 0.50, 0.60, 0.80]
+        };
+        self.push_meter(
+            sprites,
+            6,
+            6,
+            5.0,
+            net_fill,
+            net_color,
+            [0.14, 0.22, 0.18, 0.82],
+        );
+
         TelemetryHudMetrics {
             appended_sprites: sprites.len().saturating_sub(start_len),
         }
@@ -240,11 +264,12 @@ mod tests {
                 rt_active: false,
                 rt_dynamic_count: 0,
                 rt_fallback: false,
+                network_pump: None,
             },
             &mut sprites,
         );
-        assert_eq!(m.appended_sprites, 11);
-        assert_eq!(sprites.len(), 11);
+        assert_eq!(m.appended_sprites, 13);
+        assert_eq!(sprites.len(), 13);
     }
 
     #[test]
@@ -262,6 +287,7 @@ mod tests {
                 rt_active: true,
                 rt_dynamic_count: 2_048,
                 rt_fallback: false,
+                network_pump: None,
             },
             &mut sprites,
         );

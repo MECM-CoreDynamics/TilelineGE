@@ -191,6 +191,7 @@ impl TlAppRuntime {
         self.frame_started_at = frame_begin;
         let frame_sequence = self.phase_order.begin_frame();
         let mut phase_order_valid = true;
+        let mut network_pump: Option<crate::network_transport::NetworkPumpResult> = None;
         self.physics_backlog_hold_timer = (self.physics_backlog_hold_timer - sim_dt).max(0.0);
         let recent_queue_saturation_events = tick_tuning_metrics
             .queue_saturation_events
@@ -232,6 +233,20 @@ impl TlAppRuntime {
             .phase_order
             .enter_phase(RuntimeFramePhase::Network)
             .is_ok();
+        if let (Some(transport), Some(socket)) = (
+            self.network_transport.as_mut(),
+            self.network_socket.as_ref(),
+        ) {
+            let bootstrap_tick = 0;
+            let _queued = transport.begin_bootstrap_for_all_peers(bootstrap_tick);
+            match transport.pump_nonblocking(socket) {
+                Ok(pump) => network_pump = Some(pump),
+                Err(err) => eprintln!("[network] pump error: {err}"),
+            }
+            let _decoded = transport.drain_decoded_packets(256);
+            let _decode_failures = transport.drain_decode_failures(128);
+            let _encode_failures = transport.drain_encode_failures(128);
+        }
 
         if let (Some(sprite_loader), Some(sprite_cache)) =
             (self.sprite_loader.as_mut(), self.sprite_cache.as_mut())
@@ -1029,6 +1044,7 @@ impl TlAppRuntime {
                 draw_calls: frame.opaque_3d.len()
                     + frame.transparent_3d.len()
                     + frame.sprites.len(),
+                network_pump,
                 rt_mode: self.rt_mode,
                 rt_active: self.renderer.ray_tracing_status().active,
                 rt_dynamic_count: self.renderer.ray_tracing_status().rt_dynamic_count,
@@ -1115,6 +1131,10 @@ impl TlAppRuntime {
                 sim_dt
             };
             self.physics_token = Some(self.world.step_begin(step_dt));
+            if let Some(transport) = self.network_transport.as_mut() {
+                let world = self.world.borrow();
+                transport.queue_paradox_snapshot_if_due(&*world);
+            }
         } else {
             self.script_last_spawned = 0;
             self.last_tick = BounceTankTickMetrics {

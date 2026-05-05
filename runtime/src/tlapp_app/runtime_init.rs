@@ -1,4 +1,6 @@
 use super::*;
+use crate::network_transport::NetworkTransportRuntime;
+use tokio::net::UdpSocket;
 
 impl TlAppRuntime {
     pub(super) fn new(
@@ -810,6 +812,20 @@ impl TlAppRuntime {
         let frame_cap_interval = frame_cap_interval.map(Duration::from_secs_f32);
         let fps_report_interval = options.fps_report_interval;
 
+        let (network_transport, network_socket) = if options.network_enabled {
+            let std_socket = std::net::UdpSocket::bind(&options.network_bind_addr)
+                .map_err(|e| format!("failed to bind UDP socket to {}: {e}", options.network_bind_addr))?;
+            std_socket.set_nonblocking(true)
+                .map_err(|e| format!("failed to set UDP socket nonblocking: {e}"))?;
+            let tokio_socket = UdpSocket::from_std(std_socket)
+                .map_err(|e| format!("failed to wrap std UDP socket in tokio: {e}"))?;
+            let transport = NetworkTransportRuntime::new(Default::default(), Default::default());
+            eprintln!("[network] transport enabled on {}", options.network_bind_addr);
+            (Some(transport), Some(tokio_socket))
+        } else {
+            (None, None)
+        };
+
         let mut runtime = Self {
             cli_options: options.clone(),
             file_io_root,
@@ -947,6 +963,8 @@ impl TlAppRuntime {
             shutdown_prepared: false,
             logged_metal_first_frame: false,
             phase_order: RuntimePhaseOrderTracker::default(),
+            network_transport,
+            network_socket,
         };
         runtime.sync_console_quick_fields_from_runtime();
         Ok(runtime)

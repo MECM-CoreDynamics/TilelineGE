@@ -33,6 +33,8 @@ pub struct CliOptions {
     pub ini_path: Option<PathBuf>,
     pub pak_path: Option<PathBuf>,
     pub performance_profile: PerformanceProfile,
+    pub network_enabled: bool,
+    pub network_bind_addr: String,
 }
 
 impl Default for CliOptions {
@@ -61,6 +63,8 @@ impl Default for CliOptions {
             ini_path: None,
             pak_path: None,
             performance_profile: PerformanceProfile::Balanced,
+            network_enabled: false,
+            network_bind_addr: "127.0.0.1:0".to_string(),
         }
     }
 }
@@ -542,6 +546,14 @@ fn parse_cli_overrides(args: &[String], options: &mut CliOptions) -> Result<bool
                     },
                 )?;
             }
+            "--network" => {
+                let value = next_arg(&mut iter, "--network")?;
+                options.network_enabled = matches!(value.trim().to_ascii_lowercase().as_str(), "on" | "true" | "1" | "yes" | "enabled");
+            }
+            "--network-bind" => {
+                let value = next_arg(&mut iter, "--network-bind")?;
+                options.network_bind_addr = value.trim().to_string();
+            }
             other => {
                 return Err(format!("unknown argument: {other} (use --help)").into());
             }
@@ -606,6 +618,12 @@ fn apply_ini_overrides(
                         "invalid perf_mode value in ini (expected balanced|aggressive|heimdall)".into()
                     },
                 )?
+            }
+            "network_enabled" | "network" => {
+                options.network_enabled = matches!(value.trim().to_ascii_lowercase().as_str(), "on" | "true" | "1" | "yes" | "enabled");
+            }
+            "network_bind_addr" | "network_bind" => {
+                options.network_bind_addr = value.trim().to_string();
             }
             "ini" | "ini_path" => warnings.push(format!(
                 "{}:{}: '{}' key is ignored (ini recursion is not supported)",
@@ -712,6 +730,8 @@ fn print_usage() {
     println!(
         "  --sprite <path>           .tlsprite path (default: docs/demos/tlapp/bounce_hud.tlsprite)"
     );
+    println!("  --network <on|off>        Enable NPS network transport (default: off)");
+    println!("  --network-bind <addr>     UDP bind address (default: 127.0.0.1:0)");
     println!(
         "  --perf-mode <mode>        Performance profile: balanced|aggressive|heimdall (default: balanced)"
     );
