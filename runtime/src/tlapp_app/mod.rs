@@ -31,6 +31,7 @@ pub use self::console::{
 pub use self::fps::{FpsReport, FpsTracker, RenderDistanceStats};
 
 use crate::physics_mps_runner::{PhysicsMpsRunner, PhysicsStepToken};
+use crate::RuntimePhaseOrderTracker;
 use crate::{
     app_runner, apply_scene_light_overrides, choose_scheduler_path_for_platform_from_adapter,
     clamp_scene_lights_for_camera, compile_tljoint_scene_from_path,
@@ -1262,6 +1263,7 @@ struct TlAppRuntime {
     fsr_dynamo_scale: f32,
     shutdown_prepared: bool,
     logged_metal_first_frame: bool,
+    phase_order: RuntimePhaseOrderTracker,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

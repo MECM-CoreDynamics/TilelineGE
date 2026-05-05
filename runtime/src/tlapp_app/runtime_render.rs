@@ -1,4 +1,5 @@
 use super::*;
+use crate::RuntimeFramePhase;
 
 impl TlAppRuntime {
     pub(super) fn schedule_next_redraw(&mut self, event_loop: &ActiveEventLoop) {
@@ -188,6 +189,8 @@ impl TlAppRuntime {
             self.frame_time_jitter_ema_ms += (frame_delta - self.frame_time_jitter_ema_ms) * 0.16;
         }
         self.frame_started_at = frame_begin;
+        let frame_sequence = self.phase_order.begin_frame();
+        let mut phase_order_valid = true;
         self.physics_backlog_hold_timer = (self.physics_backlog_hold_timer - sim_dt).max(0.0);
         let recent_queue_saturation_events = tick_tuning_metrics
             .queue_saturation_events
@@ -225,6 +228,11 @@ impl TlAppRuntime {
         }
         let script_camera_input = self.script_camera_input(view_dt);
 
+        phase_order_valid &= self
+            .phase_order
+            .enter_phase(RuntimeFramePhase::Network)
+            .is_ok();
+
         if let (Some(sprite_loader), Some(sprite_cache)) =
             (self.sprite_loader.as_mut(), self.sprite_cache.as_mut())
         {
@@ -250,6 +258,11 @@ impl TlAppRuntime {
                 _ => print_tlsprite_event("[tlsprite reload]", event),
             }
         }
+
+        phase_order_valid &= self
+            .phase_order
+            .enter_phase(RuntimeFramePhase::Script)
+            .is_ok();
 
         let contact_snapshot = {
             let world = self.world.borrow();
@@ -810,6 +823,11 @@ impl TlAppRuntime {
         // start with the world's initial state (empty scene).  From frame 2
         // onward the token is always present and we block here only for the
         // tail of the step that outlasted the GPU upload window.
+        phase_order_valid &= self
+            .phase_order
+            .enter_phase(RuntimeFramePhase::Physics)
+            .is_ok();
+
         let t_phys_begin = Instant::now();
         let substeps = if let Some(token) = self.physics_token.take() {
             let s = token.wait();
@@ -840,6 +858,11 @@ impl TlAppRuntime {
         }
         // Tick metrics were captured in the previous frame's physics_tick call.
         let tick = self.last_tick;
+        phase_order_valid &= self
+            .phase_order
+            .enter_phase(RuntimeFramePhase::RenderPlan)
+            .is_ok();
+
         let mut active_runtime_plan: Option<RuntimeFramePlan> = None;
         if let Some(bridge) = self.runtime_bridge.as_mut() {
             let bridge_tick = bridge.tick_and_plan();
@@ -1103,6 +1126,11 @@ impl TlAppRuntime {
                     >= self.scene.config().target_ball_count,
             };
         }
+
+        phase_order_valid &= self
+            .phase_order
+            .enter_phase(RuntimeFramePhase::Present)
+            .is_ok();
 
         let (upload, rt_status, fsr_status, upload_us, present_us) = match &mut self.renderer {
             TlAppRenderer::Wgpu(renderer) => {
@@ -1502,6 +1530,10 @@ impl TlAppRuntime {
                 solver_serial_us,
             );
         }
+
+        phase_order_valid &= self.phase_order.finish_frame();
+        let _ = phase_order_valid;
+        let _ = frame_sequence;
 
         Ok(())
     }
