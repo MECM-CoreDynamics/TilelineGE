@@ -235,6 +235,7 @@ struct DrawPushConstants {
 #[derive(Debug, Clone, Copy, Default)]
 struct SceneVertex {
     position: [f32; 3],
+    uv: [f32; 2],
 }
 
 #[derive(Debug, Clone)]
@@ -840,12 +841,12 @@ impl VulkanBackend {
     pub fn upload_mesh_slot(
         &mut self,
         slot: u8,
-        positions: &[[f32; 3]],
+        vertices: &[SceneVertex],
         indices: &[u32],
     ) -> Result<(), VulkanBackendError> {
-        if positions.is_empty() || indices.is_empty() {
+        if vertices.is_empty() || indices.is_empty() {
             return Err(VulkanBackendError::InvalidConfig(
-                "mesh slot positions and indices must not be empty",
+                "mesh slot vertices and indices must not be empty",
             ));
         }
         let vertex_buffer = unsafe {
@@ -853,7 +854,7 @@ impl VulkanBackend {
                 &self.instance,
                 &self.device,
                 self.physical_device,
-                slice_as_bytes(positions),
+                slice_as_bytes(vertices),
                 vk::BufferUsageFlags::VERTEX_BUFFER,
             )?
         };
@@ -884,9 +885,8 @@ impl VulkanBackend {
     pub fn upload_builtin_sphere_mesh_slot(&mut self, slot: u8) -> Result<(), VulkanBackendError> {
         let vertices = unit_icosa_sphere_vertices();
         let indices_u16 = unit_icosa_sphere_indices();
-        let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
         let indices_u32: Vec<u32> = indices_u16.iter().map(|&i| u32::from(i)).collect();
-        self.upload_mesh_slot(slot, &positions, &indices_u32)
+        self.upload_mesh_slot(slot, &vertices, &indices_u32)
     }
 
     /// Resize the swapchain-dependent resources.
@@ -2496,6 +2496,12 @@ unsafe fn create_scene_pipeline(
             format: vk::Format::R32_UINT,
             offset: instance_flags_offset,
         },
+        vk::VertexInputAttributeDescription {
+            location: 8,
+            binding: 0,
+            format: vk::Format::R32G32_SFLOAT,
+            offset: offset_of!(SceneVertex, uv) as u32,
+        },
     ];
     let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&vertex_binding_descriptions)
@@ -3023,30 +3029,14 @@ fn slice_as_bytes<T>(slice: &[T]) -> &[u8] {
 
 fn unit_cube_vertices() -> [SceneVertex; 8] {
     [
-        SceneVertex {
-            position: [-0.5, -0.5, -0.5],
-        },
-        SceneVertex {
-            position: [0.5, -0.5, -0.5],
-        },
-        SceneVertex {
-            position: [0.5, 0.5, -0.5],
-        },
-        SceneVertex {
-            position: [-0.5, 0.5, -0.5],
-        },
-        SceneVertex {
-            position: [-0.5, -0.5, 0.5],
-        },
-        SceneVertex {
-            position: [0.5, -0.5, 0.5],
-        },
-        SceneVertex {
-            position: [0.5, 0.5, 0.5],
-        },
-        SceneVertex {
-            position: [-0.5, 0.5, 0.5],
-        },
+        SceneVertex { position: [-0.5, -0.5, -0.5], uv: [0.0, 0.0] },
+        SceneVertex { position: [ 0.5, -0.5, -0.5], uv: [1.0, 0.0] },
+        SceneVertex { position: [ 0.5,  0.5, -0.5], uv: [1.0, 1.0] },
+        SceneVertex { position: [-0.5,  0.5, -0.5], uv: [0.0, 1.0] },
+        SceneVertex { position: [-0.5, -0.5,  0.5], uv: [0.0, 0.0] },
+        SceneVertex { position: [ 0.5, -0.5,  0.5], uv: [1.0, 0.0] },
+        SceneVertex { position: [ 0.5,  0.5,  0.5], uv: [1.0, 1.0] },
+        SceneVertex { position: [-0.5,  0.5,  0.5], uv: [0.0, 1.0] },
     ]
 }
 
@@ -3075,7 +3065,11 @@ fn unit_icosa_sphere_vertices() -> [SceneVertex; 12] {
         position[1] /= length * 2.0;
         position[2] /= length * 2.0;
     }
-    vertices.map(|position| SceneVertex { position })
+    vertices.map(|position| {
+        let u = 0.5 + f32::atan2(position[2], position[0]) / (2.0 * std::f32::consts::PI);
+        let v = 0.5 - position[1];
+        SceneVertex { position, uv: [u, v] }
+    })
 }
 
 fn unit_icosa_sphere_indices() -> [u16; 60] {

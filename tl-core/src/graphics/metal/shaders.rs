@@ -53,6 +53,7 @@ struct VSIn {
     float4 base_color [[attribute(7)]];
     float4 material_params [[attribute(8)]];
     float4 emissive   [[attribute(9)]];
+    uint   texture_slot [[attribute(10)]];
 };
 
 struct VSOut {
@@ -64,6 +65,8 @@ struct VSOut {
     float  primitive_code;
     float  roughness;
     float  metallic;
+    float2 uv;
+    uint   texture_slot;
 };
 
 vertex VSOut scene_3d_vertex(
@@ -87,6 +90,8 @@ vertex VSOut scene_3d_vertex(
     out.primitive_code = in.material_params.w;
     out.roughness      = in.material_params.x;
     out.metallic       = in.material_params.y;
+    out.uv             = in.uv;
+    out.texture_slot   = in.texture_slot;
     return out;
 }
 
@@ -221,41 +226,46 @@ fragment float4 scene_3d_fragment(
     constant Lighting      &u_lighting    [[buffer(2)]],
     constant ShadowUniform &u_shadow       [[buffer(3)]],
     depth2d<float>         shadow_map     [[texture(0)]],
+    texture2d_array<float> diffuse_array  [[texture(1)]],
+    sampler                diffuse_smp    [[sampler(1)]],
     bool                    is_front       [[front_facing]]
 ) {
+    float4 sampled = diffuse_array.sample(diffuse_smp, in.uv, in.texture_slot);
+    float3 base_color = in.color.rgb * sampled.rgb;
+    float  alpha      = in.color.a * sampled.a;
+
     float3 dpx = dfdx(in.world_pos);
     float3 dpy = dfdy(in.world_pos);
     float3 normal = normalize(cross(dpy, dpx));
     if (!is_front) normal = -normal;
 
     float3 view_dir = normalize(camera.camera_eye.xyz - in.world_pos);
-    float3 lit = in.color.rgb * 0.04;
+    float3 lit = base_color * 0.04;
 
     uint light_count = min(u_lighting.light_count, 32u);
     if (light_count == 0u) {
         float3 fallback_dir = normalize(float3(0.42, 0.74, 0.52));
         float  fallback = max(dot(normal, fallback_dir), 0.0) * 0.76 + 0.24;
-        lit += in.color.rgb * fallback;
+        lit += base_color * fallback;
     } else {
         for (uint i = 0; i < light_count; ++i) {
             lit += evaluate_light(
-                u_lights[i], normal, in.world_pos, in.color.rgb,
+                u_lights[i], normal, in.world_pos, base_color,
                 view_dir, in.roughness, in.metallic,
                 u_shadow, shadow_map
             );
         }
     }
 
-    float3 f0_env = mix(float3(0.04), in.color.rgb, in.metallic);
+    float3 f0_env = mix(float3(0.04), base_color, in.metallic);
     float3 F_env  = schlick_fresnel(f0_env, max(dot(normal, view_dir), 0.0));
     float3 refl   = reflect(-view_dir, normal);
     float  rough_sq = in.roughness * in.roughness;
     float3 env_spec = F_env * env_sample(refl) * (1.0 - rough_sq) * (1.0 - rough_sq);
-    float3 env_diff = env_sample(normal) * in.color.rgb * (1.0 - in.metallic) * 0.12;
+    float3 env_diff = env_sample(normal) * base_color * (1.0 - in.metallic) * 0.12;
     lit += env_spec + env_diff;
 
     lit += in.emissive;
-    float alpha = in.color.a;
 
     if (in.primitive_code > 0.5) {
         lit += float3(0.08, 0.12, 0.18) * in.edge_factor;

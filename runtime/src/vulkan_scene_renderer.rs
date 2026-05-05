@@ -23,7 +23,7 @@ use std::sync::Arc;
 use nalgebra::{Isometry3, Matrix4, Perspective3, Point3, Vector3};
 use tl_core::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
-    FrameTextureRecord, RenderStateSnapshot, VulkanBackend, VulkanBackendConfig,
+    FrameTextureRecord, RenderStateSnapshot, SceneVertex, VulkanBackend, VulkanBackendConfig,
     VulkanBackendError, VulkanFrameExecutionTelemetry, VulkanMultiGpuFramePlan,
 };
 use wgpu::Backend;
@@ -258,8 +258,13 @@ impl VulkanSceneRenderer {
         let bytes = fs::read(path)
             .map_err(|err| format!("failed to read FBX '{}': {err}", path.display()))?;
         let mesh_data = fbx_mesh::parse_first_mesh_from_fbx(&bytes)?;
+        let vertices: Vec<SceneVertex> = mesh_data
+            .positions
+            .iter()
+            .map(|&p| SceneVertex { position: p, uv: [0.0, 0.0] })
+            .collect();
         self.backend
-            .upload_mesh_slot(slot, &mesh_data.positions, &mesh_data.indices)
+            .upload_mesh_slot(slot, &vertices, &mesh_data.indices)
             .map_err(|err| err.to_string())
     }
 
@@ -298,9 +303,12 @@ impl VulkanSceneRenderer {
             if let Ok(mesh) =
                 fbx_mesh::parse_first_mesh_from_fbx(fbx_mesh::DEFAULT_SPHERE_FBX_BYTES)
             {
-                let _ = self
-                    .backend
-                    .upload_mesh_slot(slot, &mesh.positions, &mesh.indices);
+                let vertices: Vec<SceneVertex> = mesh
+                    .positions
+                    .iter()
+                    .map(|&p| SceneVertex { position: p, uv: [0.0, 0.0] })
+                    .collect();
+                let _ = self.backend.upload_mesh_slot(slot, &vertices, &mesh.indices);
                 return;
             }
         }

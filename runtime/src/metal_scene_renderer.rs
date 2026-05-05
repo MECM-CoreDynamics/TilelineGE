@@ -577,16 +577,46 @@ impl SceneVertex {
             uv: [0.0, 0.0],
         }
     }
+
+    fn new_sphere(position: [f32; 3]) -> Self {
+        let len = (position[0] * position[0]
+            + position[1] * position[1]
+            + position[2] * position[2])
+            .sqrt()
+            .max(1e-6);
+        let normal = [position[0] / len, position[1] / len, position[2] / len];
+        let u = 0.5 + f32::atan2(position[2], position[0]) / (2.0 * std::f32::consts::PI);
+        let v = 0.5 - position[1] * 0.5;
+        Self {
+            position,
+            normal,
+            uv: [u, v],
+        }
+    }
+
+    fn new_box(position: [f32; 3]) -> Self {
+        let len = (position[0] * position[0]
+            + position[1] * position[1]
+            + position[2] * position[2])
+            .sqrt()
+            .max(1e-6);
+        let normal = [position[0] / len, position[1] / len, position[2] / len];
+        Self {
+            position,
+            normal,
+            uv: [position[0] + 0.5, position[1] + 0.5],
+        }
+    }
 }
 
 fn build_octa_sphere_mesh(device: &metal::Device) -> MeshSlot {
     let vertices = [
-        SceneVertex::new([1.0, 0.0, 0.0]),
-        SceneVertex::new([-1.0, 0.0, 0.0]),
-        SceneVertex::new([0.0, 1.0, 0.0]),
-        SceneVertex::new([0.0, -1.0, 0.0]),
-        SceneVertex::new([0.0, 0.0, 1.0]),
-        SceneVertex::new([0.0, 0.0, -1.0]),
+        SceneVertex::new_sphere([1.0, 0.0, 0.0]),
+        SceneVertex::new_sphere([-1.0, 0.0, 0.0]),
+        SceneVertex::new_sphere([0.0, 1.0, 0.0]),
+        SceneVertex::new_sphere([0.0, -1.0, 0.0]),
+        SceneVertex::new_sphere([0.0, 0.0, 1.0]),
+        SceneVertex::new_sphere([0.0, 0.0, -1.0]),
     ];
     let indices: [u16; 24] = [
         0, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0,
@@ -611,7 +641,7 @@ fn build_icosa_sphere_mesh(device: &metal::Device) -> MeshSlot {
         [-t, 0.0, -1.0],
         [-t, 0.0, 1.0],
     ];
-    let vertices: Vec<SceneVertex> = v.iter().map(|&p| SceneVertex::new(p)).collect();
+    let vertices: Vec<SceneVertex> = v.iter().map(|&p| SceneVertex::new_sphere(p)).collect();
     let indices: [u16; 60] = [
         0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11,
         1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
@@ -623,14 +653,14 @@ fn build_icosa_sphere_mesh(device: &metal::Device) -> MeshSlot {
 
 fn build_box_mesh(device: &metal::Device) -> MeshSlot {
     let vertices = [
-        SceneVertex::new([-0.5, -0.5, -0.5]),
-        SceneVertex::new([0.5, -0.5, -0.5]),
-        SceneVertex::new([0.5, 0.5, -0.5]),
-        SceneVertex::new([-0.5, 0.5, -0.5]),
-        SceneVertex::new([-0.5, -0.5, 0.5]),
-        SceneVertex::new([0.5, -0.5, 0.5]),
-        SceneVertex::new([0.5, 0.5, 0.5]),
-        SceneVertex::new([-0.5, 0.5, 0.5]),
+        SceneVertex::new_box([-0.5, -0.5, -0.5]),
+        SceneVertex::new_box([0.5, -0.5, -0.5]),
+        SceneVertex::new_box([0.5, 0.5, -0.5]),
+        SceneVertex::new_box([-0.5, 0.5, -0.5]),
+        SceneVertex::new_box([-0.5, -0.5, 0.5]),
+        SceneVertex::new_box([0.5, -0.5, 0.5]),
+        SceneVertex::new_box([0.5, 0.5, 0.5]),
+        SceneVertex::new_box([-0.5, 0.5, 0.5]),
     ];
     let indices: [u16; 36] = [
         0, 1, 2, 2, 3, 0, // back

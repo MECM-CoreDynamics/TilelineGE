@@ -56,11 +56,11 @@ pub use graphics::multigpu::sync::{
 #[cfg(target_os = "linux")]
 pub use graphics::vulkan_backend::{
     FrameSubmissionTelemetry, LinuxWindowSystemIntegration, PresentModePreference,
-    SPRITE_ATLAS_LAYER_COUNT, SPRITE_ATLAS_TILE_SIZE, VulkanBackend, VulkanBackendConfig,
-    VulkanBackendError, VulkanDeviceExtensionSupport, VulkanFrameExecutionTelemetry,
-    VulkanMultiGpuCapabilities, VulkanMultiGpuConfig, VulkanMultiGpuFramePlan,
-    VulkanNativeMultiGpuSupport, VulkanPhysicalDeviceProfile, VulkanQueueSelection,
-    VulkanSnapshotSlotState,
+    SceneVertex, SPRITE_ATLAS_LAYER_COUNT, SPRITE_ATLAS_TILE_SIZE, VulkanBackend,
+    VulkanBackendConfig, VulkanBackendError, VulkanDeviceExtensionSupport,
+    VulkanFrameExecutionTelemetry, VulkanMultiGpuCapabilities, VulkanMultiGpuConfig,
+    VulkanMultiGpuFramePlan, VulkanNativeMultiGpuSupport, VulkanPhysicalDeviceProfile,
+    VulkanQueueSelection, VulkanSnapshotSlotState,
 };
 #[cfg(target_os = "linux")]
 pub use graphics::vulkan_physics_compute::{

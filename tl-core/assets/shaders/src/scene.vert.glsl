@@ -11,6 +11,7 @@ layout(location = 4) in vec4 in_model_col3;
 layout(location = 5) in vec4 in_color;
 layout(location = 6) in uint in_material_index;
 layout(location = 7) in uint in_flags;
+layout(location = 8) in vec2 in_uv;
 
 layout(location = 0) out vec4 v_color;
 layout(location = 1) out vec3 v_world_position;
@@ -18,6 +19,7 @@ layout(location = 2) out vec3 v_world_normal;
 layout(location = 3) flat out uint v_material_index;
 layout(location = 4) flat out uint v_flags;
 layout(location = 5) out vec3 v_local_position;
+layout(location = 6) out vec2 v_uv;
 
 void main() {
     mat4 model = mat4(in_model_col0, in_model_col1, in_model_col2, in_model_col3);
@@ -31,4 +33,5 @@ void main() {
     v_material_index = in_material_index;
     v_flags = in_flags;
     v_local_position = in_position;
+    v_uv = in_uv;
 }

@@ -5,6 +5,7 @@ layout(location = 2) in vec3 v_world_normal;
 layout(location = 3) flat in uint v_material_index;
 layout(location = 4) flat in uint v_flags;
 layout(location = 5) in vec3 v_local_position;
+layout(location = 6) in vec2 v_uv;
 
 layout(location = 0) out vec4 out_color;
 
@@ -87,10 +88,6 @@ vec3 accumulate_light(vec3 world_position, vec3 world_normal, LightRecord light)
     return light.color_intensity.rgb * light.color_intensity.w * attenuation * diffuse;
 }
 
-vec2 scene_texture_uv(vec3 world_position) {
-    return fract(abs(world_position.xz) * 0.17 + vec2(0.125, 0.375));
-}
-
 vec3 aces_tonemap(vec3 x) {
     float a = 2.51;
     float b = 0.03;
@@ -113,8 +110,9 @@ void main() {
             uint texture_index = min(material.texture_index, u_draw.texture_count - 1u);
             TextureRecord texture_record = u_textures.textures[texture_index];
             float layer = float(texture_record.texture_slot);
-            vec3 sampled_rgb = texture(u_texture_array, vec3(scene_texture_uv(v_world_position), layer)).rgb;
-            base_color *= mix(vec3(1.0), sampled_rgb, 0.35);
+            vec4 sampled = texture(u_texture_array, vec3(v_uv, layer));
+            base_color *= sampled.rgb;
+            alpha *= sampled.a;
         }
         float emissive_strength = material.material_params.z;
         lit_color += material.emissive_rgb * emissive_strength;
