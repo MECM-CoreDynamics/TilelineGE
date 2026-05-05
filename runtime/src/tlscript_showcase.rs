@@ -106,6 +106,8 @@ const SHOWCASE_BUILTIN_CALLS: &[&str] = &[
     "gms_set_mode",
     "gms_set_target_fps",
     "gms_set_budget",
+    "gms_set_gpu",
+    "gms_set_auto_gpu_routing",
     "gms_get_metric",
     "gms_set_guardrail",
     "mls_set_mode",
@@ -157,6 +159,8 @@ const TOUCH_MANIFOLDS_BUILTIN_NAME: &str = "touch_manifolds";
 const GMS_SET_MODE_BUILTIN_NAME: &str = "gms_set_mode";
 const GMS_SET_TARGET_FPS_BUILTIN_NAME: &str = "gms_set_target_fps";
 const GMS_SET_BUDGET_BUILTIN_NAME: &str = "gms_set_budget";
+const GMS_SET_GPU_BUILTIN_NAME: &str = "gms_set_gpu";
+const GMS_SET_AUTO_GPU_ROUTING_BUILTIN_NAME: &str = "gms_set_auto_gpu_routing";
 const GMS_GET_METRIC_BUILTIN_NAME: &str = "gms_get_metric";
 const GMS_SET_GUARDRAIL_BUILTIN_NAME: &str = "gms_set_guardrail";
 const MLS_SET_MODE_BUILTIN_NAME: &str = "mls_set_mode";
@@ -477,6 +481,12 @@ pub struct TlscriptGmsScalerOverride {
     pub ai_ml_budget_pct: Option<u8>,
     pub postfx_budget_pct: Option<u8>,
     pub ui_budget_pct: Option<u8>,
+    pub render_gpu: Option<u8>,
+    pub physics_gpu: Option<u8>,
+    pub ai_ml_gpu: Option<u8>,
+    pub postfx_gpu: Option<u8>,
+    pub ui_gpu: Option<u8>,
+    pub auto_gpu_routing: Option<bool>,
 }
 
 impl TlscriptGmsScalerOverride {
@@ -487,6 +497,16 @@ impl TlscriptGmsScalerOverride {
             GmsScalerDomain::AiMl => self.ai_ml_budget_pct = Some(value.min(100)),
             GmsScalerDomain::PostFx => self.postfx_budget_pct = Some(value.min(100)),
             GmsScalerDomain::Ui => self.ui_budget_pct = Some(value.min(100)),
+        }
+    }
+
+    fn set_gpu(&mut self, domain: GmsScalerDomain, value: Option<u8>) {
+        match domain {
+            GmsScalerDomain::Render => self.render_gpu = value,
+            GmsScalerDomain::Physics => self.physics_gpu = value,
+            GmsScalerDomain::AiMl => self.ai_ml_gpu = value,
+            GmsScalerDomain::PostFx => self.postfx_gpu = value,
+            GmsScalerDomain::Ui => self.ui_gpu = value,
         }
     }
 }
@@ -1725,6 +1745,37 @@ fn apply_builtin_patch_call(
                 state.gms_scaler.set_budget(domain, pct as u8);
             }
             _ => state.warn("gms_set_budget expects 2 args (domain, pct)"),
+        },
+        GMS_SET_GPU_BUILTIN_NAME => match args {
+            [domain_value, gpu_value] => {
+                let Some(domain) = parse_gms_domain_from_value(domain_value) else {
+                    state.warn("gms_set_gpu expects domain in {render|physics|ai_ml|postfx|ui}");
+                    return DemoValue::Int(0);
+                };
+                let gpu = match gpu_value {
+                    DemoValue::Str(s) if s.eq_ignore_ascii_case("auto") => None,
+                    DemoValue::Int(idx) => {
+                        if *idx < 0 || *idx > 255 {
+                            state.warn("gms_set_gpu expects GPU index in 0..=255 or 'auto'");
+                            return DemoValue::Int(0);
+                        }
+                        Some(*idx as u8)
+                    }
+                    _ => {
+                        state.warn("gms_set_gpu expects GPU index in 0..=255 or 'auto'");
+                        return DemoValue::Int(0);
+                    }
+                };
+                state.gms_scaler.set_gpu(domain, gpu);
+            }
+            _ => state.warn("gms_set_gpu expects 2 args (domain, auto|index)"),
+        },
+        GMS_SET_AUTO_GPU_ROUTING_BUILTIN_NAME => match args {
+            [value] => {
+                let enabled = value.to_bool();
+                state.gms_scaler.auto_gpu_routing = Some(enabled);
+            }
+            _ => state.warn("gms_set_auto_gpu_routing expects 1 arg (bool)"),
         },
         GMS_GET_METRIC_BUILTIN_NAME => match args {
             [DemoValue::Str(metric)] => {
@@ -3528,6 +3579,9 @@ mod tests {
             "    gms_set_target_fps(72)\n",
             "    gms_set_budget(\"physics\", 45)\n",
             "    gms_set_budget(\"ai_ml\", 12)\n",
+            "    gms_set_gpu(\"render\", 0)\n",
+            "    gms_set_gpu(\"physics\", \"auto\")\n",
+            "    gms_set_auto_gpu_routing(false)\n",
             "    gms_set_guardrail(\"aggressive\")\n",
             "    if gms_get_metric(\"sm_cu_utilization\") >= 0.5:\n",
             "        set_spawn_per_tick(99)\n",

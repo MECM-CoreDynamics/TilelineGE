@@ -1375,13 +1375,19 @@ impl TlAppRuntime {
                 .runtime_bridge_metrics
                 .domain_budgets
                 .map(|budgets| {
+                    let gpu = |g: Option<u8>| g.map(|v| format!("@{v}")).unwrap_or_else(|| "@a".to_string());
                     format!(
-                        "r{}-p{}-a{}-x{}-u{}",
+                        "r{}{}-p{}{}-a{}{}-x{}{}-u{}{}",
                         budgets.render_budget_pct,
+                        gpu(budgets.render_gpu),
                         budgets.physics_budget_pct,
+                        gpu(budgets.physics_gpu),
                         budgets.ai_ml_budget_pct,
+                        gpu(budgets.ai_ml_gpu),
                         budgets.postfx_budget_pct,
-                        budgets.ui_budget_pct
+                        gpu(budgets.postfx_gpu),
+                        budgets.ui_budget_pct,
+                        gpu(budgets.ui_gpu),
                     )
                 })
                 .unwrap_or_else(|| "n/a".to_string());

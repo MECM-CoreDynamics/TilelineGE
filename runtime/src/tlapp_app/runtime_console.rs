@@ -1324,6 +1324,41 @@ impl TlAppRuntime {
                     Err(err) => self.console_feedback(err),
                 }
             }
+            "gms.gpu" => {
+                let Some(raw_domain) = parts.next() else {
+                    self.console_feedback(
+                        "usage: gms.gpu <render|physics|ai_ml|postfx|ui> <auto|0|1|2|...>",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(raw_gpu) = parts.next() else {
+                    self.console_feedback(
+                        "usage: gms.gpu <render|physics|ai_ml|postfx|ui> <auto|0|1|2|...>",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                let Some(domain) = GmsScalerDomain::parse(raw_domain) else {
+                    self.console_feedback(
+                        "invalid domain (expected render|physics|ai_ml|postfx|ui)",
+                    );
+                    return RuntimeCommand::Consumed;
+                };
+                let gpu = if raw_gpu.eq_ignore_ascii_case("auto") {
+                    None
+                } else {
+                    match raw_gpu.parse::<u8>() {
+                        Ok(v) => Some(v),
+                        Err(_) => {
+                            self.console_feedback("invalid GPU index (expected auto|0|1|2|...)");
+                            return RuntimeCommand::Consumed;
+                        }
+                    }
+                };
+                match self.set_gms_gpu_cli_override(domain, gpu) {
+                    Ok(note) => self.console_feedback(note),
+                    Err(err) => self.console_feedback(err),
+                }
+            }
             "gms.guardrail" => {
                 let Some(raw_profile) = parts.next() else {
                     self.console_feedback("usage: gms.guardrail <balanced|aggressive|relaxed>");

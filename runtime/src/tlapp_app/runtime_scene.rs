@@ -469,6 +469,36 @@ impl TlAppRuntime {
                 bridge.set_gms_budget(GmsScalerDomain::Ui, pct);
             }
         }
+        if self.gms_cli_override_render_gpu.is_none() {
+            if let Some(gpu) = overrides.render_gpu {
+                bridge.set_gms_gpu(GmsScalerDomain::Render, Some(gpu));
+            }
+        }
+        if self.gms_cli_override_physics_gpu.is_none() {
+            if let Some(gpu) = overrides.physics_gpu {
+                bridge.set_gms_gpu(GmsScalerDomain::Physics, Some(gpu));
+            }
+        }
+        if self.gms_cli_override_ai_ml_gpu.is_none() {
+            if let Some(gpu) = overrides.ai_ml_gpu {
+                bridge.set_gms_gpu(GmsScalerDomain::AiMl, Some(gpu));
+            }
+        }
+        if self.gms_cli_override_postfx_gpu.is_none() {
+            if let Some(gpu) = overrides.postfx_gpu {
+                bridge.set_gms_gpu(GmsScalerDomain::PostFx, Some(gpu));
+            }
+        }
+        if self.gms_cli_override_ui_gpu.is_none() {
+            if let Some(gpu) = overrides.ui_gpu {
+                bridge.set_gms_gpu(GmsScalerDomain::Ui, Some(gpu));
+            }
+        }
+        if self.gms_cli_override_auto_gpu_routing.is_none() {
+            if let Some(v) = overrides.auto_gpu_routing {
+                bridge.set_gms_auto_gpu_routing(v);
+            }
+        }
         self.runtime_bridge_metrics = bridge.metrics();
     }
 
@@ -554,6 +584,36 @@ impl TlAppRuntime {
             "gms budget override: {}={} (CLI precedence active)",
             domain.as_str(),
             clamped
+        ))
+    }
+
+    pub(super) fn set_gms_gpu_cli_override(
+        &mut self,
+        domain: GmsScalerDomain,
+        gpu: Option<u8>,
+    ) -> Result<String, String> {
+        let Some(bridge) = self.runtime_bridge.as_mut() else {
+            return Err(
+                "gms.gpu unavailable: parallel bridge is disabled (pipeline=legacy)".to_string(),
+            );
+        };
+        if bridge.path() != RuntimeBridgePath::GmsPath {
+            return Err("gms.gpu unavailable: active bridge path is not GMS".to_string());
+        }
+        match domain {
+            GmsScalerDomain::Render => self.gms_cli_override_render_gpu = gpu,
+            GmsScalerDomain::Physics => self.gms_cli_override_physics_gpu = gpu,
+            GmsScalerDomain::AiMl => self.gms_cli_override_ai_ml_gpu = gpu,
+            GmsScalerDomain::PostFx => self.gms_cli_override_postfx_gpu = gpu,
+            GmsScalerDomain::Ui => self.gms_cli_override_ui_gpu = gpu,
+        }
+        bridge.set_gms_gpu(domain, gpu);
+        self.runtime_bridge_metrics = bridge.metrics();
+        let gpu_str = gpu.map(|g| format!("GPU{g}")).unwrap_or_else(|| "auto".to_string());
+        Ok(format!(
+            "gms gpu override: {}={} (CLI precedence active)",
+            domain.as_str(),
+            gpu_str
         ))
     }
 

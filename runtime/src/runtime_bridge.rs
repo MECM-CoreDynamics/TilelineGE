@@ -269,7 +269,6 @@ impl GmsScalerDomain {
     }
 }
 
-/// Runtime GMS domain budget profile (percentages).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GmsDomainBudgets {
     pub render_budget_pct: u8,
@@ -277,6 +276,12 @@ pub struct GmsDomainBudgets {
     pub ai_ml_budget_pct: u8,
     pub postfx_budget_pct: u8,
     pub ui_budget_pct: u8,
+    /// Optional per-domain GPU pinning. `None` means follow auto-routing.
+    pub render_gpu: Option<u8>,
+    pub physics_gpu: Option<u8>,
+    pub ai_ml_gpu: Option<u8>,
+    pub postfx_gpu: Option<u8>,
+    pub ui_gpu: Option<u8>,
 }
 
 impl Default for GmsDomainBudgets {
@@ -287,6 +292,11 @@ impl Default for GmsDomainBudgets {
             ai_ml_budget_pct: 20,
             postfx_budget_pct: 10,
             ui_budget_pct: 0,
+            render_gpu: None,
+            physics_gpu: None,
+            ai_ml_gpu: None,
+            postfx_gpu: None,
+            ui_gpu: None,
         }
     }
 }
@@ -300,6 +310,9 @@ pub struct GmsScalerConfig {
     pub budgets: GmsDomainBudgets,
     pub guardrail: GmsGuardrailProfile,
     pub profile: PerformanceProfile,
+    /// When `true` (default) the scaler chooses GPU routing per domain automatically.
+    /// When `false` the `*_gpu` fields in `budgets` are respected.
+    pub auto_gpu_routing: bool,
 }
 
 impl Default for GmsScalerConfig {
@@ -311,6 +324,7 @@ impl Default for GmsScalerConfig {
             budgets: GmsDomainBudgets::default(),
             guardrail: GmsGuardrailProfile::Balanced,
             profile: PerformanceProfile::Balanced,
+            auto_gpu_routing: true,
         }
     }
 }
@@ -323,6 +337,16 @@ impl GmsScalerConfig {
             GmsScalerDomain::AiMl => self.budgets.ai_ml_budget_pct = pct.min(100),
             GmsScalerDomain::PostFx => self.budgets.postfx_budget_pct = pct.min(100),
             GmsScalerDomain::Ui => self.budgets.ui_budget_pct = pct.min(100),
+        }
+    }
+
+    pub fn set_gpu(&mut self, domain: GmsScalerDomain, gpu: Option<u8>) {
+        match domain {
+            GmsScalerDomain::Render => self.budgets.render_gpu = gpu,
+            GmsScalerDomain::Physics => self.budgets.physics_gpu = gpu,
+            GmsScalerDomain::AiMl => self.budgets.ai_ml_gpu = gpu,
+            GmsScalerDomain::PostFx => self.budgets.postfx_gpu = gpu,
+            GmsScalerDomain::Ui => self.budgets.ui_gpu = gpu,
         }
     }
 }
@@ -461,6 +485,14 @@ impl RuntimeBridgeOrchestrator {
         self.gms_scaler.set_budget(domain, pct);
     }
 
+    pub fn set_gms_gpu(&mut self, domain: GmsScalerDomain, gpu: Option<u8>) {
+        self.gms_scaler.set_gpu(domain, gpu);
+    }
+
+    pub fn set_gms_auto_gpu_routing(&mut self, enabled: bool) {
+        self.gms_scaler.auto_gpu_routing = enabled;
+    }
+
     pub fn set_gms_guardrail(&mut self, profile: GmsGuardrailProfile) {
         self.gms_scaler.guardrail = profile;
     }
@@ -539,17 +571,24 @@ impl RuntimeBridgeOrchestrator {
         let requested = self.gms_ai_ml_requested_jobs.max(1);
         let ai_ml_drop_rate =
             1.0 - (self.gms_ai_ml_kept_jobs as f64 / requested as f64).clamp(0.0, 1.0);
+        let gpu_str = |gpu: Option<u8>| gpu.map(|g| format!("@GPU{g}")).unwrap_or_else(|| "@auto".to_string());
         Some(format!(
-            "gms scaler | mode={} target_fps={} guardrail={} profile={} budgets[render={} physics={} ai_ml={} postfx={} ui={}] min_physics={} lane_q={} sm_cu_utilization={:.2} ai_ml_drop_rate={:.3}{}",
+            "gms scaler | mode={} target_fps={} guardrail={} profile={} auto_gpu={} budgets[render={}{} physics={}{} ai_ml={}{} postfx={}{} ui={}{}] min_physics={} lane_q={} sm_cu_utilization={:.2} ai_ml_drop_rate={:.3}{}",
             self.gms_scaler.mode.as_str(),
             self.gms_scaler.target_fps,
             self.gms_scaler.guardrail.as_str(),
             self.gms_scaler.profile.as_str(),
+            self.gms_scaler.auto_gpu_routing,
             self.gms_scaler.budgets.render_budget_pct,
+            gpu_str(self.gms_scaler.budgets.render_gpu),
             self.gms_scaler.budgets.physics_budget_pct,
+            gpu_str(self.gms_scaler.budgets.physics_gpu),
             self.gms_scaler.budgets.ai_ml_budget_pct,
+            gpu_str(self.gms_scaler.budgets.ai_ml_gpu),
             self.gms_scaler.budgets.postfx_budget_pct,
+            gpu_str(self.gms_scaler.budgets.postfx_gpu),
             self.gms_scaler.budgets.ui_budget_pct,
+            gpu_str(self.gms_scaler.budgets.ui_gpu),
             self.gms_scaler.min_physics_budget_pct,
             self.gms_last_lane_queue_depth,
             self.gms_last_sm_cu_utilization,
