@@ -139,8 +139,8 @@ This workstream treats rendering as "feature present, now make it production-usa
 
 Current status:
 
-- implemented
-- optional
+- implemented in `wgpu` renderer only
+- missing in raw Metal and raw Vulkan backends (no BLAS/TLAS path yet)
 - requires better cost control and clearer fallback behavior
 
 Target work:
@@ -166,8 +166,10 @@ Acceptance gates:
 Current status:
 
 - functional
-- not yet fully optimized around real runtime scene pressure
-- canonical SPIR-V shader artifacts now live in-repo under `tl-core/assets/shaders/spv/`
+- SPIR-V artifacts live in-repo under `tl-core/assets/shaders/spv/`
+- no shader/pipeline cache policy; common scene boots rebuild the same pipelines
+- material/shader parameter flow from `.tlsprite` / runtime scene data is ad-hoc
+- feature flags are not formalized (ad-hoc branching instead)
 - the active Vulkan path no longer depends on runtime GLSL compilation or `shaderc` build glue
 
 Target work:
@@ -195,8 +197,10 @@ Acceptance gates:
 
 Current status:
 
-- working
-- likely needs culling/budget tuning and tighter integration with scene workload
+- working; shadow atlas (single-pass 2×2 quadrant 2048×2048) is active in Metal backend
+- no camera-relative light pruning or light budget prioritization
+- shadow-casting cost is not predictable or bounded per scene
+- transparent wall culling bug fixed; frustum culling skips transparent ranges correctly
 
 Target work:
 
@@ -655,6 +659,33 @@ Status:
 - active; partial migration complete
 - Vulkan backend path exists and is integrated, but shipping runtime still has `wgpu` ownership in
   several hot/runtime-adjacent layers
+
+### E5. GPU Domain Affinity
+
+Target work:
+
+- extend `GmsDomainBudgets` with per-domain GPU pinning so the scaler can answer:
+  - which GPU runs which workload (`render|physics|ai_ml|postfx|ui`)
+  - at what percentage budget
+- keep `auto_gpu_routing` as the default; manual pinning is opt-in per domain
+- wire GPU affinity through all control surfaces:
+  - `.tlpfile` `[gms_scaler]` keys (`render_gpu`, `physics_gpu`, ..., `auto_gpu_routing`)
+  - TLApp console (`gms.gpu <domain> <auto|index>`)
+  - `.tlscript` built-ins (`gms_set_gpu()`, `gms_set_auto_gpu_routing()`)
+- update telemetry and HUD so GPU routing is visible in `gms_status_line` and fps log output
+- backend-neutral at the scaler layer; actual multi-GPU dispatch plumbing is backend-owned
+
+Acceptance gate:
+
+- runtime can report per-domain GPU assignments through all control surfaces
+- `.tlscript` can pin/unpin domains at runtime without destabilizing the scaler
+- telemetry shows GPU routing compactly (e.g. `r35@GPU0-p35@auto-a20@auto`)
+- auto-routing remains the safe default; explicit pinning requires no hidden state
+
+Status:
+
+- config / console / `.tlpfile` / `.tlscript` / telemetry wiring is complete
+- actual backend multi-GPU dispatch plumbing is deferred to Vulkan/Metal backend work
 
 Note:
 

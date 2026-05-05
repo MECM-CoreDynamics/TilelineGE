@@ -46,6 +46,10 @@ pub struct MetalBackendConfig {
     pub max_sprites: usize,
     /// Enable SXRC runtime compression for snapshot instance data.
     pub enable_snapshot_compression: bool,
+    /// Maximum lights evaluated per frame (sorted by priority).
+    pub max_lights: usize,
+    /// Camera-relative distance beyond which lights are culled.
+    pub light_cull_distance: f32,
 }
 
 impl Default for MetalBackendConfig {
@@ -56,6 +60,8 @@ impl Default for MetalBackendConfig {
             occlusion_culling_enabled: true,
             max_sprites: 4096,
             enable_snapshot_compression: false,
+            max_lights: 8,
+            light_cull_distance: 100.0,
         }
     }
 }
@@ -154,6 +160,7 @@ use super::metal::shader_library::{
     BlendMode, PipelineKey, ShaderLibrary, VertexAttributeDesc, VertexBufferLayoutDesc,
     VertexLayout,
 };
+use super::shader_flags::ShaderFeatureFlags;
 use super::metal::shaders::{SCENE_3D_MSL, SCENE_SHADOW_MSL, SCENE_SPRITE_MSL, SCENE_UPSCALE_MSL};
 
 #[repr(C)]
@@ -667,21 +674,57 @@ impl MetalBackend {
         lub: &Buffer,
         snapshot: &RenderStateSnapshot<'_>,
     ) {
+        let camera_pos = [
+            snapshot.camera_eye[0],
+            snapshot.camera_eye[1],
+            snapshot.camera_eye[2],
+        ];
+        let mut lights: Vec<(f32, f32, &FrameLightRecord)> = snapshot
+            .lights
+            .iter()
+            .map(|light| {
+                let pos = [
+                    light.position_kind[0],
+                    light.position_kind[1],
+                    light.position_kind[2],
+                ];
+                let dx = pos[0] - camera_pos[0];
+                let dy = pos[1] - camera_pos[1];
+                let dz = pos[2] - camera_pos[2];
+                let dist_sq = dx * dx + dy * dy + dz * dz;
+                let intensity = light.color_intensity[3];
+                // Priority: lower distance first, then higher intensity.
+                (dist_sq, -intensity, light)
+            })
+            .collect();
+        lights.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        let cull_dist_sq = self.config.light_cull_distance * self.config.light_cull_distance;
+        let kept: Vec<&FrameLightRecord> = lights
+            .into_iter()
+            .filter(|(dist_sq, _, _)| *dist_sq <= cull_dist_sq)
+            .map(|(_, _, light)| light)
+            .take(self.config.max_lights)
+            .collect();
+        let lights_dropped = snapshot.lights.len().saturating_sub(kept.len());
         let lighting = LightingUniform {
-            light_count: snapshot.lights.len() as u32,
+            light_count: kept.len() as u32,
             rt_mode: 0,
             rt_active: 0,
             rt_dynamic_count: 0,
             rt_dynamic_cap: 0,
-            _pad0: 0,
+            _pad0: lights_dropped as u32,
             _pad1: 0,
             _pad2: 0,
         };
-        if !snapshot.lights.is_empty() {
-            let light_bytes = snapshot.lights.len() * std::mem::size_of::<FrameLightRecord>();
+        if !kept.is_empty() {
+            let light_bytes = kept.len() * std::mem::size_of::<FrameLightRecord>();
             unsafe {
                 std::ptr::copy_nonoverlapping(
-                    snapshot.lights.as_ptr() as *const u8,
+                    kept.as_ptr() as *const u8,
                     lb.contents() as *mut u8,
                     light_bytes.min(lb.length() as usize),
                 );
@@ -1983,6 +2026,7 @@ fn build_scene_pipelines(
         sample_count: 1,
         blend_mode: BlendMode::None,
         vertex_layout_hash: layout_hash,
+        feature_flags: ShaderFeatureFlags::EMPTY,
     };
     let z_prepass_pipeline = shader_library
         .get_pipeline(&z_prepass_key, &scene_3d_layout)
@@ -1997,6 +2041,7 @@ fn build_scene_pipelines(
         sample_count: 1,
         blend_mode: BlendMode::None,
         vertex_layout_hash: layout_hash,
+        feature_flags: ShaderFeatureFlags::EMPTY,
     };
     let forward_pipeline = shader_library
         .get_pipeline(&forward_key, &scene_3d_layout)
@@ -2035,6 +2080,7 @@ fn build_shadow_pipeline(
         sample_count: 1,
         blend_mode: BlendMode::None,
         vertex_layout_hash: layout_hash,
+        feature_flags: ShaderFeatureFlags::EMPTY,
     };
     Ok(shader_library
         .get_pipeline(&key, &layout)
@@ -2058,6 +2104,7 @@ fn build_upscale_pipeline(
         sample_count: 1,
         blend_mode: BlendMode::None,
         vertex_layout_hash: layout_hash,
+        feature_flags: ShaderFeatureFlags::EMPTY,
     };
     Ok(shader_library
         .get_pipeline(&key, &empty_layout)
@@ -2081,6 +2128,7 @@ fn build_sprite_pipeline(
         sample_count: 1,
         blend_mode: BlendMode::Alpha,
         vertex_layout_hash: layout_hash,
+        feature_flags: ShaderFeatureFlags::EMPTY,
     };
     Ok(shader_library
         .get_pipeline(&key, &layout)

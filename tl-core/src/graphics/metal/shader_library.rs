@@ -8,6 +8,7 @@ use metal::{
     MTLVertexStepFunction, RenderPipelineColorAttachmentDescriptorRef,
     RenderPipelineDescriptor, RenderPipelineState, VertexDescriptor,
 };
+use crate::graphics::shader_flags::ShaderFeatureFlags;
 
 /// How the color attachment should blend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -27,6 +28,7 @@ pub struct PipelineKey {
     pub sample_count: u32,
     pub blend_mode: BlendMode,
     pub vertex_layout_hash: u64,
+    pub feature_flags: ShaderFeatureFlags,
 }
 
 /// Description of one vertex attribute inside a buffer layout.

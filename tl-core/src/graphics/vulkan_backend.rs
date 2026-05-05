@@ -21,6 +21,7 @@ use std::error::Error;
 use std::ffi::{CStr, CString};
 use std::fmt::{Display, Formatter};
 use std::mem::{align_of, offset_of, size_of};
+use std::path::PathBuf;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
 
@@ -82,6 +83,13 @@ pub struct VulkanBackendConfig {
     pub max_instances: usize,
     /// Explicit multi-GPU policy for the raw Vulkan path.
     pub multi_gpu: VulkanMultiGpuConfig,
+    /// Optional disk path for Vulkan pipeline cache persistence.
+    /// When `None`, a default temp-dir path is used.
+    pub pipeline_cache_path: Option<PathBuf>,
+    /// Maximum lights evaluated per frame (sorted by priority).
+    pub max_lights: usize,
+    /// Camera-relative distance beyond which lights are culled.
+    pub light_cull_distance: f32,
 }
 
 impl Default for VulkanBackendConfig {
@@ -93,6 +101,9 @@ impl Default for VulkanBackendConfig {
             window_system: LinuxWindowSystemIntegration::Auto,
             max_instances: 32_768,
             multi_gpu: VulkanMultiGpuConfig::default(),
+            pipeline_cache_path: None,
+            max_lights: 8,
+            light_cull_distance: 100.0,
         }
     }
 }
@@ -477,6 +488,7 @@ pub struct VulkanBackend {
     primary_submission_serial: u64,
     secondary_submission_serial: u64,
     transfer_submission_serial: u64,
+    pipeline_cache: vk::PipelineCache,
 }
 
 impl VulkanBackend {
@@ -562,6 +574,9 @@ impl VulkanBackend {
                 &mut swapchain,
             )?
         };
+        let pipeline_cache = unsafe {
+            create_pipeline_cache(&device, &config.pipeline_cache_path)?
+        };
         let scene_pipeline = unsafe {
             create_scene_pipeline_resources(
                 &instance,
@@ -572,6 +587,7 @@ impl VulkanBackend {
                 render_pass,
                 swapchain.extent,
                 config.frames_in_flight,
+                pipeline_cache,
             )?
         };
         let frame_resources = unsafe {
@@ -911,6 +927,7 @@ impl VulkanBackend {
                 self.swapchain.extent,
                 self.scene_pipeline.pipeline_layout,
                 false,
+                self.pipeline_cache,
             )?;
             self.scene_pipeline.transparent_pipeline = create_scene_pipeline(
                 &self.device,
@@ -918,6 +935,7 @@ impl VulkanBackend {
                 self.swapchain.extent,
                 self.scene_pipeline.pipeline_layout,
                 true,
+                self.pipeline_cache,
             )?;
         }
 
@@ -954,20 +972,57 @@ impl VulkanBackend {
                 capacity: slot.snapshot_slot.texture_capacity,
             });
         }
-        if snapshot.lights.len() > slot.snapshot_slot.light_capacity {
+        // Light budget prioritization: sort by camera distance + intensity, cull by distance,
+        // truncate to max_lights.
+        let camera_pos = [
+            snapshot.camera_eye[0],
+            snapshot.camera_eye[1],
+            snapshot.camera_eye[2],
+        ];
+        let mut lights: Vec<(f32, f32, &FrameLightRecord)> = snapshot
+            .lights
+            .iter()
+            .map(|light| {
+                let pos = [
+                    light.position_kind[0],
+                    light.position_kind[1],
+                    light.position_kind[2],
+                ];
+                let dx = pos[0] - camera_pos[0];
+                let dy = pos[1] - camera_pos[1];
+                let dz = pos[2] - camera_pos[2];
+                let dist_sq = dx * dx + dy * dy + dz * dz;
+                let intensity = light.color_intensity[3];
+                (dist_sq, -intensity, light)
+            })
+            .collect();
+        lights.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        let cull_dist_sq = self.config.light_cull_distance * self.config.light_cull_distance;
+        let kept: Vec<&FrameLightRecord> = lights
+            .into_iter()
+            .filter(|(dist_sq, _, _)| *dist_sq <= cull_dist_sq)
+            .map(|(_, _, light)| light)
+            .take(self.config.max_lights)
+            .collect();
+        if kept.len() > slot.snapshot_slot.light_capacity {
             return Err(VulkanBackendError::SnapshotLightCapacityExceeded {
-                requested: snapshot.lights.len(),
+                requested: kept.len(),
                 capacity: slot.snapshot_slot.light_capacity,
             });
         }
+        let lights_dropped = snapshot.lights.len().saturating_sub(kept.len());
 
         let header = SnapshotHeader {
             frame_id: snapshot.frame_id,
             instance_count: snapshot.transforms.len() as u32,
             material_count: snapshot.materials.len() as u32,
             texture_count: snapshot.textures.len() as u32,
-            light_count: snapshot.lights.len() as u32,
-            reserved: 0,
+            light_count: kept.len() as u32,
+            reserved: lights_dropped as u32,
         };
         unsafe {
             ptr::write(
@@ -1013,11 +1068,13 @@ impl VulkanBackend {
                 .snapshot_slot
                 .mapped
                 .as_mut_ptr::<FrameLightRecord>(slot.snapshot_slot.lights_offset)?;
-            ptr::copy_nonoverlapping(snapshot.lights.as_ptr(), light_dst, snapshot.lights.len());
+            if !kept.is_empty() {
+                ptr::copy_nonoverlapping(kept.as_ptr() as *const FrameLightRecord, light_dst, kept.len());
+            }
         }
 
         let byte_len = slot.snapshot_slot.lights_offset
-            + snapshot.lights.len() * size_of::<FrameLightRecord>();
+            + kept.len() * size_of::<FrameLightRecord>();
         slot.snapshot_slot.last_state = VulkanSnapshotSlotState {
             frame_id: snapshot.frame_id,
             instance_count: snapshot.transforms.len() as u32,
@@ -1025,7 +1082,7 @@ impl VulkanBackend {
             transparent_instance_count: snapshot.transparent_instance_count,
             material_count: snapshot.materials.len() as u32,
             texture_count: snapshot.textures.len() as u32,
-            light_count: snapshot.lights.len() as u32,
+            light_count: kept.len() as u32,
             byte_len,
             primitive_ranges: snapshot.primitive_ranges.to_vec(),
         };
@@ -1208,11 +1265,43 @@ impl Drop for VulkanBackend {
             self.swapchain
                 .loader
                 .destroy_swapchain(self.swapchain.swapchain, None);
+            let cache_path = self.config.pipeline_cache_path.clone()
+                .unwrap_or_else(|| std::env::temp_dir().join("tileline_vk_pipeline_cache.bin"));
+            let _ = save_pipeline_cache(&self.device, self.pipeline_cache, &cache_path);
+            self.device.destroy_pipeline_cache(self.pipeline_cache, None);
             self.device.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.instance.destroy_instance(None);
         }
     }
+}
+
+unsafe fn create_pipeline_cache(
+    device: &Device,
+    override_path: &Option<PathBuf>,
+) -> Result<vk::PipelineCache, VulkanBackendError> {
+    let cache_path = override_path
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join("tileline_vk_pipeline_cache.bin"));
+    let initial_data = std::fs::read(&cache_path).unwrap_or_default();
+    let create_info = vk::PipelineCacheCreateInfo::default()
+        .initial_data(&initial_data);
+    let cache = device.create_pipeline_cache(&create_info, None)?;
+    Ok(cache)
+}
+
+unsafe fn save_pipeline_cache(
+    device: &Device,
+    cache: vk::PipelineCache,
+    path: &std::path::Path,
+) -> Result<(), VulkanBackendError> {
+    let data = device.get_pipeline_cache_data(cache)?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(path, &data)
+        .map_err(|e| VulkanBackendError::InvalidConfig("pipeline cache write failed"))?;
+    Ok(())
 }
 
 unsafe fn create_instance(
@@ -2115,6 +2204,7 @@ unsafe fn create_scene_pipeline_resources(
     render_pass: vk::RenderPass,
     extent: vk::Extent2D,
     frames_in_flight: usize,
+    pipeline_cache: vk::PipelineCache,
 ) -> Result<ScenePipelineResources, VulkanBackendError> {
     let descriptor_set_layout_bindings = [
         vk::DescriptorSetLayoutBinding::default()
@@ -2214,9 +2304,9 @@ unsafe fn create_scene_pipeline_resources(
         graphics_queue,
     )?;
     let opaque_pipeline =
-        create_scene_pipeline(device, render_pass, extent, pipeline_layout, false)?;
+        create_scene_pipeline(device, render_pass, extent, pipeline_layout, false, pipeline_cache)?;
     let transparent_pipeline =
-        create_scene_pipeline(device, render_pass, extent, pipeline_layout, true)?;
+        create_scene_pipeline(device, render_pass, extent, pipeline_layout, true, pipeline_cache)?;
 
     Ok(ScenePipelineResources {
         descriptor_set_layout,
@@ -2318,6 +2408,7 @@ unsafe fn create_scene_pipeline(
     extent: vk::Extent2D,
     pipeline_layout: vk::PipelineLayout,
     transparent: bool,
+    pipeline_cache: vk::PipelineCache,
 ) -> Result<vk::Pipeline, VulkanBackendError> {
     let [vertex_artifact, fragment_artifact] = build_scene_shader_spirv_artifacts()?;
     let vertex_module = create_shader_module(device, &vertex_artifact.words)?;
@@ -2463,7 +2554,7 @@ unsafe fn create_scene_pipeline(
         .render_pass(render_pass)
         .subpass(0)];
     let pipeline = device
-        .create_graphics_pipelines(vk::PipelineCache::null(), &pipeline_info, None)
+        .create_graphics_pipelines(pipeline_cache, &pipeline_info, None)
         .map_err(|(_, err)| VulkanBackendError::Vk(err))?[0];
 
     device.destroy_shader_module(vertex_module, None);
