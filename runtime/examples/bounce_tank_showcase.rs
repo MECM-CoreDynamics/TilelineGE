@@ -121,6 +121,8 @@ fn main() {
                 rt_active: false,
                 rt_dynamic_count: 0,
                 rt_fallback: false,
+                network_pump: None,
+                script_parallel: None,
             },
             &mut frame.sprites,
         );

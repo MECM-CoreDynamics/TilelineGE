@@ -124,6 +124,8 @@ fn run_gms_path(
                 rt_active: false,
                 rt_dynamic_count: 0,
                 rt_fallback: false,
+                network_pump: None,
+                script_parallel: None,
             },
             &mut frame.sprites,
         );
@@ -210,6 +212,8 @@ fn run_mgs_path(
                 rt_active: false,
                 rt_dynamic_count: 0,
                 rt_fallback: false,
+                network_pump: None,
+                script_parallel: None,
             },
             &mut frame.sprites,
         );

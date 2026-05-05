@@ -1266,6 +1266,8 @@ struct TlAppRuntime {
     phase_order: RuntimePhaseOrderTracker,
     network_transport: Option<crate::network_transport::NetworkTransportRuntime>,
     network_socket: Option<tokio::net::UdpSocket>,
+    script_parallel: crate::tlscript_parallel::TlscriptParallelRuntimeCoordinator,
+    mps_scheduler: Option<Arc<mps::MpsScheduler>>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

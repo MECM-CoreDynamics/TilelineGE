@@ -16,8 +16,8 @@ use tl_core::{
     LoweringExternalSignature, MlsBackendKind, MlsExecutionMode, MlsPrecisionMode, Module,
     ParallelDispatchDecision, ParallelDispatchPlanner, ParallelDispatchPlannerConfig,
     ParallelExecutionPolicy, ParallelHookAnalyzer, ParallelHookOutcome, ParallelScheduleHint,
-    Parser, SemanticAnalyzer, SemanticOutcome, SemanticType, Stmt, TypedIrLoweringConfig,
-    TypedIrModule, UnaryOp,
+    Parser, SemanticAnalyzer, SemanticOutcome, SemanticReport, SemanticType, Stmt, TypedIrLoweringConfig,
+    TypedIrFunction, TypedIrModule, UnaryOp,
 };
 
 use crate::runtime_bridge::{
@@ -694,6 +694,7 @@ pub struct TlscriptShowcaseProgram<'src> {
     module: Module<'src>,
     typed_ir: TypedIrModule<'src>,
     hooks: ParallelHookOutcome<'src>,
+    semantic_report: SemanticReport<'src>,
     entry_item_index: usize,
     entry_ir_index: Option<usize>,
     entry_function_name: String,
@@ -705,6 +706,26 @@ pub struct TlscriptShowcaseProgram<'src> {
 impl<'src> TlscriptShowcaseProgram<'src> {
     pub fn entry_function_name(&self) -> &str {
         &self.entry_function_name
+    }
+
+    pub fn semantic_report(&self) -> &SemanticReport<'src> {
+        &self.semantic_report
+    }
+
+    pub fn module(&self) -> &Module<'src> {
+        &self.module
+    }
+
+    pub fn hooks(&self) -> &ParallelHookOutcome<'src> {
+        &self.hooks
+    }
+
+    pub fn typed_ir_module(&self) -> &TypedIrModule<'src> {
+        &self.typed_ir
+    }
+
+    pub fn entry_ir_function(&self) -> Option<&TypedIrFunction<'src>> {
+        self.entry_ir_index.map(|i| &self.typed_ir.functions[i])
     }
 
     /// Returns `true` when the entry function has a validated `@parallel` contract.
@@ -2888,6 +2909,7 @@ pub fn compile_tlscript_showcase<'src>(
         module,
         typed_ir,
         hooks,
+        semantic_report: semantic_outcome.report,
         entry_item_index,
         entry_ir_index,
         entry_function_name: config.entry_function,

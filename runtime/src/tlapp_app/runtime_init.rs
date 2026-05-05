@@ -1,5 +1,6 @@
 use super::*;
 use crate::network_transport::NetworkTransportRuntime;
+use crate::tlscript_parallel::TlscriptParallelRuntimeCoordinator;
 use tokio::net::UdpSocket;
 
 impl TlAppRuntime {
@@ -965,7 +966,37 @@ impl TlAppRuntime {
             phase_order: RuntimePhaseOrderTracker::default(),
             network_transport,
             network_socket,
+            script_parallel: TlscriptParallelRuntimeCoordinator::default(),
+            mps_scheduler: Some(Arc::new(mps::MpsScheduler::new())),
         };
+        // Analyze script modules for parallel dispatch opportunities
+        match &runtime.script_runtime {
+            ScriptRuntime::Single(program) => {
+                runtime.script_parallel.analyze_module(
+                    program.module(),
+                    program.semantic_report(),
+                    program.hooks(),
+                );
+            }
+            ScriptRuntime::Joint(bundle) => {
+                for program in &bundle.scripts {
+                    runtime.script_parallel.analyze_module(
+                        program.module(),
+                        program.semantic_report(),
+                        program.hooks(),
+                    );
+                }
+            }
+            ScriptRuntime::MultiScripts(programs) => {
+                for program in programs {
+                    runtime.script_parallel.analyze_module(
+                        program.module(),
+                        program.semantic_report(),
+                        program.hooks(),
+                    );
+                }
+            }
+        }
         runtime.sync_console_quick_fields_from_runtime();
         Ok(runtime)
     }

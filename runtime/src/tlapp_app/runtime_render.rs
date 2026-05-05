@@ -279,6 +279,78 @@ impl TlAppRuntime {
             .enter_phase(RuntimeFramePhase::Script)
             .is_ok();
 
+        // Script parallel planning + MPS dispatch routing (pre-WASM host: dummy tasks)
+        let mut script_parallel_submissions: Vec<crate::tlscript_parallel::TlscriptDispatchSubmission> = Vec::new();
+        if let Some(mps) = self.mps_scheduler.as_ref() {
+            let world = self.world.borrow();
+            match &self.script_runtime {
+                ScriptRuntime::Single(program) => {
+                    if let Some(func) = program.entry_ir_function() {
+                        let decision = self.script_parallel.plan_paradox_body_dispatch(func, &world);
+                        if matches!(decision.mode, tl_core::ParallelDispatchMode::ParallelChunked) {
+                            let chunk_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                            let submission = self.script_parallel.dispatch_native_paradox_body_chunks_for_function(
+                                mps,
+                                func,
+                                &world,
+                                |_chunk: crate::tlscript_parallel::TlscriptWorkChunk| {
+                                    let chunk_counter = Arc::clone(&chunk_counter);
+                                    Box::new(move || {
+                                        chunk_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }) as mps::NativeTask
+                                },
+                            );
+                            script_parallel_submissions.push(submission);
+                        }
+                    }
+                }
+                ScriptRuntime::Joint(bundle) => {
+                    for program in &bundle.scripts {
+                        if let Some(func) = program.entry_ir_function() {
+                            let decision = self.script_parallel.plan_paradox_body_dispatch(func, &world);
+                            if matches!(decision.mode, tl_core::ParallelDispatchMode::ParallelChunked) {
+                                let chunk_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                                let submission = self.script_parallel.dispatch_native_paradox_body_chunks_for_function(
+                                    mps,
+                                    func,
+                                    &world,
+                                    |_chunk: crate::tlscript_parallel::TlscriptWorkChunk| {
+                                        let chunk_counter = Arc::clone(&chunk_counter);
+                                        Box::new(move || {
+                                            chunk_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }) as mps::NativeTask
+                                    },
+                                );
+                                script_parallel_submissions.push(submission);
+                            }
+                        }
+                    }
+                }
+                ScriptRuntime::MultiScripts(programs) => {
+                    for program in programs {
+                        if let Some(func) = program.entry_ir_function() {
+                            let decision = self.script_parallel.plan_paradox_body_dispatch(func, &world);
+                            if matches!(decision.mode, tl_core::ParallelDispatchMode::ParallelChunked) {
+                                let chunk_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                                let submission = self.script_parallel.dispatch_native_paradox_body_chunks_for_function(
+                                    mps,
+                                    func,
+                                    &world,
+                                    |_chunk: crate::tlscript_parallel::TlscriptWorkChunk| {
+                                        let chunk_counter = Arc::clone(&chunk_counter);
+                                        Box::new(move || {
+                                            chunk_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }) as mps::NativeTask
+                                    },
+                                );
+                                script_parallel_submissions.push(submission);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let contact_snapshot = {
             let world = self.world.borrow();
             let broadphase = world.broadphase().stats();
@@ -1053,6 +1125,7 @@ impl TlAppRuntime {
                     .ray_tracing_status()
                     .fallback_reason
                     .is_empty(),
+                script_parallel: Some(self.script_parallel.metrics()),
             },
             &mut frame.sprites,
         );

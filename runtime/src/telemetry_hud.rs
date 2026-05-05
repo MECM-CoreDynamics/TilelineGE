@@ -5,9 +5,10 @@
 
 use crate::network_transport::NetworkPumpResult;
 use crate::scene::{RayTracingMode, SpriteInstance, SpriteKind};
+use crate::tlscript_parallel::TlscriptParallelRuntimeMetrics;
 
 /// Input telemetry for HUD composition.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TelemetryHudSample {
     pub fps: f32,
     pub frame_time_ms: f32,
@@ -19,6 +20,7 @@ pub struct TelemetryHudSample {
     pub rt_dynamic_count: u32,
     pub rt_fallback: bool,
     pub network_pump: Option<NetworkPumpResult>,
+    pub script_parallel: Option<TlscriptParallelRuntimeMetrics>,
 }
 
 /// HUD configuration.
@@ -90,7 +92,7 @@ impl TelemetryHudComposer {
                 cfg.anchor_top_left[1] - 0.092,
                 0.0,
             ],
-            size: [cfg.width, 0.235],
+            size: [cfg.width, 0.263],
             rotation_rad: 0.0,
             color_rgba: [0.05, 0.07, 0.10, 0.70],
             texture_slot: 0,
@@ -192,6 +194,39 @@ impl TelemetryHudComposer {
             [0.14, 0.22, 0.18, 0.82],
         );
 
+        // Script parallel readiness bar.
+        let script_fill = if let Some(ref metrics) = sample.script_parallel {
+            if metrics.dispatch_parallel_batches > 0 {
+                0.85
+            } else if metrics.advisor_runs > 0 {
+                0.45
+            } else {
+                0.15
+            }
+        } else {
+            0.05
+        };
+        let script_color = if let Some(ref metrics) = sample.script_parallel {
+            if metrics.dispatch_parallel_batches > 0 {
+                [0.92, 0.84, 0.28, 0.92]
+            } else if metrics.advisor_runs > 0 {
+                [0.72, 0.64, 0.28, 0.92]
+            } else {
+                [0.44, 0.50, 0.60, 0.80]
+            }
+        } else {
+            [0.44, 0.50, 0.60, 0.80]
+        };
+        self.push_meter(
+            sprites,
+            7,
+            7,
+            6.0,
+            script_fill,
+            script_color,
+            [0.22, 0.20, 0.14, 0.82],
+        );
+
         TelemetryHudMetrics {
             appended_sprites: sprites.len().saturating_sub(start_len),
         }
@@ -265,11 +300,12 @@ mod tests {
                 rt_dynamic_count: 0,
                 rt_fallback: false,
                 network_pump: None,
+                script_parallel: None,
             },
             &mut sprites,
         );
-        assert_eq!(m.appended_sprites, 13);
-        assert_eq!(sprites.len(), 13);
+        assert_eq!(m.appended_sprites, 15);
+        assert_eq!(sprites.len(), 15);
     }
 
     #[test]
@@ -288,6 +324,7 @@ mod tests {
                 rt_dynamic_count: 2_048,
                 rt_fallback: false,
                 network_pump: None,
+                script_parallel: None,
             },
             &mut sprites,
         );
