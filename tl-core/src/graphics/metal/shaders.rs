@@ -61,7 +61,7 @@ struct VSOut {
     float4 color;
     float3 emissive;
     float3 world_pos;
-    float  edge_factor;
+    float3 local_pos;
     float  primitive_code;
     float  roughness;
     float  metallic;
@@ -83,8 +83,7 @@ vertex VSOut scene_3d_vertex(
     out.color          = in.base_color;
     out.emissive       = in.emissive.xyz;
     out.world_pos      = world_pos.xyz;
-    float edge = max(max(abs(in.position.x), abs(in.position.y)), abs(in.position.z));
-    out.edge_factor    = smoothstep(0.38, 0.50, edge);
+    out.local_pos      = in.position;
     out.primitive_code = in.material_params.w;
     out.roughness      = in.material_params.x;
     out.metallic       = in.material_params.y;
@@ -261,8 +260,10 @@ fragment float4 scene_3d_fragment(
     lit += in.emissive;
 
     if (in.primitive_code > 0.5) {
-        lit += float3(0.08, 0.12, 0.18) * in.edge_factor;
-        alpha = clamp(alpha + in.edge_factor * 0.32, 0.0, 1.0);
+        float edge = max(max(abs(in.local_pos.x), abs(in.local_pos.y)), abs(in.local_pos.z));
+        float edge_factor = smoothstep(0.38, 0.50, edge);
+        lit += float3(0.08, 0.12, 0.18) * edge_factor;
+        alpha = clamp(alpha + edge_factor * 0.32, 0.0, 1.0);
     }
     return float4(lit, alpha);
 }

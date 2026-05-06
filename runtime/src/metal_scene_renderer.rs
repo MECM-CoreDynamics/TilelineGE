@@ -26,11 +26,21 @@ use winit::window::Window;
 
 use crate::draw_path::RuntimeDrawFrame;
 use crate::scene::RayTracingMode;
-use crate::upscaler::{resolve_fsr_status, FsrConfig, FsrStatus};
+use crate::upscaler::{resolve_fsr_status, FsrConfig, FsrMode, FsrStatus};
 use crate::vulkan_snapshot::{build_vulkan_render_snapshot, VulkanSnapshotBuildStats};
 use crate::wgpu_scene_renderer::{SceneRayTracingStatus, WgpuSceneRendererUploadStats};
 
 const RT_DYNAMIC_CAP: u32 = 16_384;
+
+fn resolve_metal_runtime_fsr_status(config: FsrConfig) -> FsrStatus {
+    resolve_fsr_status(
+        FsrConfig {
+            mode: FsrMode::Off,
+            ..config
+        },
+        Backend::Metal,
+    )
+}
 
 /// Runtime-facing configuration for the Metal scene renderer adapter.
 #[derive(Debug, Clone)]
@@ -124,7 +134,7 @@ impl MetalSceneRenderer {
             force_full_fbx_sphere: false,
             msaa_sample_count: 1,
             fsr_config: FsrConfig::default(),
-            fsr_status: resolve_fsr_status(FsrConfig::default(), Backend::Metal),
+            fsr_status: resolve_metal_runtime_fsr_status(FsrConfig::default()),
             ray_tracing_status: resolve_rt_status(RayTracingMode::Auto, false),
             last_upload_stats: WgpuSceneRendererUploadStats::default(),
             last_frame_result: None,
@@ -202,10 +212,11 @@ impl MetalSceneRenderer {
         (world_radius / clip_w.max(0.01)) * focal
     }
 
-    /// Runtime-side FSR policy update.
+    /// Runtime-side FSR policy update. Raw Metal currently presents at native scale;
+    /// the stored config is preserved for later but the effective status stays off.
     pub fn set_fsr_config(&mut self, config: FsrConfig) {
         self.fsr_config = config;
-        self.fsr_status = resolve_fsr_status(config, Backend::Metal);
+        self.fsr_status = resolve_metal_runtime_fsr_status(config);
     }
 
     /// Current effective FSR status.
@@ -550,6 +561,22 @@ mod tests {
                 + expected_light_bytes
                 + expected_sprite_bytes
         );
+    }
+
+    #[test]
+    fn metal_runtime_fsr_status_stays_native_until_scaled_target_exists() {
+        let status = resolve_metal_runtime_fsr_status(FsrConfig {
+            mode: FsrMode::On,
+            quality: crate::upscaler::FsrQualityPreset::Performance,
+            sharpness: 0.8,
+            render_scale_override: Some(0.5),
+        });
+
+        assert_eq!(status.requested_mode, FsrMode::Off);
+        assert!(!status.active);
+        assert!((status.render_scale - 1.0).abs() < 1e-6);
+        assert!((status.sharpness - 0.8).abs() < 1e-6);
+        assert!(status.reason.contains("mode=off"));
     }
 }
 

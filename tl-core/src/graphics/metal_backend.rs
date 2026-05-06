@@ -16,8 +16,8 @@ use std::sync::Arc;
 use core_graphics_types::geometry::CGSize;
 use metal::{
     foreign_types::ForeignType, Buffer, CommandQueue, DepthStencilDescriptor, DepthStencilState,
-    Device, MTLClearColor, MTLCompareFunction, MTLLoadAction, MTLPixelFormat,
-    MTLPrimitiveType, MTLResourceOptions, MTLStoreAction, MTLTextureType, MTLTextureUsage,
+    Device, MTLClearColor, MTLCompareFunction, MTLLoadAction, MTLOrigin, MTLPixelFormat,
+    MTLPrimitiveType, MTLResourceOptions, MTLSize, MTLStoreAction, MTLTextureType, MTLTextureUsage,
     MTLVertexFormat, MTLVertexStepFunction, MetalLayer, RenderPassDescriptor, RenderPipelineState,
     SamplerDescriptor, SamplerState, Texture, TextureDescriptor,
 };
@@ -957,6 +957,50 @@ impl MetalBackend {
         encoder.end_encoding();
     }
 
+    fn encode_present_pass(
+        &self,
+        command_buffer: &metal::CommandBufferRef,
+        source_texture: &metal::TextureRef,
+        target_texture: &metal::TextureRef,
+        source_width: u32,
+        source_height: u32,
+        target_width: u32,
+        target_height: u32,
+        frame_slot: usize,
+    ) {
+        if source_width == target_width && source_height == target_height {
+            let blit_encoder = command_buffer.new_blit_command_encoder();
+            blit_encoder.copy_from_texture(
+                source_texture,
+                0,
+                0,
+                MTLOrigin { x: 0, y: 0, z: 0 },
+                MTLSize {
+                    width: source_width as metal::NSUInteger,
+                    height: source_height as metal::NSUInteger,
+                    depth: 1,
+                },
+                target_texture,
+                0,
+                0,
+                MTLOrigin { x: 0, y: 0, z: 0 },
+            );
+            blit_encoder.end_encoding();
+            return;
+        }
+
+        self.encode_upscale_pass(
+            command_buffer,
+            source_texture,
+            target_texture,
+            source_width,
+            source_height,
+            target_width,
+            target_height,
+            frame_slot,
+        );
+    }
+
     /// Submit one frame worth of work to the Metal command queue.
     pub fn render_n(
         &mut self,
@@ -1111,7 +1155,7 @@ impl MetalBackend {
             );
 
             let postfx_start = std::time::Instant::now();
-            self.encode_upscale_pass(
+            self.encode_present_pass(
                 &command_buffer,
                 &self.offscreen_color_texture,
                 drawable_ref.texture(),
