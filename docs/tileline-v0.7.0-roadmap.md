@@ -360,11 +360,14 @@ Target:
   - GMS/MGS scaler profiles
 - `.pak` header includes an `executable` flag and entry-point metadata
 - runtime can boot directly from a `.pak` without external file references
+- **default executable `.pak` name is `prima.pak`**; runtime looks for `prima.pak` in the working
+  directory when no `--pak` argument is provided
 
 Acceptance:
 
 - `scripts/build_pak_executable.sh` produces a self-contained `.pak` from a project directory
 - `tlapp --pak mygame.pak` boots the game without additional CLI arguments
+- `tlapp` (no arguments) in a directory containing `prima.pak` boots from `prima.pak`
 - `.pak` size is bounded by shard partitioning (existing 5GB default cap still applies)
 
 ### V6.2. `.pak` Manifest for Executable Entry Points

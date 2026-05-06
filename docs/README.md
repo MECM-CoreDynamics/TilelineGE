@@ -28,6 +28,8 @@ feature lists.
 - `tileline-v0.6.0-roadmap.md`: MLS runtime/training stack direction
 - `tileline-v0.6.5-roadmap.md`: GGUF + NVFP4 expansion on top of MLS
 - `tileline-v0.7.0-roadmap.md`: WGPU exit, GMS canonical, parallel-by-default, MGS completion, BerrySR frame generation, and `.pak` executable standard (`Ironclad`)
+- `tileline-v0.8.0-roadmap.md`: Editor, controller support, UI/UX revolution, HXNU kernel support, partial ownership crates, and LTS bridge (`Artisan`)
+- `tileline-v1.0-roadmap.md`: API freeze, behavioral stability, platform guarantee, and long-term support commitment (`Maturity`)
 - `runtime-tlapp-console.md`: live runtime control surface inside TLApp
 - `paradoxpe-foundation.md`: physics architecture and data flow
 - `runtime-bridge-flow.md`: bridge/runtime ownership model
@@ -47,6 +49,8 @@ feature lists.
 - `tileline-v0.6.0-roadmap.md`: v0.6.0 roadmap for MLS as a first-class runtime/training subsystem
 - `tileline-v0.6.5-roadmap.md`: v0.6.5 roadmap for GGUF model support and NVFP4-class low-precision MLS execution
 - `tileline-v0.7.0-roadmap.md`: v0.7.0 roadmap for full WGPU independence, GMS canonical GPU path, parallel-by-default execution, MGS completion, BerrySR AI frame generation, and `.pak` executable packaging standard
+- `tileline-v0.8.0-roadmap.md`: v0.8.0 roadmap for editor, controller support, UI/UX revolution, HXNU kernel support, partial ownership crates, and LTS bridge to v1.0
+- `tileline-v1.0-roadmap.md`: v1.0 maturity roadmap for API freeze, behavioral stability, platform guarantee, and long-term support
 - `tileline-v0.3.0-foundation.md`: v0.3.0 foundation scope for runtime FSR policy and decentralized NPS topology
 - `engine-architecture-api-core.md`: architecture/API-core map for crate boundaries, runtime lifecycle, and integration surfaces
 - `tlscript-v0.4.5-guide.md`: strict `v0.4.5` TLScript guide used as canonical source for PDF release docs
