@@ -16,7 +16,7 @@ The release theme is:
 - perform a serious ParadoxPE + MPS revision
 - remove the remaining practical dependence on `rayon` and `bevy` from shipping runtime paths
 
-## Current Snapshot
+## Current Snapshot (as of 2026-05-04)
 
 The engine already has these major pieces in place:
 
@@ -25,11 +25,26 @@ The engine already has these major pieces in place:
 - ray tracing: present in hybrid form, but still needs optimization and stronger fallback behavior
 - runtime scene path: working
 - `.tlscript` + `.tlsprite` authoring path: working
-- ParadoxPE: real physics core, but still not fully exploiting MPS
-- MPS: custom dispatcher foundation exists, but runtime integration is not yet the final form
+- ParadoxPE: real physics core; `broadphase|narrowphase|solver|integrate` hot paths migrated off
+  `rayon` onto deterministic `paradoxpe/src/parallel.rs` shard workers
+- MPS: custom dispatcher foundation exists; `PhysicsMpsRunner` is the canonical runtime physics
+  async path, and `TlscriptParallelRuntimeCoordinator` is now wired into the live frame loop
+- canonical phase ordering (`Network -> Script -> Physics -> RenderPlan -> Present`) enforced in
+  `TlAppRuntime` via `RuntimePhaseOrderTracker`
+- `NetworkTransportRuntime` wired into live frame loop with non-blocking UDP pump and HUD telemetry
+- `TlscriptParallelRuntimeCoordinator` wired into live frame loop with pre-WASM-host MPS dispatch
+  routing and per-script advisor analysis at load time
+- `rayon` and `bevy` dependencies fully removed from workspace and shipping hot paths
+- GMS Native SM/CU scaler baseline active with `render|physics|ai_ml|postfx|ui` domain budgets,
+  guardrails, and HUD telemetry
+- GPU domain affinity (`auto_gpu_routing` + per-domain pinning) wired through `.tlpfile`, CLI,
+  console, `.tlscript`, and telemetry
+- raw Vulkan backend skeleton exists in `tl-core` with experimental `TILELINE_RENDERER=vulkan` path;
+  `wgpu` still owns the shipping render loop during dual-path migration
 
-That means `v0.5.0` should focus on **optimization, dependency cleanup, and missing production
-features**, not on inventing entirely new subsystems.
+That means `v0.5.0` should focus on **finishing dependency cleanup (WGPU exit), render production
+features (effects + textures), and release hardening**, with most structural/infrastructure work
+already behind us.
 
 ## Release Goals
 
@@ -380,6 +395,8 @@ Acceptance gates:
 - under `30k` dense-contact stress, serial-tail work remains bounded and does not dominate phase
   time
 - runtime logs/telemetry can always explain why a phase ran serial vs parallel
+- **Status: per-phase `serial_fallback_reason` telemetry is implemented and active in
+  `PhysicsWorld::last_step_timings` (integrate, broadphase, narrowphase, solver)**
 
 ### C1. Step Pipeline Refactor
 
@@ -494,33 +511,31 @@ Acceptance gates:
 
 This is a hard release theme, not a stretch goal.
 
-### Workstream E Progress Snapshot (2026-03-27)
+### Workstream E Progress Snapshot (2026-05-04)
 
 Current status from dependency + codepath audit:
 
-- `E1` Bevy independence: strong progress.
-- `E2` Rayon independence: active migration.
+- `E1` Bevy independence: **DONE**.
+- `E2` Rayon independence: **DONE**.
 - `E3` GMS Native SM/CU scaler: baseline integration active, calibration and validation ongoing.
 - `E4` WGPU independence: partial; dual-path period still ongoing.
+- `E5` GPU Domain Affinity: config / console / `.tlscript` / `.tlpfile` / telemetry wiring **complete**;
+  actual backend multi-GPU dispatch plumbing deferred to Vulkan/Metal backend work.
 
 Measured findings:
 
 - Bevy:
-  - no shipping runtime codepath usage of `bevy` scheduler/tasks was found
-  - workspace-level `bevy_ecs` dependency was removed in this pass
+  - no shipping runtime codepath usage of `bevy` scheduler/tasks remains
+  - workspace-level `bevy_ecs` dependency was removed and has not been reintroduced
 - Rayon:
-  - direct `rayon` usage was removed from `runtime` crate in this pass (`runtime/src/scene.rs`
+  - direct `rayon` usage was removed from `runtime` crate (`runtime/src/scene.rs`
     + TLApp runtime bootstrap)
-  - ParadoxPE broadphase + narrowphase hot loops now run through
-    `paradoxpe/src/parallel.rs` (deterministic chunked workers, no `rayon` in those phases)
-  - `PhysicsWorld::capture_snapshot` and `BodyRegistry::integrate_with_shards` were moved off
-    `rayon` as part of E2 staging
-  - ParadoxPE solver was migrated off `rayon` in this pass (Jacobi/contact push/projection loops
-    now use `paradoxpe/src/parallel.rs` helpers)
+  - ParadoxPE `broadphase|narrowphase|solver|integrate` hot paths run through
+    `paradoxpe/src/parallel.rs` (deterministic chunked workers, no `rayon`)
+  - `PhysicsWorld::capture_snapshot` and `BodyRegistry::integrate_with_shards` run off `rayon`
   - `paradoxpe/Cargo.toml` no longer depends on `rayon`
-  - MGS zram path was migrated off `rayon` in this pass (`mgs/src/zram.rs` now uses scoped
-    deterministic shard workers)
-  - workspace-level `rayon` dependency was removed after crate-level migration completed
+  - MGS zram path runs off `rayon` (`mgs/src/zram.rs` uses scoped deterministic shard workers)
+  - **workspace-level `rayon` dependency was removed after crate-level migration completed**
 - WGPU:
   - shipping/runtime-adjacent path still includes `wgpu` ownership in `runtime/src/tlapp_app/mod.rs`
     plus `runtime` render loop glue and `tl-core` bridge/sync `wgpu` handles
@@ -528,22 +543,13 @@ Measured findings:
   - scheduler auto-policy path was decoupled from direct `wgpu::AdapterInfo` dependence:
     `runtime::scheduler_path` now uses backend-neutral `RuntimeAdapterInfo` for core decisions,
     with `wgpu` conversion wrappers kept for migration compatibility
+  - **all new render features since v0.4.5 are gated behind Vulkan backend ownership**
 
-Immediate execution order (Workstream E Sprint-1):
+Immediate execution order (Workstream E Sprint-2 — current):
 
-- `E2-S1`: done in this pass for ParadoxPE (`broadphase`, `narrowphase`, `solver`,
-  `capture_snapshot`, `integrate_with_shards`)
-- `E2-S2`: done in this pass; runtime `rayon` global pool bootstrap removed
-- `E2-S3`: done in this pass; MGS zram migrated and workspace-level `rayon` dependency removed
-- `E3-S1`: baseline GMS scaler lane controls (`render|physics|ai_ml|postfx|ui`) + guardrail
-  policy + telemetry wiring
-- `E3-S2`: full precedence contract (`CLI > .tlscript > .tlpfile`) and soak/benchmark tuning
-- `E4-S1`: keep dual renderer during migration, but mark Vulkan as primary shipping path and gate
-  all new render features behind Vulkan backend ownership
-- `E4-S2`: move bridge/sync public surfaces from `wgpu` submission handles to backend-neutral frame
-  tickets everywhere
-- `E4-S2`: partial in this pass; scheduler-path policy and project scheduler resolution now consume
-  backend-neutral adapter metadata (`RuntimeAdapterInfo`) instead of raw `wgpu::AdapterInfo`
+- `E3-S2`: soak/benchmark tuning of GMS scaler guardrails and domain budget clamp behavior
+- `E4-S2`: continue moving bridge/sync public surfaces from `wgpu` submission handles to
+  backend-neutral frame tickets
 - `E4-S3`: final audited dependency cleanup patch removing `wgpu` + `egui-wgpu` from shipping
   runtime crates once Vulkan path passes release validation gates
 
@@ -563,8 +569,8 @@ Acceptance gate:
 
 Status:
 
-- in progress and close to done; no runtime scheduler/task usage remains in active shipping path
-- keep this item open until release-prep audit confirms no reintroduction in runtime crates
+- **DONE**; no runtime scheduler/task usage remains in active shipping path
+- workspace-level `bevy_ecs` dependency removed and not reintroduced
 
 ### E2. Rayon Independence
 
@@ -580,7 +586,8 @@ Acceptance gate:
 
 Status:
 
-- done for current shipping hot paths (runtime + ParadoxPE + MGS zram)
+- **DONE** for all shipping hot paths (runtime + ParadoxPE + MGS zram)
+- workspace-level `rayon` dependency removed after crate-level migration completed
 - keep regression validation open during Vulkan cutover and next perf pass
 
 ### E3. GMS Native SM/CU Scaler + Independence Cutover
@@ -637,6 +644,7 @@ Acceptance gate:
 Status:
 
 - in progress (baseline wiring is active; calibration + gate validation pending)
+- GPU domain affinity (E5) config / console / `.tlscript` / `.tlpfile` / telemetry wiring is **complete**
 
 ### E4. WGPU Independence
 
@@ -696,17 +704,22 @@ Note:
 
 ### Milestone 1: Render + Effects + Texture Consolidation
 
-Target contents:
+**Status: IN PROGRESS**
 
-- RT optimization pass 1
-- shader/light cleanup
-- reflection and general graphics polish pass 1
+Completed:
+
+- raw Vulkan backend backbone in `tl-core` (experimental `TILELINE_RENDERER=vulkan`)
+- backend-neutral `RuntimeAdapterInfo` for scheduler decisions (decoupled from `wgpu::AdapterInfo`)
+- shader/lighting stack remains stable; shadow atlas and frustum culling active
+
+Remaining:
+
+- RT optimization pass 1 (spike reduction, AS build budgeting)
 - SPIR-V shader artifact path and pipeline-cache groundwork
 - first stable effect hooks
 - initial texture pipeline
 - texture-pack support baseline
 - `Tilecraft` starter bootstrap path
-- raw Vulkan backend backbone in `tl-core`
 
 Exit criteria:
 
@@ -714,17 +727,25 @@ Exit criteria:
 
 ### Milestone 2: MPS + Independence Hardening
 
-Target contents:
+**Status: IN PROGRESS (~70 %)**
 
-- stronger MPS dispatch ownership in runtime
+Completed:
+
+- `rayon` hot-path exit — **DONE** (ParadoxPE, runtime, MGS zram migrated; workspace-level dependency removed)
+- `Bevy` runtime-path exit — **DONE** (no shipping scheduler/task usage; workspace-level dependency removed)
+- ParadoxPE full-phase parallel hot path — **DONE** (`broadphase|narrowphase|solver|integrate` run through
+  deterministic shard workers; per-phase `serial_fallback_reason` telemetry implemented)
+- stronger MPS dispatch ownership in runtime — **DONE** (`PhysicsMpsRunner` is canonical async physics path;
+  `TlscriptParallelRuntimeCoordinator` routes script parallel chunks through MPS)
+- GMS Native SM/CU scaler baseline — **ACTIVE** (lane controls, guardrails, telemetry, and HUD wired;
+  GPU domain affinity config complete)
+
+Remaining:
+
+- `wgpu` shipping render-path exit (dual-path migration ongoing)
+- GMS scaler soak/benchmark tuning and guardrail calibration
 - opt-in `Heimdall` ultra-aggressive performance profile
-- GMS Native SM/CU scaler stabilization and guardrail tuning
-- MAS (`runtime/src/mas.rs`) promoted as Multi Audio Synthesizer runtime path with MPS-aligned scheduling
-- ParadoxPE phase refactor and lower serial world-step fraction
-- ParadoxPE full-phase parallel hot path hardening (serial-tail-only fallback policy)
-- `rayon` hot-path exit
-- `Bevy` runtime-path exit
-- `wgpu` shipping render-path exit
+- MAS (`runtime/src/mas.rs`) runtime promotion and validation
 - regression validation
 - final docs and release notes
 
