@@ -2,7 +2,7 @@
 //!
 //! Keeps mobile path orchestration in `runtime/src` and mirrors the GMS dispatch helper semantics.
 
-use mgs::MpsWorkloadHint;
+use tl_core::mgs::MpsWorkloadHint;
 use mps::{CorePreference, NativeTask, TaskPriority};
 use tl_core::{
     MgsBridgeFrameId, MgsBridgeMpsSubmission, MgsBridgeSubmitReceipt, MgsBridgeTaskDescriptor,
@@ -120,7 +120,7 @@ fn make_noop_preprocess_task() -> NativeTask {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mgs::MobileGpuProfile;
+    use tl_core::mgs::MobileGpuProfile;
 
     #[test]
     fn submits_and_seals_mobile_hint() {

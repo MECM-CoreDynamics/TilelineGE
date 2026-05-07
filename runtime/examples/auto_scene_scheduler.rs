@@ -1,4 +1,4 @@
-use mgs::MgsBridge;
+use tl_core::mgs::MgsBridge;
 use paradoxpe::{PhysicsWorld, PhysicsWorldConfig};
 use runtime::{
     choose_scheduler_path, estimate_mobile_workload_hint, estimate_scene_workload_requests,
@@ -181,7 +181,7 @@ fn run_mgs_path(
     sprite_loader: &mut TlspriteWatchReloader,
     sprite_cache: &mut TlspriteProgramCache,
 ) {
-    let bridge = MgsBridge::new(mgs::MobileGpuProfile::detect(&adapter_name));
+    let bridge = MgsBridge::new(tl_core::mgs::MobileGpuProfile::detect(&adapter_name));
     let mut draw_compiler = DrawPathCompiler::new();
     let telemetry_hud = TelemetryHudComposer::new(Default::default());
     let mut memory_pressure_frames = 0u64;

@@ -34,16 +34,16 @@ pub const VERSION_ENTRIES: &[TilelineVersionEntry] = &[
         version: mps::MODULE_VERSION,
     },
     TilelineVersionEntry {
-        module: gms::MODULE_ID,
-        version: gms::MODULE_VERSION,
+        module: tl_core::gms::MODULE_ID,
+        version: tl_core::gms::MODULE_VERSION,
     },
     TilelineVersionEntry {
-        module: mgs::MODULE_ID,
-        version: mgs::MODULE_VERSION,
+        module: tl_core::mgs::MODULE_ID,
+        version: tl_core::mgs::MODULE_VERSION,
     },
     TilelineVersionEntry {
-        module: nps::MODULE_ID,
-        version: nps::MODULE_VERSION,
+        module: tl_core::nps::MODULE_ID,
+        version: tl_core::nps::MODULE_VERSION,
     },
     TilelineVersionEntry {
         module: paradoxpe::MODULE_ID,
@@ -76,9 +76,9 @@ pub fn resolve_tileline_version_query(query: &str) -> Option<TilelineVersionEntr
         "rt" | "runtime" => RUNTIME_MODULE_ID,
         "core" | "tlcore" => tl_core::MODULE_ID,
         "mps" => mps::MODULE_ID,
-        "gms" => gms::MODULE_ID,
-        "mgs" => mgs::MODULE_ID,
-        "nps" => nps::MODULE_ID,
+        "gms" => tl_core::gms::MODULE_ID,
+        "mgs" => tl_core::mgs::MODULE_ID,
+        "nps" => tl_core::nps::MODULE_ID,
         "paradoxpe" | "ppe" => paradoxpe::MODULE_ID,
         _ => return None,
     };

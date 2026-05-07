@@ -60,8 +60,8 @@ use crate::{
 use crate::{MetalSceneRenderer, MetalSceneRendererConfig};
 #[cfg(target_os = "linux")]
 use crate::{VulkanSceneRenderer, VulkanSceneRendererConfig};
-use gms::safe_default_required_limits_for_adapter;
-use mgs::MobileGpuProfile;
+use tl_core::gms::safe_default_required_limits_for_adapter;
+use tl_core::mgs::MobileGpuProfile;
 use mps::{MpsThreadPoolMetrics, SimdBackendKind};
 use nalgebra::Vector3;
 use paradoxpe::{

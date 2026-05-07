@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use mgs::MobileGpuProfile;
+use tl_core::mgs::MobileGpuProfile;
 use tl_core::{
     MgsBridgeFrameId, MgsBridgeFramePlan, MgsBridgeMpsSubmission, MpsMgsBridge, MpsMgsBridgeConfig,
     MpsMgsBridgeMetrics,

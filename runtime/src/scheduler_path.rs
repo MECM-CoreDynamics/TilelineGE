@@ -4,7 +4,7 @@
 //! - mobile TBDR targets (Mali/Adreno/PowerVR/Apple mobile profile) -> MGS
 //! - desktop/high-throughput targets -> GMS
 
-use mgs::MobileGpuProfile;
+use tl_core::mgs::MobileGpuProfile;
 
 /// Runtime platform classification used by scheduler policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

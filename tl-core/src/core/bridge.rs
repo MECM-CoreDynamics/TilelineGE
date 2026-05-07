@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::queue::SegQueue;
-use gms::{
+use crate::gms::{
     AdaptiveBufferDecision, AdaptiveFrameTelemetry, DispatchPlan, GmsDispatcher, GpuInventory,
     MultiGpuDispatchPlan, MultiGpuDispatcher, MultiGpuWorkloadRequest, TaskClass, WorkloadRequest,
 };
@@ -733,8 +733,8 @@ impl MpsGmsBridge {
 }
 
 fn detect_expected_sync_backend(
-    primary: &gms::GpuAdapterProfile,
-    secondary: Option<&gms::GpuAdapterProfile>,
+    primary: &crate::gms::GpuAdapterProfile,
+    secondary: Option<&crate::gms::GpuAdapterProfile>,
 ) -> crate::graphics::multigpu::sync::SyncBackendHint {
     if primary.backend == wgpu::Backend::Metal
         || secondary

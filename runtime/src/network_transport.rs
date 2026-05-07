@@ -17,7 +17,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use mps::MpsScheduler;
-use nps::{
+use tl_core::nps::{
     packet_semantics, select_mesh_snapshot_targets, BootstrapHello, BootstrapWelcome,
     DecodedPacketEvent, DecodedPayload, EncodedDatagram, MeshFanoutConfig, NetworkPacketConfig,
     NetworkPacketManager, NetworkPacketMetrics, NetworkTopology, PacketDecodeFailure,
@@ -811,7 +811,7 @@ impl NetworkTransportRuntime {
 mod tests {
     use std::time::Duration;
 
-    use nps::{BootstrapHello, BootstrapWelcome, DecodedPayload, InputFrame, PayloadKind};
+    use tl_core::nps::{BootstrapHello, BootstrapWelcome, DecodedPayload, InputFrame, PayloadKind};
     use paradoxpe::{BodyDesc, BodyKind, PhysicsWorldConfig};
     use tokio::task::yield_now;
     use tokio::time::timeout;

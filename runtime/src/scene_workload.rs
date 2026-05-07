@@ -3,7 +3,7 @@
 //! This keeps scene->GPU workload synthesis in `runtime/src`, so demos and main engine loops can
 //! use the same mapping logic instead of re-implementing formulas in benchmark binaries.
 
-use gms::{
+use tl_core::gms::{
     estimate_scene_workload, SceneWorkloadEstimate, SceneWorkloadSnapshot, SceneWorkloadTuning,
 };
 

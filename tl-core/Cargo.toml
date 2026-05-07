@@ -10,12 +10,12 @@ crossbeam.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 mps = { path = "../mps" }
-gms = { path = "../gms" }
-mgs = { path = "../mgs" }
 paradoxpe = { path = "../paradoxpe" }
 sxrc = { path = "../sxrc" }
 nalgebra.workspace = true
 wasm-encoder = "0.224.0"
+miniz_oxide = "0.8.9"
+pollster = "0.4.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ash = "0.38.0"
@@ -26,3 +26,14 @@ metal = "0.33.0"
 objc = "0.2"
 core-graphics-types = "0.2"
 block = "0.1"
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "gms_bench"
+harness = false
+
+[[bench]]
+name = "mgs_bench"
+harness = false

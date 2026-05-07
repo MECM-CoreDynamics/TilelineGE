@@ -101,7 +101,7 @@ pub use network_transport::{
     NetworkTransportConfig, NetworkTransportMetrics, NetworkTransportRuntime,
     SnapshotCadenceConfig,
 };
-pub use nps::{MeshFanoutConfig, NetworkTopology};
+pub use tl_core::nps::{MeshFanoutConfig, NetworkTopology};
 pub use pak::{
     create_pak_from_dir, list_pak, read_file_from_pak, unpack_pak, PakBuildReport, PakEntry,
     PakIndex, PakUnpackReport,

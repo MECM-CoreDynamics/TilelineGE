@@ -21,8 +21,8 @@ use crate::scene_dispatch::{
     submit_scene_estimate_to_bridge, SceneDispatchBridgeConfig, SceneDispatchSubmission,
 };
 use crate::tlscript_parallel::TlscriptParallelRuntimeCoordinator;
-use gms::{MultiGpuExecutor, MultiGpuFrameSubmitResult, SceneWorkloadEstimate};
-use nps::DecodedPacketEvent;
+use tl_core::gms::{MultiGpuExecutor, MultiGpuFrameSubmitResult, SceneWorkloadEstimate};
+use tl_core::nps::DecodedPacketEvent;
 use paradoxpe::PhysicsWorld;
 use tl_core::{
     AdaptiveBufferDecision, AdaptiveFrameTelemetry, BridgeFrameId, BridgeFramePlan,

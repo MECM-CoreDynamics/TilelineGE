@@ -5,7 +5,7 @@
 //! - submit tasks through MPS via `FrameLoopRuntime`
 //! - seal the frame so `MpsGmsBridge` can publish a frame plan on the next pump
 
-use gms::SceneWorkloadEstimate;
+use tl_core::gms::SceneWorkloadEstimate;
 use mps::{CorePreference, NativeTask, TaskPriority};
 use tl_core::{
     BridgeFrameId, BridgeGpuTaskKind, BridgeMpsSubmission, BridgeSubmitReceipt,
@@ -332,7 +332,7 @@ fn round_up_u64(value: u64, alignment: u64) -> u64 {
 mod tests {
     use std::time::Duration;
 
-    use gms::{MultiGpuWorkloadRequest, SceneWorkloadEstimate, WorkloadRequest};
+    use tl_core::gms::{MultiGpuWorkloadRequest, SceneWorkloadEstimate, WorkloadRequest};
     use tl_core::MpsGmsBridgeConfig;
 
     use crate::frame_loop::FrameLoopRuntimeConfig;

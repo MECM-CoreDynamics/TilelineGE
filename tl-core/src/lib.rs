@@ -19,8 +19,11 @@ pub const MODULE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod compression;
 pub mod core;
+pub mod gms;
 pub mod graphics;
+pub mod mgs;
 pub mod mls;
+pub mod nps;
 pub mod physics;
 pub mod tlscript;
 
@@ -33,7 +36,7 @@ pub use core::mgs_bridge::{
     MgsBridgeSubmitReceipt, MgsBridgeTaskDescriptor, MpsMgsBridge, MpsMgsBridgeConfig,
     MpsMgsBridgeMetrics,
 };
-pub use gms::{AdaptiveBufferDecision, AdaptiveFrameTelemetry};
+pub use crate::gms::{AdaptiveBufferDecision, AdaptiveFrameTelemetry};
 pub use graphics::frame_snapshot::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
     FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossbeam::queue::SegQueue;
-use mgs::{MgsBridge, MgsBridgePlan, MobileGpuProfile, MpsWorkloadHint};
+use crate::mgs::{MgsBridge, MgsBridgePlan, MobileGpuProfile, MpsWorkloadHint};
 use mps::{CorePreference, MpsScheduler, NativeTask, SchedulerMetrics, TaskPriority};
 
 // ── Frame / Submission identifiers ──────────────────────────────────────────

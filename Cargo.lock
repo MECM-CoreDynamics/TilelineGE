@@ -600,9 +600,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.0"
+version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b193af5b67834b676abd72466a96c1024e6a6ad978a1f484bd90b85c94041351"
+checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
 dependencies = [
  "clap_builder",
 ]
@@ -1873,16 +1873,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gms"
-version = "0.4.5"
-dependencies = [
- "criterion",
- "pollster",
- "wgpu 28.0.0",
- "winit",
-]
-
-[[package]]
 name = "gpu-alloc"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2674,17 +2664,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mgs"
-version = "0.4.5"
-dependencies = [
- "criterion",
- "miniz_oxide",
- "pollster",
- "wgpu 28.0.0",
- "winit",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2955,16 +2934,6 @@ dependencies = [
  "mio 0.8.11",
  "walkdir",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "nps"
-version = "0.4.5"
-dependencies = [
- "crossbeam",
- "mps",
- "nalgebra",
- "paradoxpe",
 ]
 
 [[package]]
@@ -3980,15 +3949,12 @@ dependencies = [
  "fbx",
  "font8x8",
  "gilrs",
- "gms",
  "hound",
  "image",
  "metal 0.33.0",
- "mgs",
  "mps",
  "nalgebra",
  "notify",
- "nps",
  "num_cpus",
  "paradoxpe",
  "pollster",
@@ -4659,14 +4625,15 @@ dependencies = [
  "block",
  "bytemuck",
  "core-graphics-types 0.2.0",
+ "criterion",
  "crossbeam",
- "gms",
  "metal 0.33.0",
- "mgs",
+ "miniz_oxide",
  "mps",
  "nalgebra",
  "objc",
  "paradoxpe",
+ "pollster",
  "sxrc",
  "wasm-encoder 0.224.1",
  "wgpu 28.0.0",

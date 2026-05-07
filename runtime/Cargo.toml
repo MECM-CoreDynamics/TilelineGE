@@ -18,10 +18,7 @@ parallel_pipeline_v2 = []
 [dependencies]
 tl-core = { path = "../tl-core" }
 wgpu.workspace = true
-gms = { path = "../gms" }
-mgs = { path = "../mgs" }
 mps = { path = "../mps" }
-nps = { path = "../nps" }
 paradoxpe = { path = "../paradoxpe" }
 tokio = { workspace = true, features = ["net", "time", "rt", "macros"] }
 nalgebra.workspace = true
