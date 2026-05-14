@@ -7,6 +7,7 @@
 use crate::gms::hardware::{
     ComputeUnitEstimateSource, ComputeUnitKind, GpuAdapterProfile, GpuInventory, MemoryTopology,
 };
+use crate::gms::GmsSxrcCompressionConfig;
 use wgpu::{BufferUsages, TextureUsages};
 
 /// Input workload description for a frame or simulation step.
@@ -187,6 +188,8 @@ pub struct SharedTextureBridgePlan {
     pub frames_in_flight: u32,
     /// Heuristic host-mediated transfer latency estimate.
     pub estimated_transfer_ms: f64,
+    /// Planned SXRC compression policy for host-mediated bridge payloads.
+    pub sxrc_compression: GmsSxrcCompressionConfig,
 }
 
 /// Synchronization and preallocation plan for multi-GPU frame overlap.
@@ -1039,6 +1042,7 @@ fn build_shared_texture_bridge_plan(
         ring_segments,
         frames_in_flight,
         estimated_transfer_ms,
+        sxrc_compression: GmsSxrcCompressionConfig::default(),
     })
 }
 

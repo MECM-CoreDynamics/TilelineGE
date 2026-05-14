@@ -15,6 +15,7 @@ pub const MODULE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod adaptive_buffer;
 pub mod bridge;
+pub mod compression;
 pub mod hardware;
 pub mod multi_gpu_runtime;
 pub mod render_benchmark;
@@ -31,6 +32,10 @@ pub use bridge::{
     MultiGpuLaneAssignment, MultiGpuRole, MultiGpuSyncPlan, MultiGpuWorkloadRequest,
     SharedTextureBridgePlan, SharedTransferKind, SyncEquivalent, TaskClass, WorkloadRequest,
     ZeroCopyBufferPlan,
+};
+pub use compression::{
+    GmsSxrcBypassReason, GmsSxrcCachePressureLevel, GmsSxrcCompressionConfig,
+    GmsSxrcCompressionStats,
 };
 pub use hardware::{
     clamp_required_limits_to_supported, safe_default_required_limits_for_adapter,

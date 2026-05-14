@@ -14,6 +14,9 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::gms::bridge::{MultiGpuDispatchPlan, MultiGpuDispatcher, MultiGpuWorkloadRequest};
+use crate::gms::compression::{
+    GmsSxrcCompressedBlob, GmsSxrcCompressionConfig, GmsSxrcCompressionStats, GmsSxrcCompressor,
+};
 use crate::gms::hardware::{
     safe_default_required_limits_for_adapter, GpuAdapterProfile, GpuInventory, MemoryTopology,
 };
@@ -51,6 +54,8 @@ pub struct MultiGpuExecutorConfig {
     pub workload_request: MultiGpuWorkloadRequest,
     /// Auto mode minimum projected gain threshold. Below this, the executor disables itself.
     pub auto_min_projected_gain_pct: f64,
+    /// Optional SXRC compression policy for persistent bridge host-ring segments.
+    pub sxrc_compression: GmsSxrcCompressionConfig,
 }
 
 /// Runtime/telemetry summary produced by the portable multi-GPU executor.
@@ -78,6 +83,7 @@ pub struct MultiGpuExecutorSummary {
     pub aggressive_integrated_preallocation: bool,
     pub integrated_encoder_pool: u32,
     pub integrated_ring_segments: u32,
+    pub bridge_sxrc_compression: GmsSxrcCompressionStats,
     /// True when Vulkan version compatibility gating was applied.
     pub vulkan_version_gate_enabled: bool,
     /// Primary adapter Vulkan API version (major.minor), if detected.
@@ -125,10 +131,17 @@ pub struct MultiGpuExecutor {
 }
 
 struct MultiGpuBridgeRuntime {
-    host_ring: Vec<Vec<u8>>,
+    host_ring: Vec<BridgeHostSegment>,
+    compression: GmsSxrcCompressor,
     _producer_readback_buffers: Vec<wgpu::Buffer>,
     _consumer_upload_buffers: Vec<wgpu::Buffer>,
     ring_cursor: usize,
+}
+
+#[derive(Debug, Clone)]
+enum BridgeHostSegment {
+    Raw(Vec<u8>),
+    Sxrc(GmsSxrcCompressedBlob),
 }
 
 #[derive(Default)]
@@ -157,6 +170,7 @@ impl MultiGpuExecutor {
             primary_work_units_per_present,
             workload_request,
             auto_min_projected_gain_pct,
+            sxrc_compression,
         } = config;
 
         let present_profile = match_inventory_profile(&inventory, &primary_adapter_info);
@@ -314,6 +328,7 @@ impl MultiGpuExecutor {
                     &secondary_device,
                     &primary_device,
                     &secondary_profile,
+                    sxrc_compression,
                 )
             })
             .transpose()?;
@@ -518,6 +533,11 @@ impl MultiGpuExecutor {
             aggressive_integrated_preallocation: self.plan.sync.aggressive_integrated_preallocation,
             integrated_encoder_pool: self.plan.sync.integrated_encoder_pool,
             integrated_ring_segments: self.plan.sync.integrated_ring_segments,
+            bridge_sxrc_compression: self
+                .bridge_runtime
+                .as_ref()
+                .map(|bridge| bridge.compression_stats())
+                .unwrap_or_default(),
             vulkan_version_gate_enabled: self.vulkan_version_gate_enabled,
             primary_vulkan_api_version: self.primary_vulkan_api_version.map(|v| v.to_string()),
             secondary_vulkan_api_version: self.secondary_vulkan_api_version.map(|v| v.to_string()),
@@ -584,15 +604,46 @@ impl MultiGpuBridgeRuntime {
         }
         let cursor = self.ring_cursor % self.host_ring.len();
         if let Some(segment) = self.host_ring.get_mut(cursor) {
-            if !segment.is_empty() {
-                let marker = (self.ring_cursor as u8).wrapping_mul(17).wrapping_add(3);
-                segment[0] = marker;
-                if segment.len() > 64 {
-                    segment[64] = marker.rotate_left(1);
-                }
-            }
+            let marker = (self.ring_cursor as u8).wrapping_mul(17).wrapping_add(3);
+            segment.touch_hot(marker);
         }
         self.ring_cursor = self.ring_cursor.wrapping_add(1);
+    }
+
+    fn compression_stats(&self) -> GmsSxrcCompressionStats {
+        self.compression.stats()
+    }
+}
+
+impl BridgeHostSegment {
+    fn new_zeroed(bytes: usize, compression: &mut GmsSxrcCompressor) -> Self {
+        let raw = vec![0u8; bytes];
+        compression
+            .compress_bridge_payload(&raw)
+            .map(Self::Sxrc)
+            .unwrap_or(Self::Raw(raw))
+    }
+
+    fn touch_hot(&mut self, marker: u8) {
+        match self {
+            Self::Raw(bytes) => touch_bridge_bytes(bytes, marker),
+            // Compressed bridge chunks are cold resident storage. The upload path should decode
+            // into scratch explicitly; the synthetic hot-ring touch must not pay codec cost.
+            Self::Sxrc(blob) => {
+                let _resident_bytes = blob.encoded_len;
+                let _resident_pages = blob.pages.len();
+            }
+        }
+    }
+}
+
+fn touch_bridge_bytes(bytes: &mut [u8], marker: u8) {
+    if bytes.is_empty() {
+        return;
+    }
+    bytes[0] = marker;
+    if bytes.len() > 64 {
+        bytes[64] = marker.rotate_left(1);
     }
 }
 
@@ -692,12 +743,17 @@ fn build_multi_gpu_bridge_runtime(
     secondary_device: &wgpu::Device,
     primary_device: &wgpu::Device,
     secondary_profile: &GpuAdapterProfile,
+    sxrc_compression: GmsSxrcCompressionConfig,
 ) -> Result<MultiGpuBridgeRuntime, Box<dyn Error>> {
     let ring_segments = bridge.ring_segments.max(1) as usize;
     let segment_bytes = bridge.chunk_bytes.max(256);
+    let mut compression = GmsSxrcCompressor::new(GmsSxrcCompressionConfig {
+        enabled: sxrc_compression.enabled || bridge.sxrc_compression.enabled,
+        ..sxrc_compression
+    });
 
     let host_ring = (0..ring_segments)
-        .map(|_| vec![0u8; segment_bytes as usize])
+        .map(|_| BridgeHostSegment::new_zeroed(segment_bytes as usize, &mut compression))
         .collect::<Vec<_>>();
 
     let producer_readback_buffers = (0..ring_segments)
@@ -732,6 +788,7 @@ fn build_multi_gpu_bridge_runtime(
 
     Ok(MultiGpuBridgeRuntime {
         host_ring,
+        compression,
         _producer_readback_buffers: producer_readback_buffers,
         _consumer_upload_buffers: consumer_upload_buffers,
         ring_cursor: 0,
@@ -1245,6 +1302,27 @@ fn parse_first_u32_hex_or_decimal(text: &str) -> Option<u32> {
 mod tests {
     use super::*;
     use wgpu::{AdapterInfo, Backend, DeviceType};
+
+    #[test]
+    fn bridge_segment_stores_compressed_when_payload_is_repetitive() {
+        let mut compressor = GmsSxrcCompressor::new(GmsSxrcCompressionConfig {
+            enabled: true,
+            min_bridge_bytes: 1,
+            max_encode_us_per_frame: 1_000_000,
+            ..GmsSxrcCompressionConfig::default()
+        });
+
+        let mut segment = BridgeHostSegment::new_zeroed(8192, &mut compressor);
+        assert!(matches!(segment, BridgeHostSegment::Sxrc(_)));
+        let before_touch = compressor.stats();
+        segment.touch_hot(0xA5);
+        let after_touch = compressor.stats();
+
+        assert!(matches!(segment, BridgeHostSegment::Sxrc(_)));
+        assert_eq!(after_touch.stored_segments, before_touch.stored_segments);
+        assert_eq!(after_touch.decode_us, before_touch.decode_us);
+        assert_eq!(after_touch.encode_us, before_touch.encode_us);
+    }
 
     fn vk_info(name: &str, driver: &str, driver_info: &str) -> AdapterInfo {
         AdapterInfo {

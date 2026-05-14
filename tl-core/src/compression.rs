@@ -27,15 +27,20 @@ impl Default for SnapshotCompressor {
 impl SnapshotCompressor {
     /// Create a compressor with the built-in generic manifest.
     pub fn new() -> Result<Self, sxrc::SxrcError> {
+        Self::with_page_size(DEFAULT_PAGE_SIZE)
+    }
+
+    /// Create a compressor with the built-in generic manifest and custom page size.
+    pub fn with_page_size(page_size: usize) -> Result<Self, sxrc::SxrcError> {
         let manifest = generic_engine_manifest();
         let config = SxrcCodecConfig {
-            page_size: DEFAULT_PAGE_SIZE,
+            page_size: page_size.max(1),
             ..SxrcCodecConfig::from_manifest(&manifest)
         };
         let codec = SxrcRamCodec::new(&manifest, config)?;
         Ok(Self {
             codec,
-            page_size: DEFAULT_PAGE_SIZE,
+            page_size: config.page_size,
         })
     }
 

@@ -6,11 +6,12 @@
 //! synchronous borrow flow while we migrate internal world phases away from the
 //! remaining single-step hot path.
 
-use mps::{
-    DispatcherPhaseCallbacks, DispatcherPhasePlan, MpsPerformanceProfile, MpsThreadPoolMetrics,
-    MpsTuningProfile, PhysicsDispatchTrigger, TaskDispatcher, TaskDispatcherConfig,
-};
 use crate::PerformanceProfile;
+use mps::{
+    DispatcherPhaseCallbacks, DispatcherPhasePlan, MpsCompressionConfig, MpsPerformanceProfile,
+    MpsThreadPoolMetrics, MpsTuningProfile, PhysicsDispatchTrigger, TaskDispatcher,
+    TaskDispatcherConfig,
+};
 use paradoxpe::PhysicsWorld;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -75,6 +76,7 @@ impl PhysicsMpsRunner {
         };
         let tuning = MpsTuningProfile::from_profile(mps_profile);
         dispatcher_config.apply_tuning(&tuning);
+        dispatcher_config.compression = MpsCompressionConfig::from_tileline_env();
         dispatcher_config.queue_capacity = dispatcher_config.queue_capacity.max(262_144);
         dispatcher_config.transform_capacity =
             dispatcher_config.transform_capacity.max(world.body_count());
@@ -139,6 +141,7 @@ impl PhysicsMpsRunner {
             hot_worker_ratio: metrics.hot_worker_ratio,
             phase_skew: metrics.phase_skew,
             queue_saturation_events: metrics.queue_saturation_events,
+            compression: metrics.compression,
         }
     }
 

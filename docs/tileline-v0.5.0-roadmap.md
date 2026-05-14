@@ -51,6 +51,9 @@ already behind us.
 `v0.5.0` should deliver all of the following:
 
 - an optimized forward + hybrid RT render path that is stable in the runtime
+- a near-camera render-pressure mitigation package covering LOD, impostors, occlusion/depth
+  prepass, clustered/Forward+ lighting, transparency reduction, instancing/batching, and adaptive
+  resolution
 - a usable effects layer on top of the current shader/light stack
 - a bounded reflection path with clear fallback behavior
 - first-class texture support in the runtime scene/material path
@@ -86,6 +89,8 @@ These are intentionally out of scope for `v0.5.0`:
 `v0.5.0` should only be considered complete when all of these are true:
 
 - RT can be enabled without destabilizing the main runtime path
+- near-camera dense-ball scenes degrade through explicit render-quality controls instead of
+  collapsing into unexplained single-digit FPS
 - lights, shaders, textures, and effects all work together in the same scene path
 - reflection can be enabled on supported paths and degrades cleanly when budgets are exceeded
 - texture pack selection/loading works through the canonical runtime asset path
@@ -141,6 +146,8 @@ The `Heimdall Update` checklist for `v0.5.0` maps to this roadmap as follows:
   - `Workstream E4`
 - `FX / graphics improvement`:
   - `Workstream A3` + `Workstream A5` + `Workstream B1`
+- near-camera render-pressure mitigation:
+  - `Workstream A6`
 - `SPIR-V support`:
   - `Workstream A2` + `Workstream A4`
 - `CU / SM parallelism (MPS-derived system)`:
@@ -281,6 +288,62 @@ Acceptance gates:
 
 - reflections do not destabilize the main runtime path
 - graphics polish changes remain budget-aware and diagnosable from telemetry
+
+### A6. Near-Camera Render-Pressure Hard Gate
+
+This is the main render-side gate exposed by the dense TLApp ball scene: moving the camera close to
+the container can collapse FPS even when physics continues to run. `v0.5.0` should treat that as a
+renderer pressure problem first, not a physics problem.
+
+Current status:
+
+| Item | Status | v0.5.0 gap |
+| --- | --- | --- |
+| LOD | Partial: WGPU sphere LOD exists; native Metal/Vulkan parity is incomplete | backend-neutral LOD policy with hysteresis and telemetry |
+| Impostor | Missing | far/mid ball impostor or point/billboard fallback for dense scenes |
+| Occlusion culling | Partial: Metal Z-prepass + Early-Z occlusion path exists | parity/telemetry across native backends and clear fallback behavior |
+| Clustered/Forward+ lighting | Missing | camera/cluster-local light lists and per-cluster light caps |
+| Depth prepass | Partial: Metal path has a prepass for opaque/occluder ranges | documented backend contract and render-pressure telemetry |
+| Transparency reduction | Partial: runtime has distance/blur/fill-pressure controls | explicit alpha/overdraw budget and quality fallback ladder |
+| Instancing/batching | Present: runtime draw batching and instanced scene paths exist | fewer batch breaks, transparent-sort cost control, per-frame batch telemetry |
+| Adaptive resolution | Partial: FSR/adaptive runtime controls exist | render-pressure-driven native policy tied to fill/present/upload timing |
+
+Target work:
+
+- make LOD a backend-neutral runtime decision instead of a WGPU-only behavior
+- add an impostor tier for dense/far sphere clouds so distant balls do not always pay full mesh +
+  fragment cost
+- keep occlusion culling and depth prepass enabled where safe, but expose rejection/prepass telemetry
+  so wins and regressions are visible
+- introduce clustered or Forward+ light assignment for dense 3D scenes so fragment shaders do not
+  scale poorly with global light count
+- add a transparency budget ladder:
+  - reduce alpha-heavy surfaces under severe fill pressure
+  - downgrade far transparent surfaces to cheaper visual modes
+  - keep correctness-visible debug toggles for the container wall/cube case
+- tighten instancing/batching so same-material sphere runs stay in large batches and transparent
+  sorting does not become a CPU-side cliff
+- drive adaptive resolution from measured render pressure (`fill_ema`, `upload_us`, `present_us`,
+  visible ball count, and draw/batch counts), not only from average FPS
+- expose a concise HUD/log readout for render bottleneck diagnosis:
+  - visible balls vs live balls
+  - render-distance culled / blurred / impostor counts
+  - opaque vs transparent instances
+  - batch count
+  - fill/fill_ema
+  - upload/present timing
+  - active LOD/adaptive-resolution tier
+
+Acceptance gates:
+
+- moving the camera close to a dense container must choose a visible quality-reduction tier before
+  sustained single-digit FPS
+- moving the camera away may raise CPU use because FPS is uncapped, but the telemetry must show that
+  render pressure fell (`fill_ema`, visible instances, upload/present timing, or batch count)
+- dense-ball scenes should remain diagnosable from HUD/logs without guessing whether the limit is
+  physics, upload, present, fragment fill, transparency, or light cost
+- existing occlusion culling must remain correct for transparent container walls; fixes for
+  framebuffer/transparency regressions cannot be undone by the optimization ladder
 
 ## Workstream B: Effects And Texture Support
 
@@ -778,12 +841,15 @@ primary gate, with Orange Pi 5 / Mali remaining the mobile-class sanity gate.
 | Scenario | Current rough baseline | `v0.5.0` ship target | Stretch target |
 | --- | --- | --- | --- |
 | `8k` balls / normal showcase density | `58-60 FPS`, generally good behavior, some variance under load spikes | lock `60 FPS` with lower frame variance, `240-360 Hz` effective tick, no sustained governor hunting | `60+ FPS` uncapped, `360+ Hz` effective tick with stable frametime pacing |
+| `8k-10k` balls / near-camera render pressure | can collapse to single-digit FPS when fill/transparent/lighting pressure dominates | avoid sustained single-digit FPS by activating render-quality fallback, keep the bottleneck telemetry-visible | `30-60 FPS` depending on quality tier, with stable LOD/impostor/adaptive-resolution transitions |
 | `30k` balls / dense contact stress | about `16 FPS`, about `40 Hz` tick, major drops still possible | `30-45 FPS`, `90-140 Hz` effective tick, bounded degradation instead of collapse | `45-60 FPS`, `140+ Hz` tick in lighter-contact windows, no catastrophic drop clusters |
 | `60k` objects / extreme stress scene | not a stable production path yet | keep simulation alive with predictable quality reduction, `15-25 FPS`, `60-90 Hz` effective tick, no runaway oscillation | `25-35 FPS`, `90+ Hz` tick with island/contact budgeting and stronger scene partitioning |
 
 Notes:
 
 - `8k` is the "must feel polished" gate.
+- near-camera render pressure is the "renderer credibility" gate; if physics timing is stable but
+  FPS collapses, the optimization ladder must explain and reduce render cost.
 - `30k` is the main "serious engine credibility" gate.
 - `60k` is a stress/diagnostic gate, not a requirement for full visual parity.
 
@@ -808,6 +874,8 @@ This is the rough optimization budget for the `v0.5.0` independence work:
 | Work item | Expected gain | Main reason |
 | --- | --- | --- |
 | `wgpu -> raw Vulkan` | about `5%-25%` typical, occasionally higher | lower render overhead, explicit present/upload control, tighter pipeline ownership |
+| `LOD + impostor + transparency/adaptive-resolution ladder` | about `1.3x-4x` in near-camera/fill-bound scenes | lower fragment/overdraw cost, fewer full-detail spheres, bounded alpha work |
+| `clustered/Forward+ lighting + depth/occlusion telemetry` | about `10%-50%` in light-heavy scenes | bounded per-fragment light work and better early rejection visibility |
 | `rayon/bevy_tasks -> MPS-native scheduler` | about `20%-80%` depending on scene | lower scheduling overhead, better overlap, better core ownership |
 | `ParadoxPE phase refactor + solver/contact scaling` | about `1.3x-2x` on heavy dense scenes | less serial hot-path work, lower contact explosion cost |
 | Combined `v0.5.0` payoff | roughly `1.3x-2x` realistic, `2x-3x` stretch on the worst current bottlenecks | render + scheduler + physics scaling improvements stacking together |
@@ -843,10 +911,11 @@ execution.
 The most productive order for `v0.5.0` is:
 
 1. Workstream A: render stack optimization
-2. Workstream B: effects + texture support
-3. Workstream D: MPS ownership expansion and runtime overlap hardening
-4. Workstream E: Rayon / Bevy / WGPU independence cleanup
-5. final release hardening + docs + validation
+2. Workstream A6: near-camera render-pressure hard gate
+3. Workstream B: effects + texture support
+4. Workstream D: MPS ownership expansion and runtime overlap hardening
+5. Workstream E: Rayon / Bevy / WGPU independence cleanup
+6. final release hardening + docs + validation
 
 This order matters because it avoids doing dependency cleanup before the replacement execution path
 is strong enough.

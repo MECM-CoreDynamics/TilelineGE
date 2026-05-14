@@ -49,8 +49,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tl_core::gms::{
-    GmsRuntimeTuningProfile, GpuInventory, MultiGpuExecutor, MultiGpuExecutorConfig,
-    MultiGpuExecutorSummary, MultiGpuInitPolicy, MultiGpuWorkloadRequest,
+    GmsRuntimeTuningProfile, GmsSxrcCompressionConfig, GpuInventory, MultiGpuExecutor,
+    MultiGpuExecutorConfig, MultiGpuExecutorSummary, MultiGpuInitPolicy, MultiGpuWorkloadRequest,
 };
 use wgpu::{Color, CompositeAlphaMode, PresentMode, SurfaceError, TextureFormat};
 use winit::application::ApplicationHandler;
@@ -1107,6 +1107,7 @@ impl VisualRuntime {
                 primary_work_units_per_present: renderer.work_units_per_present(),
                 workload_request: workload,
                 auto_min_projected_gain_pct: 5.0,
+                sxrc_compression: GmsSxrcCompressionConfig::from_tileline_env(),
             })?
         };
 

@@ -9,6 +9,7 @@
 //! The primary entry point is [`AdaptiveBuffer::reconcile`], which consumes per-frame telemetry
 //! and returns a decision structure that balances throughput and stability.
 
+use crate::gms::{GmsSxrcCompressionConfig, GmsSxrcCompressionStats};
 use std::collections::{HashMap, VecDeque};
 
 /// Configuration for [`AdaptiveBuffer`].
@@ -36,6 +37,8 @@ pub struct AdaptiveBufferConfig {
     pub igpu_hardware_score_baseline: u64,
     /// Number of consecutive stable frames required before gentle recovery exit expansion.
     pub stable_frames_for_relaxation: u32,
+    /// Optional SXRC bridge/spill policy used for pressure recommendations.
+    pub sxrc_compression: GmsSxrcCompressionConfig,
 }
 
 impl Default for AdaptiveBufferConfig {
@@ -52,6 +55,7 @@ impl Default for AdaptiveBufferConfig {
             uma_gpu_shared_budget_bytes: 16 * 1024 * 1024,
             igpu_hardware_score_baseline: 1_229,
             stable_frames_for_relaxation: 24,
+            sxrc_compression: GmsSxrcCompressionConfig::default(),
         }
     }
 }
@@ -123,6 +127,10 @@ pub struct AdaptiveBufferDecision {
     pub contention_events_since_last_reconcile: u32,
     /// Score normalization factor vs baseline (1.0 ~= M4 baseline score 1229).
     pub hardware_score_factor: f64,
+    /// True when callers should prefer SXRC bridge/spill relief for the next frame.
+    pub sxrc_compression_recommended: bool,
+    /// Latest SXRC bridge/spill telemetry supplied to the adaptive regulator.
+    pub sxrc_compression_stats: GmsSxrcCompressionStats,
 }
 
 /// Identifies a logical shared buffer region managed by the UMA arbiter.
@@ -186,6 +194,7 @@ pub struct AdaptiveBuffer {
     stable_frames_streak: u32,
     shared_buffers: HashMap<SharedBufferKey, SharedBufferEntry>,
     lease_generation_counter: u64,
+    sxrc_compression_stats: GmsSxrcCompressionStats,
 }
 
 impl AdaptiveBuffer {
@@ -211,6 +220,7 @@ impl AdaptiveBuffer {
             stable_frames_streak: 0,
             shared_buffers: HashMap::new(),
             lease_generation_counter: 1,
+            sxrc_compression_stats: GmsSxrcCompressionStats::default(),
         }
     }
 
@@ -227,6 +237,11 @@ impl AdaptiveBuffer {
     /// Returns the current concurrent encoder window cap.
     pub fn max_concurrent_encoders(&self) -> u32 {
         self.max_concurrent_encoders
+    }
+
+    /// Feed bridge/spill SXRC telemetry into the next adaptive decision.
+    pub fn record_sxrc_compression_stats(&mut self, stats: GmsSxrcCompressionStats) {
+        self.sxrc_compression_stats = stats;
     }
 
     /// Attempt to acquire a CPU read lease using a mapped `wgpu::BufferView`.
@@ -413,6 +428,13 @@ impl AdaptiveBuffer {
 
         let contention_events = self.contention_events_since_last_reconcile;
         self.contention_events_since_last_reconcile = 0;
+        let cpu_pressure =
+            self.cpu_mapped_bytes_in_use as f64 / self.cpu_map_budget_bytes.max(1) as f64;
+        let gpu_pressure =
+            self.gpu_shared_bytes_in_use as f64 / self.gpu_shared_budget_bytes.max(1) as f64;
+        let sxrc_compression_recommended = self.config.sxrc_compression.active_policy()
+            && self.config.sxrc_compression.adaptive_spill
+            && (framebuffer_congested || cpu_pressure >= 0.90 || gpu_pressure >= 0.90);
 
         AdaptiveBufferDecision {
             mode: self.mode,
@@ -428,6 +450,8 @@ impl AdaptiveBuffer {
             gpu_shared_bytes_in_use: self.gpu_shared_bytes_in_use,
             contention_events_since_last_reconcile: contention_events,
             hardware_score_factor,
+            sxrc_compression_recommended,
+            sxrc_compression_stats: self.sxrc_compression_stats,
         }
     }
 
@@ -678,5 +702,30 @@ mod tests {
         }
 
         assert!(adaptive.max_concurrent_encoders() <= adaptive.config.encoder_window_max);
+    }
+
+    #[test]
+    fn congestion_recommends_sxrc_when_enabled() {
+        let mut adaptive = AdaptiveBuffer::new(AdaptiveBufferConfig {
+            sxrc_compression: GmsSxrcCompressionConfig::enabled_for_runtime(),
+            ..AdaptiveBufferConfig::default()
+        });
+        adaptive.record_sxrc_compression_stats(GmsSxrcCompressionStats {
+            enabled: true,
+            raw_bytes: 1024,
+            compressed_bytes: 256,
+            ..GmsSxrcCompressionStats::default()
+        });
+
+        let decision = adaptive.reconcile(AdaptiveFrameTelemetry {
+            frame_time_ms: 1.0,
+            submitted_encoders: 8,
+            in_flight_encoders: 8,
+            igpu_gms_hardware_score: 1_229,
+            pending_frame_count: 2,
+        });
+
+        assert!(decision.sxrc_compression_recommended);
+        assert_eq!(decision.sxrc_compression_stats.compressed_bytes, 256);
     }
 }
