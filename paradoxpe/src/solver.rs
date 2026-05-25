@@ -429,13 +429,13 @@ impl ContactSolver {
 
     fn effective_iteration_budget(&self, manifold_count: usize) -> u32 {
         let base = self.config.iterations.max(self.config.min_iterations);
-        let scale = if manifold_count >= 4096 {
+        let scale = if manifold_count >= 16384 {
             0.25
-        } else if manifold_count >= 2048 {
+        } else if manifold_count >= 8192 {
             0.5
-        } else if manifold_count >= 1024 {
+        } else if manifold_count >= 4096 {
             0.75
-        } else if manifold_count >= 512 {
+        } else if manifold_count >= 2048 {
             0.875
         } else {
             1.0

@@ -554,12 +554,13 @@ impl TlAppRuntime {
             },
             solver: ContactSolverConfig {
                 iterations: solver_iterations,
+                min_iterations: 2,
                 baumgarte: 0.32,
-                penetration_slop: 0.0015,
+                penetration_slop: 0.0005,
                 parallel_contact_push_strength: 0.28,
-                parallel_contact_push_threshold: 16,
-                hard_position_projection_strength: 0.95,
-                hard_position_projection_threshold: if mobile_class_tuning { 96 } else { 128 },
+                parallel_contact_push_threshold: 4096,
+                hard_position_projection_strength: 1.0,
+                hard_position_projection_threshold: if mobile_class_tuning { 192 } else { 512 },
                 max_projection_per_contact: if mobile_class_tuning { 0.08 } else { 0.10 },
                 ..ContactSolverConfig::default()
             },
