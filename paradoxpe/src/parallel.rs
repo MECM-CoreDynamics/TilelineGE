@@ -1,12 +1,9 @@
 //! Lightweight parallel helpers for ParadoxPE hot paths.
 //!
-//! This module intentionally avoids `rayon` and keeps execution deterministic:
-//! - chunked scoped threads over contiguous slices
-//! - deterministic merge order for collect/filter-map operations
-//! - sequential fallback for small workloads
+//! Uses `rayon` scoped thread pool to avoid OS thread spawn/join overhead
+//! on every physics phase while keeping deterministic chunk ordering.
 
 use std::cell::Cell;
-use std::thread;
 
 /// Execution mode snapshot returned by ParadoxPE parallel helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,8 +56,8 @@ thread_local! {
     static EXTERNAL_PARALLEL_DEPTH: Cell<u32> = const { Cell::new(0) };
 }
 
-/// Guard that suppresses ParadoxPE's internal scoped-thread helpers while an
-/// external dispatcher (MPS) owns the frame.
+/// Guard that suppresses ParadoxPE's internal parallel helpers while an
+/// external dispatcher owns the frame.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct ExternalParallelGuard;
@@ -85,16 +82,14 @@ pub(crate) fn enter_external_parallel_mode() -> ExternalParallelGuard {
 fn external_parallel_mode_active() -> bool {
     EXTERNAL_PARALLEL_DEPTH.with(|depth| depth.get() > 0)
 }
+
 /// Return the logical worker count available to this process.
 #[inline]
 pub fn worker_count() -> usize {
     if external_parallel_mode_active() {
         return 1;
     }
-    thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .max(1)
+    rayon::current_num_threads()
 }
 
 #[inline]
@@ -140,11 +135,11 @@ where
     }
 
     let chunk = chunk_len(slice.len(), min_items_per_worker);
-    thread::scope(|scope| {
+    rayon::scope(|scope| {
         for (chunk_index, chunk_slice) in slice.chunks_mut(chunk).enumerate() {
             let base = chunk_index * chunk;
             let f_ref = &f;
-            scope.spawn(move || {
+            scope.spawn(move |_| {
                 for (offset, item) in chunk_slice.iter_mut().enumerate() {
                     f_ref(base + offset, item);
                 }
@@ -168,11 +163,11 @@ where
     }
 
     let chunk = chunk_len(len, min_items_per_worker);
-    thread::scope(|scope| {
+    rayon::scope(|scope| {
         for start in (0..len).step_by(chunk) {
             let end = (start + chunk).min(len);
             let f_ref = &f;
-            scope.spawn(move || {
+            scope.spawn(move |_| {
                 for index in start..end {
                     f_ref(index);
                 }
@@ -207,34 +202,29 @@ where
     }
 
     let chunk = chunk_len(input.len(), min_items_per_worker);
-    let mut chunk_outputs: Vec<Vec<U>> = Vec::new();
-    thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for chunk_slice in input.chunks(chunk) {
+    use std::sync::Mutex;
+    let chunk_outputs: Mutex<Vec<(usize, Vec<U>)>> = Mutex::new(Vec::new());
+    rayon::scope(|scope| {
+        for (index, chunk_slice) in input.chunks(chunk).enumerate() {
             let map_ref = &map;
-            handles.push(scope.spawn(move || {
+            let out_ref = &chunk_outputs;
+            scope.spawn(move |_| {
                 let mut local = Vec::with_capacity(chunk_slice.len() / 2);
                 for item in chunk_slice {
                     if let Some(mapped) = map_ref(item) {
                         local.push(mapped);
                     }
                 }
-                local
-            }));
-        }
-        chunk_outputs.reserve(handles.len());
-        for handle in handles {
-            chunk_outputs.push(
-                handle
-                    .join()
-                    .expect("ParadoxPE parallel collect worker panicked"),
-            );
+                out_ref.lock().unwrap().push((index, local));
+            });
         }
     });
 
-    let total = chunk_outputs.iter().map(Vec::len).sum::<usize>();
+    let mut chunk_outputs = chunk_outputs.into_inner().unwrap();
+    chunk_outputs.sort_by_key(|(i, _)| *i);
+    let total = chunk_outputs.iter().map(|(_, v)| v.len()).sum::<usize>();
     let mut out = Vec::with_capacity(total);
-    for mut local in chunk_outputs {
+    for (_, mut local) in chunk_outputs {
         out.append(&mut local);
     }
     (out, ParallelExecutionMode::Parallel)
@@ -260,18 +250,17 @@ mod tests {
     #[test]
     fn collect_filter_map_keeps_chunk_deterministic_order() {
         let data = (0u32..2048).collect::<Vec<_>>();
-        let (out, mode) =
-            collect_filter_map(
-                &data,
-                64,
-                |value| {
-                    if value % 3 == 0 {
-                        Some(*value)
-                    } else {
-                        None
-                    }
-                },
-            );
+        let (out, mode) = collect_filter_map(
+            &data,
+            64,
+            |value| {
+                if value % 3 == 0 {
+                    Some(*value)
+                } else {
+                    None
+                }
+            },
+        );
         assert!(mode.is_parallel() || mode.is_serial());
         let expected = data
             .iter()
@@ -292,8 +281,6 @@ mod tests {
         assert!(mode.is_parallel() || mode.is_serial());
         assert_eq!(calls.load(Ordering::Relaxed), data.len());
     }
-
-    // C0-S7: mode transition unit tests
 
     #[test]
     fn serial_fallback_reason_is_present_for_all_serial_variants() {

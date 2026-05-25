@@ -6,3 +6,4 @@ license.workspace = true
 
 [dependencies]
 nalgebra.workspace = true
+rayon = "1.10"
