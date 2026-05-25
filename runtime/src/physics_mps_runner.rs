@@ -12,7 +12,21 @@ use mps::{
     MpsThreadPoolMetrics, MpsTuningProfile, PhysicsDispatchTrigger, TaskDispatcher,
     TaskDispatcherConfig,
 };
-use paradoxpe::PhysicsWorld;
+use paradoxpe::{parallel::JobQueue, PhysicsWorld};
+
+struct MpsJobQueue {
+    dispatcher: Arc<TaskDispatcher>,
+}
+
+impl JobQueue for MpsJobQueue {
+    fn submit(&self, f: Box<dyn FnOnce() + Send>) {
+        self.dispatcher.submit_paradox_job(f);
+    }
+
+    fn try_execute_one(&self) -> bool {
+        self.dispatcher.try_execute_paradox_job()
+    }
+}
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
@@ -90,6 +104,9 @@ impl PhysicsMpsRunner {
             transforms.as_ref(),
             transforms.render_read_slot(),
         );
+        paradoxpe::parallel::set_global_job_queue(Arc::new(MpsJobQueue {
+            dispatcher: Arc::clone(&dispatcher),
+        }));
         Self {
             world: Arc::new(Mutex::new(world)),
             dispatcher,

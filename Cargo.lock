@@ -3382,7 +3382,6 @@ name = "paradoxpe"
 version = "0.4.5"
 dependencies = [
  "nalgebra",
- "rayon",
 ]
 
 [[package]]

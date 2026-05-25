@@ -1,9 +1,14 @@
 //! Lightweight parallel helpers for ParadoxPE hot paths.
 //!
-//! Uses `rayon` scoped thread pool to avoid OS thread spawn/join overhead
-//! on every physics phase while keeping deterministic chunk ordering.
+//! When a global JobQueue is installed (e.g. MPS paradox_queue), helpers
+//! submit chunk work to that queue instead of spawning scoped OS threads.
+//! The queue must outlive any scope; chunk pointers are valid until the
+//! counter drops to zero.
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
 
 /// Execution mode snapshot returned by ParadoxPE parallel helpers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,7 +94,10 @@ pub fn worker_count() -> usize {
     if external_parallel_mode_active() {
         return 1;
     }
-    rayon::current_num_threads()
+    thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1)
 }
 
 #[inline]
@@ -116,6 +124,42 @@ fn chunk_len(total_items: usize, min_items_per_worker: usize) -> usize {
         .max(1)
 }
 
+/// External job queue abstraction used by ParadoxPE parallel helpers.
+pub trait JobQueue: Send + Sync {
+    /// Submit a chunk of work to the queue.
+    fn submit(&self, f: Box<dyn FnOnce() + Send>);
+
+    /// Try to execute one pending job on the caller thread.
+    /// Returns true if a job was executed.
+    fn try_execute_one(&self) -> bool;
+}
+
+static GLOBAL_JOB_QUEUE: OnceLock<Arc<dyn JobQueue + Send + Sync>> = OnceLock::new();
+
+/// Install a global job queue for ParadoxPE parallel helpers.
+pub fn set_global_job_queue(queue: Arc<dyn JobQueue + Send + Sync>) {
+    let _ = GLOBAL_JOB_QUEUE.set(queue);
+}
+
+fn global_job_queue() -> Option<&'static Arc<dyn JobQueue + Send + Sync>> {
+    GLOBAL_JOB_QUEUE.get()
+}
+
+/// Wait until all submitted jobs finish, helping execute along the way.
+fn wait_and_help(counter: &Arc<AtomicUsize>) {
+    while counter.load(Ordering::Acquire) > 0 {
+        if let Some(queue) = global_job_queue() {
+            if queue.try_execute_one() {
+                counter.fetch_sub(1, Ordering::Release);
+            } else {
+                std::hint::spin_loop();
+            }
+        } else {
+            break;
+        }
+    }
+}
+
 /// Parallel-for over a mutable slice with stable global index.
 pub fn for_each_mut_indexed<T, F>(
     slice: &mut [T],
@@ -135,11 +179,33 @@ where
     }
 
     let chunk = chunk_len(slice.len(), min_items_per_worker);
-    rayon::scope(|scope| {
+
+    if let Some(queue) = global_job_queue() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        // SAFETY: f outlives all submitted jobs because we block on counter.
+        let f_addr = &f as *const F as usize;
+        for (chunk_index, chunk_slice) in slice.chunks_mut(chunk).enumerate() {
+            let base = chunk_index * chunk;
+            let ptr = chunk_slice.as_mut_ptr() as usize;
+            let len = chunk_slice.len();
+            counter.fetch_add(1, Ordering::Release);
+            queue.submit(Box::new(move || {
+                let f_ref = unsafe { &*(f_addr as *const F) };
+                let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut T, len) };
+                for (offset, item) in slice.iter_mut().enumerate() {
+                    f_ref(base + offset, item);
+                }
+            }));
+        }
+        wait_and_help(&counter);
+        return ParallelExecutionMode::Parallel;
+    }
+
+    thread::scope(|scope| {
         for (chunk_index, chunk_slice) in slice.chunks_mut(chunk).enumerate() {
             let base = chunk_index * chunk;
             let f_ref = &f;
-            scope.spawn(move |_| {
+            scope.spawn(move || {
                 for (offset, item) in chunk_slice.iter_mut().enumerate() {
                     f_ref(base + offset, item);
                 }
@@ -163,11 +229,30 @@ where
     }
 
     let chunk = chunk_len(len, min_items_per_worker);
-    rayon::scope(|scope| {
+
+    if let Some(queue) = global_job_queue() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        // SAFETY: f outlives all submitted jobs because we block on counter.
+        let f_addr = &f as *const F as usize;
+        for start in (0..len).step_by(chunk) {
+            let end = (start + chunk).min(len);
+            counter.fetch_add(1, Ordering::Release);
+            queue.submit(Box::new(move || {
+                let f_ref = unsafe { &*(f_addr as *const F) };
+                for index in start..end {
+                    f_ref(index);
+                }
+            }));
+        }
+        wait_and_help(&counter);
+        return ParallelExecutionMode::Parallel;
+    }
+
+    thread::scope(|scope| {
         for start in (0..len).step_by(chunk) {
             let end = (start + chunk).min(len);
             let f_ref = &f;
-            scope.spawn(move |_| {
+            scope.spawn(move || {
                 for index in start..end {
                     f_ref(index);
                 }
@@ -202,29 +287,37 @@ where
     }
 
     let chunk = chunk_len(input.len(), min_items_per_worker);
-    use std::sync::Mutex;
-    let chunk_outputs: Mutex<Vec<(usize, Vec<U>)>> = Mutex::new(Vec::new());
-    rayon::scope(|scope| {
-        for (index, chunk_slice) in input.chunks(chunk).enumerate() {
+
+
+
+    let mut chunk_outputs: Vec<Vec<U>> = Vec::new();
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for chunk_slice in input.chunks(chunk) {
             let map_ref = &map;
-            let out_ref = &chunk_outputs;
-            scope.spawn(move |_| {
+            handles.push(scope.spawn(move || {
                 let mut local = Vec::with_capacity(chunk_slice.len() / 2);
                 for item in chunk_slice {
                     if let Some(mapped) = map_ref(item) {
                         local.push(mapped);
                     }
                 }
-                out_ref.lock().unwrap().push((index, local));
-            });
+                local
+            }));
+        }
+        chunk_outputs.reserve(handles.len());
+        for handle in handles {
+            chunk_outputs.push(
+                handle
+                    .join()
+                    .expect("ParadoxPE parallel collect worker panicked"),
+            );
         }
     });
 
-    let mut chunk_outputs = chunk_outputs.into_inner().unwrap();
-    chunk_outputs.sort_by_key(|(i, _)| *i);
-    let total = chunk_outputs.iter().map(|(_, v)| v.len()).sum::<usize>();
+    let total = chunk_outputs.iter().map(Vec::len).sum::<usize>();
     let mut out = Vec::with_capacity(total);
-    for (_, mut local) in chunk_outputs {
+    for mut local in chunk_outputs {
         out.append(&mut local);
     }
     (out, ParallelExecutionMode::Parallel)
