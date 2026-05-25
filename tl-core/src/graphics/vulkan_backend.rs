@@ -233,9 +233,9 @@ struct DrawPushConstants {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-struct SceneVertex {
-    position: [f32; 3],
-    uv: [f32; 2],
+pub struct SceneVertex {
+    pub position: [f32; 3],
+    pub uv: [f32; 2],
 }
 
 #[derive(Debug, Clone)]
@@ -630,6 +630,7 @@ impl VulkanBackend {
             primary_submission_serial: 0,
             secondary_submission_serial: 0,
             transfer_submission_serial: 0,
+            pipeline_cache,
         })
     }
 
@@ -1304,7 +1305,7 @@ unsafe fn save_pipeline_cache(
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::write(path, &data)
-        .map_err(|e| VulkanBackendError::InvalidConfig("pipeline cache write failed"))?;
+        .map_err(|_e| VulkanBackendError::InvalidConfig("pipeline cache write failed"))?;
     Ok(())
 }
 

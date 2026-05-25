@@ -22,3 +22,15 @@ wgpu = "28.0.0"
 winit = "0.30.12"
 wit-bindgen = "0.53.1"
 criterion = { version = "0.5", features = ["html_reports"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release-with-debug]
+inherits = "release"
+strip = false
+debug = true

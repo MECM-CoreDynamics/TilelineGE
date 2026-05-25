@@ -23,6 +23,7 @@ use std::sync::Arc;
 use nalgebra::{Isometry3, Matrix4, Perspective3, Point3, Vector3};
 use tl_core::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
+    FrameSpriteRecord,
     FrameTextureRecord, RenderStateSnapshot, SceneVertex, VulkanBackend, VulkanBackendConfig,
     VulkanBackendError, VulkanFrameExecutionTelemetry, VulkanMultiGpuFramePlan,
 };
@@ -102,6 +103,7 @@ pub struct VulkanSceneRenderer {
     texture_snapshot_scratch: Vec<FrameTextureRecord>,
     light_snapshot_scratch: Vec<FrameLightRecord>,
     primitive_range_scratch: Vec<FramePrimitiveRange>,
+    sprite_snapshot_scratch: Vec<FrameSpriteRecord>,
     sort_scratch: Vec<(f32, u32)>,
     prefer_secondary_gpu: bool,
     camera_eye: [f32; 3],
@@ -132,6 +134,7 @@ impl VulkanSceneRenderer {
             texture_snapshot_scratch: Vec::with_capacity(scratch_capacity.max(128)),
             light_snapshot_scratch: Vec::with_capacity(32),
             primitive_range_scratch: Vec::with_capacity(scratch_capacity.max(64)),
+            sprite_snapshot_scratch: Vec::with_capacity(scratch_capacity.max(64)),
             sort_scratch: Vec::with_capacity(scratch_capacity),
             prefer_secondary_gpu: config.prefer_secondary_gpu,
             camera_eye: [0.0, 12.0, 36.0],
@@ -387,6 +390,7 @@ impl VulkanSceneRenderer {
                 texture_snapshot_scratch,
                 light_snapshot_scratch,
                 primitive_range_scratch,
+                &mut self.sprite_snapshot_scratch,
                 sort_scratch,
             );
         let execution = backend.render_n_with_plan(snapshot, &plan)?;
@@ -478,6 +482,7 @@ fn resolve_rt_status(mode: RayTracingMode, supports_ray_query: bool) -> SceneRay
             rt_dynamic_count: 0,
             rt_dynamic_cap: RT_DYNAMIC_CAP,
             supports_ray_query,
+            as_build_us: 0,
         },
         RayTracingMode::Auto => SceneRayTracingStatus {
             mode,
@@ -491,6 +496,7 @@ fn resolve_rt_status(mode: RayTracingMode, supports_ray_query: bool) -> SceneRay
             rt_dynamic_count: 0,
             rt_dynamic_cap: RT_DYNAMIC_CAP,
             supports_ray_query,
+            as_build_us: 0,
         },
         RayTracingMode::On => SceneRayTracingStatus {
             mode,
@@ -504,6 +510,7 @@ fn resolve_rt_status(mode: RayTracingMode, supports_ray_query: bool) -> SceneRay
             rt_dynamic_count: 0,
             rt_dynamic_cap: RT_DYNAMIC_CAP,
             supports_ray_query,
+            as_build_us: 0,
         },
     }
 }
