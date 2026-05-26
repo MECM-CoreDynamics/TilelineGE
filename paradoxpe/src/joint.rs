@@ -3,6 +3,7 @@
 //! The first joint type is a distance constraint designed to slot into the fixed-step solver loop
 //! without runtime allocations.
 
+use crate::SafeClamp;
 use nalgebra::Vector3;
 
 use crate::body::BodyKind;
@@ -64,7 +65,7 @@ impl DistanceJoint {
             local_anchor_a: desc.local_anchor_a,
             local_anchor_b: desc.local_anchor_b,
             rest_length: desc.rest_length.max(0.0),
-            stiffness: desc.stiffness.clamp(0.0, 1.0),
+            stiffness: desc.stiffness.safe_clamp(0.0, 1.0),
             damping: desc.damping.max(0.0),
         }
     }
@@ -118,7 +119,7 @@ impl FixedJoint {
             body_a: desc.body_a,
             body_b: desc.body_b,
             target_offset: desc.target_offset,
-            stiffness: desc.stiffness.clamp(0.0, 1.0),
+            stiffness: desc.stiffness.safe_clamp(0.0, 1.0),
             damping: desc.damping.max(0.0),
         }
     }

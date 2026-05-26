@@ -25,6 +25,7 @@ pub mod sleep;
 pub mod snapshot;
 pub mod solver;
 pub mod storage;
+pub mod math;
 pub mod world;
 
 pub use abi::{
@@ -64,3 +65,4 @@ pub use world::{
     FixedStepClock, PhysicsSimulationMode, PhysicsStepExecutionPlan, PhysicsStepTimings,
     PhysicsWorld, PhysicsWorldConfig,
 };
+pub use math::SafeClamp;

@@ -4,6 +4,7 @@
 //! dense generational handles, cache-friendly body storage, allocation-free hot stepping, and a
 //! broadphase pipeline that can scale across Tileline's CPU task execution model.
 
+use crate::SafeClamp;
 use std::time::{Duration, Instant};
 
 use nalgebra::{UnitQuaternion, Vector3};
@@ -94,7 +95,7 @@ impl FixedStepClock {
         if self.fixed_dt <= f32::EPSILON {
             1.0
         } else {
-            (self.accumulator / self.fixed_dt).clamp(0.0, 1.0)
+            (self.accumulator / self.fixed_dt).safe_clamp(0.0, 1.0)
         }
     }
 
@@ -405,7 +406,7 @@ impl PhysicsWorld {
     /// - `0.0`: softer and faster
     /// - `1.0`: tighter separation, less interpenetration
     pub fn set_contact_guard(&mut self, level: f32) -> bool {
-        let level = level.clamp(0.0, 1.0);
+        let level = level.safe_clamp(0.0, 1.0);
         let mut solver = self.config.solver.clone();
         solver.iterations = lerp_u32(4, 10, level);
         solver.baumgarte = lerp_f32(0.22, 0.62, level);
@@ -906,7 +907,7 @@ impl PhysicsWorld {
     }
 
     /// Phase 1 — integration: update body velocities and positions.
-    fn execute_integrate_phase(
+    pub fn execute_integrate_phase(
         &mut self,
         plan: &PhysicsStepExecutionPlan,
         step_index: u32,
@@ -930,7 +931,7 @@ impl PhysicsWorld {
     }
 
     /// Phase 2 — broadphase: rebuild collision candidate pairs.
-    fn execute_broadphase_phase(
+    pub fn execute_broadphase_phase(
         &mut self,
         plan: &PhysicsStepExecutionPlan,
         timings: &mut PhysicsStepTimings,
@@ -949,7 +950,7 @@ impl PhysicsWorld {
     }
 
     /// Phase 3 — narrowphase + solver: build manifolds, solve contacts and joints.
-    fn execute_narrowphase_and_solver_phase(
+    pub fn execute_narrowphase_and_solver_phase(
         &mut self,
         plan: &PhysicsStepExecutionPlan,
         timings: &mut PhysicsStepTimings,
@@ -984,7 +985,7 @@ impl PhysicsWorld {
     }
 
     /// Phase 4 — sleep: update sleep islands and cull dormant bodies.
-    fn execute_sleep_phase(
+    pub fn execute_sleep_phase(
         &mut self,
         plan: &PhysicsStepExecutionPlan,
         timings: &mut PhysicsStepTimings,
@@ -1395,7 +1396,7 @@ fn duration_us(d: Duration) -> u64 {
 }
 
 fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t.clamp(0.0, 1.0)
+    a + (b - a) * t.safe_clamp(0.0, 1.0)
 }
 
 #[inline]

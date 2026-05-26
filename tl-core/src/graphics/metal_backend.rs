@@ -357,7 +357,7 @@ impl MetalBackend {
         let (z_prepass_pipeline, forward_pipeline, forward_transparent_pipeline) =
             build_scene_pipelines(&device)?;
 
-        let depth_state_write = build_depth_state(&device, MTLCompareFunction::Less, true)
+        let depth_state_write = build_depth_state(&device, MTLCompareFunction::LessEqual, true)
             .map_err(MetalBackendError::PipelineCreation)?;
         let depth_state_equal = build_depth_state(&device, MTLCompareFunction::LessEqual, false)
             .map_err(MetalBackendError::PipelineCreation)?;
@@ -1490,6 +1490,7 @@ impl MetalBackend {
                 encoder.set_render_pipeline_state(&self.z_prepass_pipeline);
                 encoder.set_depth_stencil_state(&self.depth_state_write);
                 encoder.set_cull_mode(metal::MTLCullMode::Back);
+                encoder.set_depth_clip_mode(metal::MTLDepthClipMode::Clamp);
                 encoder.set_vertex_buffer(1, Some(tb), 0);
                 encoder.set_vertex_buffer(2, Some(vpb), 0);
                 for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
@@ -1531,6 +1532,7 @@ impl MetalBackend {
                 encoder.set_render_pipeline_state(&self.forward_pipeline);
                 encoder.set_depth_stencil_state(&self.depth_state_equal);
                 encoder.set_cull_mode(metal::MTLCullMode::Back);
+                encoder.set_depth_clip_mode(metal::MTLDepthClipMode::Clamp);
                 encoder.set_vertex_buffer(1, Some(tb), 0);
                 encoder.set_vertex_buffer(2, Some(vpb), 0);
                 encoder.set_fragment_buffer(0, Some(vpb), 0);
@@ -1580,6 +1582,7 @@ impl MetalBackend {
                 let encoder = command_buffer.new_render_command_encoder(&pass_desc);
                 encoder.set_render_pipeline_state(&self.forward_pipeline);
                 encoder.set_depth_stencil_state(&self.depth_state_write);
+                encoder.set_depth_clip_mode(metal::MTLDepthClipMode::Clamp);
                 encoder.set_vertex_buffer(1, Some(tb), 0);
                 encoder.set_vertex_buffer(2, Some(vpb), 0);
                 encoder.set_fragment_buffer(0, Some(vpb), 0);
@@ -1638,6 +1641,7 @@ impl MetalBackend {
             encoder.set_render_pipeline_state(&self.forward_transparent_pipeline);
             encoder.set_depth_stencil_state(&self.depth_state_read);
             encoder.set_cull_mode(metal::MTLCullMode::Back);
+            encoder.set_depth_clip_mode(metal::MTLDepthClipMode::Clamp);
             encoder.set_vertex_buffer(1, Some(tb), 0);
             encoder.set_vertex_buffer(2, Some(vpb), 0);
             encoder.set_fragment_buffer(0, Some(vpb), 0);
@@ -1714,7 +1718,7 @@ impl MetalBackend {
         let (z_prepass_pipeline, forward_pipeline, forward_transparent_pipeline) =
             build_scene_pipelines(&device)?;
 
-        let depth_state_write = build_depth_state(&device, MTLCompareFunction::Less, true)
+        let depth_state_write = build_depth_state(&device, MTLCompareFunction::LessEqual, true)
             .map_err(MetalBackendError::PipelineCreation)?;
         let depth_state_equal = build_depth_state(&device, MTLCompareFunction::LessEqual, false)
             .map_err(MetalBackendError::PipelineCreation)?;

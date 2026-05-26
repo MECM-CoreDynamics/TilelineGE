@@ -7,7 +7,7 @@
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 
 /// Execution mode snapshot returned by ParadoxPE parallel helpers.
@@ -88,16 +88,20 @@ fn external_parallel_mode_active() -> bool {
     EXTERNAL_PARALLEL_DEPTH.with(|depth| depth.get() > 0)
 }
 
+static AVAILABLE_PARALLELISM: OnceLock<usize> = OnceLock::new();
+
 /// Return the logical worker count available to this process.
 #[inline]
 pub fn worker_count() -> usize {
     if external_parallel_mode_active() {
         return 1;
     }
-    thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .max(1)
+    *AVAILABLE_PARALLELISM.get_or_init(|| {
+        thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .max(1)
+    })
 }
 
 #[inline]
@@ -150,13 +154,11 @@ fn wait_and_help(counter: &Arc<AtomicUsize>) {
     while counter.load(Ordering::Acquire) > 0 {
         if let Some(queue) = global_job_queue() {
             if queue.try_execute_one() {
-                counter.fetch_sub(1, Ordering::Release);
-            } else {
-                std::hint::spin_loop();
+                continue;
             }
-        } else {
-            break;
         }
+        std::hint::spin_loop();
+        std::thread::yield_now();
     }
 }
 
@@ -189,12 +191,14 @@ where
             let ptr = chunk_slice.as_mut_ptr() as usize;
             let len = chunk_slice.len();
             counter.fetch_add(1, Ordering::Release);
+            let job_counter = Arc::clone(&counter);
             queue.submit(Box::new(move || {
                 let f_ref = unsafe { &*(f_addr as *const F) };
                 let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut T, len) };
                 for (offset, item) in slice.iter_mut().enumerate() {
                     f_ref(base + offset, item);
                 }
+                job_counter.fetch_sub(1, Ordering::Release);
             }));
         }
         wait_and_help(&counter);
@@ -237,11 +241,13 @@ where
         for start in (0..len).step_by(chunk) {
             let end = (start + chunk).min(len);
             counter.fetch_add(1, Ordering::Release);
+            let job_counter = Arc::clone(&counter);
             queue.submit(Box::new(move || {
                 let f_ref = unsafe { &*(f_addr as *const F) };
                 for index in start..end {
                     f_ref(index);
                 }
+                job_counter.fetch_sub(1, Ordering::Release);
             }));
         }
         wait_and_help(&counter);
@@ -453,6 +459,45 @@ mod tests {
         );
         for (i, v) in data.iter().enumerate() {
             assert_eq!(*v, i as u64 + 1);
+        }
+    }
+
+    struct MockJobQueue {
+        jobs: Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>,
+    }
+
+    impl JobQueue for MockJobQueue {
+        fn submit(&self, f: Box<dyn FnOnce() + Send>) {
+            self.jobs.lock().unwrap().push(f);
+        }
+
+        fn try_execute_one(&self) -> bool {
+            let mut lock = self.jobs.lock().unwrap();
+            if let Some(f) = lock.pop() {
+                drop(lock);
+                f();
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    #[test]
+    fn global_job_queue_parallel_execution() {
+        let jobs = Arc::new(Mutex::new(Vec::new()));
+        let queue = Arc::new(MockJobQueue { jobs: Arc::clone(&jobs) });
+        let _ = GLOBAL_JOB_QUEUE.set(Arc::clone(&queue) as Arc<dyn JobQueue + Send + Sync>);
+
+        let mut data = vec![0u32; 100];
+        let mode = for_each_mut_indexed(&mut data, 2, |index, item| {
+            *item = index as u32 + 1;
+        });
+
+        if mode == ParallelExecutionMode::Parallel {
+            for (index, &val) in data.iter().enumerate() {
+                assert_eq!(val, index as u32 + 1);
+            }
         }
     }
 }

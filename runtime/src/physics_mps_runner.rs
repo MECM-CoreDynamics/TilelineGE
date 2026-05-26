@@ -198,42 +198,108 @@ impl PhysicsMpsRunner {
             };
         };
 
-        let integration_world = Arc::clone(&world);
-        let integration_tx = tx;
-        let integration = Arc::new(move |ctx: &mps::DispatcherTaskContext| {
+        let _substeps = plan.substeps;
+        let plan = Arc::new(plan);
+
+        let integrate_world = Arc::clone(&world);
+        let integrate_plan = Arc::clone(&plan);
+        let integrate = Arc::new(move |_ctx: &mps::DispatcherTaskContext| {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                let mut world = integrate_world.lock().unwrap();
+                let mut timings = paradoxpe::PhysicsStepTimings::default();
+                for step_index in 0..integrate_plan.substeps {
+                    world.execute_integrate_phase(&integrate_plan, step_index, &mut timings);
+                }
+                world.last_step_timings.integrate_us = timings.integrate_us;
+                world.last_step_timings.integrate_mode = timings.integrate_mode;
+                world.last_step_timings.integrate_serial_fallback_reason =
+                    timings.integrate_serial_fallback_reason;
+            }));
+        });
+
+        let broadphase_world = Arc::clone(&world);
+        let broadphase_plan = Arc::clone(&plan);
+        let broadphase = Arc::new(move |_ctx: &mps::DispatcherTaskContext| {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                let mut world = broadphase_world.lock().unwrap();
+                let mut timings = paradoxpe::PhysicsStepTimings::default();
+                for _ in 0..broadphase_plan.substeps {
+                    world.execute_broadphase_phase(&broadphase_plan, &mut timings);
+                }
+                world.last_step_timings.broadphase_us = timings.broadphase_us;
+                world.last_step_timings.broadphase_mode = timings.broadphase_mode;
+                world.last_step_timings.broadphase_serial_fallback_reason =
+                    timings.broadphase_serial_fallback_reason;
+                world.last_step_timings.candidate_pairs = timings.candidate_pairs;
+            }));
+        });
+
+        let narrowphase_world = Arc::clone(&world);
+        let narrowphase_plan = Arc::clone(&plan);
+        let narrowphase = Arc::new(move |_ctx: &mps::DispatcherTaskContext| {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                let mut world = narrowphase_world.lock().unwrap();
+                let mut timings = paradoxpe::PhysicsStepTimings::default();
+                for _ in 0..narrowphase_plan.substeps {
+                    world.execute_narrowphase_and_solver_phase(&narrowphase_plan, &mut timings);
+                }
+                world.last_step_timings.narrowphase_us = timings.narrowphase_us;
+                world.last_step_timings.narrowphase_mode = timings.narrowphase_mode;
+                world.last_step_timings.narrowphase_serial_fallback_reason =
+                    timings.narrowphase_serial_fallback_reason;
+                world.last_step_timings.solver_us = timings.solver_us;
+                world.last_step_timings.solver_mode = timings.solver_mode;
+                world.last_step_timings.solver_serial_fallback_reason =
+                    timings.solver_serial_fallback_reason;
+                world.last_step_timings.manifold_count = timings.manifold_count;
+            }));
+        });
+
+        let sleep_world = Arc::clone(&world);
+        let sleep_plan = Arc::clone(&plan);
+        let sleep_tx = tx;
+        let sleep_finalize = Arc::new(move |ctx: &mps::DispatcherTaskContext| {
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let mut world = integration_world.lock().unwrap();
-                let completed_substeps = world.step_with_execution_plan(plan);
+                let mut world = sleep_world.lock().unwrap();
+                let mut timings = paradoxpe::PhysicsStepTimings::default();
+                for _ in 0..sleep_plan.substeps {
+                    world.execute_sleep_phase(&sleep_plan, &mut timings);
+                }
+                world.last_step_timings.sleep_us = timings.sleep_us;
+                world.last_step_timings.substeps = sleep_plan.substeps as u32;
                 write_world_render_transforms_to_dispatcher_storage(
                     &world,
                     ctx.transforms.as_ref(),
                     ctx.physics_write_slot,
                 );
-                completed_substeps
+                sleep_plan.substeps
             }));
-
             match result {
-                Ok(completed_substeps) => {
-                    let _ = integration_tx.send(completed_substeps);
+                Ok(completed) => {
+                    let _ = sleep_tx.send(completed);
                 }
                 Err(_) => {
                     eprintln!(
-                        "[physics mps] frame {} panicked during planned step execution; returning 0 substeps",
+                        "[physics mps] frame {} sleep phase panicked; returning 0 substeps",
                         ctx.frame_id
                     );
-                    let _ = integration_tx.send(0);
+                    let _ = sleep_tx.send(0);
                 }
             }
         });
 
-        let callbacks = DispatcherPhaseCallbacks::default().with_integration(integration);
+        let callbacks = DispatcherPhaseCallbacks::default()
+            .with_broadphase(broadphase)
+            .with_narrowphase(narrowphase)
+            .with_integration(integrate)
+            .with_sleep_finalize(sleep_finalize);
         let trigger = PhysicsDispatchTrigger::with_phase_plans(
             frame_id,
-            DispatcherPhasePlan::default(),
-            DispatcherPhasePlan::default(),
-            DispatcherPhasePlan::default(),
             DispatcherPhasePlan::new(1, 1),
-            DispatcherPhasePlan::default(),
+            DispatcherPhasePlan::new(1, 1),
+            DispatcherPhasePlan::new(1, 1),
+            DispatcherPhasePlan::new(1, 1),
+            DispatcherPhasePlan::new(1, 1),
         );
         let await_publish =
             if let Err(err) = self.dispatcher.trigger_next_physics(trigger, callbacks) {

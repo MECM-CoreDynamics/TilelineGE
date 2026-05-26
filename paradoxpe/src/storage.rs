@@ -4,6 +4,7 @@
 //! integration, and `.tlscript @parallel(domain="bodies")` hooks can read/write slices without
 //! lock contention or pointer chasing.
 
+use crate::SafeClamp;
 use std::ops::Range;
 
 use nalgebra::{UnitQuaternion, Vector3};
@@ -170,7 +171,7 @@ impl BodyRegistry {
         self.aabbs.push(world_aabb);
         self.inverse_masses.push(inverse_mass);
         self.linear_dampings
-            .push(desc.linear_damping.clamp(0.0, 1.0));
+            .push(desc.linear_damping.safe_clamp(0.0, 1.0));
         self.user_tags.push(desc.user_tag);
         self.awake.push(true);
         self.sleep_timers.push(0.0);
@@ -280,7 +281,7 @@ impl BodyRegistry {
         let Some(dense) = self.dense_index(body) else {
             return false;
         };
-        self.linear_dampings[dense] = damping.clamp(0.0, 0.95);
+        self.linear_dampings[dense] = damping.safe_clamp(0.0, 0.95);
         if self.kinds[dense] != BodyKind::Static {
             self.wake_dense(dense);
         }
@@ -289,7 +290,7 @@ impl BodyRegistry {
 
     /// Update linear damping for all dynamic bodies.
     pub fn set_linear_damping_all_dynamic(&mut self, damping: f32) -> usize {
-        let damping = damping.clamp(0.0, 0.95);
+        let damping = damping.safe_clamp(0.0, 0.95);
         let mut updated = 0usize;
         for dense in 0..self.handles.len() {
             if self.kinds[dense] == BodyKind::Dynamic {
@@ -353,7 +354,7 @@ impl BodyRegistry {
                         gravity + self.accumulated_forces[dense] * self.inverse_masses[dense];
                     self.linear_velocities[dense] += acceleration * dt;
                     self.linear_velocities[dense] *=
-                        1.0 - self.linear_dampings[dense].clamp(0.0, 0.95);
+                        1.0 - self.linear_dampings[dense].safe_clamp(0.0, 0.95);
                     self.positions[dense] += self.linear_velocities[dense] * dt;
                     self.accumulated_forces[dense] = Vector3::zeros();
                     self.recompute_world_aabb(dense);
@@ -461,7 +462,7 @@ impl BodyRegistry {
                                     gravity + force_chunk[index] * inverse_mass_chunk[index];
                                 velocity_chunk[index] += acceleration * dt;
                                 velocity_chunk[index] *=
-                                    1.0 - linear_damping_chunk[index].clamp(0.0, 0.95);
+                                    1.0 - linear_damping_chunk[index].safe_clamp(0.0, 0.95);
                                 position_chunk[index] += velocity_chunk[index] * dt;
                                 force_chunk[index] = Vector3::zeros();
                                 aabb_chunk[index] =

@@ -7,6 +7,7 @@
 //! - allocation-aware scratch buffers sized ahead of the hot loop
 //! - Jacobi parallel solve path: distributes the impulse loop across Tileline worker threads
 
+use crate::SafeClamp;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -562,7 +563,7 @@ impl ContactSolver {
                     * current_normal;
             let prev_tangent = f32::from_bits(tangent_impulses[index].load(Ordering::Relaxed));
             let next_tangent =
-                (prev_tangent + raw_tangent_impulse).clamp(-max_friction, max_friction);
+                (prev_tangent + raw_tangent_impulse).safe_clamp(-max_friction, max_friction);
             let delta_tangent = next_tangent - prev_tangent;
             if delta_tangent.abs() > f32::EPSILON {
                 let impulse = tangent * delta_tangent;
@@ -783,7 +784,7 @@ impl ContactSolver {
             let persistence = manifold.persisted_frames.saturating_sub(1).min(8) as f32;
             let persistence_scale =
                 1.0 + persistence * (self.config.persistent_contact_boost * 0.04);
-            let decay = self.config.warmstart_impulse_decay.clamp(0.0, 1.0);
+            let decay = self.config.warmstart_impulse_decay.safe_clamp(0.0, 1.0);
             let normal_impulse = (cached.normal_impulse * decay * persistence_scale).max(0.0);
             let relative_velocity = bodies.relative_velocity(manifold.body_a, manifold.body_b);
             let normal = safe_normal(manifold.normal);
@@ -791,7 +792,7 @@ impl ContactSolver {
             let tangent_speed = relative_velocity.dot(&tangent).abs();
             let max_tangent =
                 self.effective_friction(manifold.friction, tangent_speed) * normal_impulse;
-            let tangent_impulse = (cached.tangent_impulse * decay).clamp(-max_tangent, max_tangent);
+            let tangent_impulse = (cached.tangent_impulse * decay).safe_clamp(-max_tangent, max_tangent);
             if normal_impulse <= f32::EPSILON && tangent_impulse.abs() <= f32::EPSILON {
                 continue;
             }
@@ -875,7 +876,7 @@ impl ContactSolver {
         let max_friction = self.effective_friction(manifold.friction, tangent_speed.abs())
             * f32::from_bits(self.normal_impulses[index].load(Ordering::Relaxed));
         let prev_tangent = f32::from_bits(self.tangent_impulses[index].load(Ordering::Relaxed));
-        let next_tangent = (prev_tangent + raw_tangent_impulse).clamp(-max_friction, max_friction);
+        let next_tangent = (prev_tangent + raw_tangent_impulse).safe_clamp(-max_friction, max_friction);
         let delta_tangent = next_tangent - prev_tangent;
         if delta_tangent.abs() > f32::EPSILON {
             self.apply_impulse_pair(bodies, manifold, tangent * delta_tangent);
@@ -923,7 +924,7 @@ fn effective_friction_fn(config: &ContactSolverConfig, base: f32, tangent_speed_
     }
     let static_boost = config.friction_static_boost.max(0.0);
     let kinetic_scale = config.friction_kinetic_scale.max(0.0);
-    let t = (tangent_speed_abs / transition).clamp(0.0, 1.0);
+    let t = (tangent_speed_abs / transition).safe_clamp(0.0, 1.0);
     let speed_scale = static_boost + (kinetic_scale - static_boost) * t;
     base * speed_scale.max(0.0)
 }

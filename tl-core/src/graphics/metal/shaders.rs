@@ -116,7 +116,8 @@ float sample_shadow(
     float3 light_pos,
     float light_range,
     constant ShadowUniform &u_shadow,
-    depth2d<float>       shadow_map
+    depth2d<float>       shadow_map,
+    sampler              shadow_sampler
 ) {
     float3 to_light = light_pos - world_pos;
     float light_dist = length(to_light);
@@ -128,31 +129,22 @@ float sample_shadow(
     if (proj.z < -1.0 || proj.z > 1.0) return 1.0;
 
     float wgpu_z = proj.z * 0.5 + 0.5;
-    float bias = 0.000001 + light_dist * 0.000000001;
+    
+    // Dynamic depth bias based on distance to light source
+    float dist_frac = clamp(light_dist / light_range, 0.0, 1.0);
+    float bias = mix(0.0001, 0.0015, dist_frac);
     float depth_test = wgpu_z - bias;
+    
     float2 uv = proj.xy * float2(0.5, -0.5) + float2(0.5, 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
 
-    int map_size = 1024;
-    float shadow_sum = 0.0;
-    for (int dx = 0; dx <= 1; ++dx) {
-        for (int dy = 0; dy <= 1; ++dy) {
-            int2 px = int2(
-                clamp(int(uv.x * float(map_size)) + dx, 0, map_size - 1),
-                clamp(int(uv.y * float(map_size)) + dy, 0, map_size - 1)
-            );
-            float2 atlas_scale = u_shadow.atlas_scale_offset[slot].xy;
-            float2 atlas_offset = u_shadow.atlas_scale_offset[slot].zw;
-            float2 atlas_uv = uv * atlas_scale + atlas_offset;
-            int2 atlas_px = int2(
-                clamp(int(atlas_uv.x * float(map_size)), 0, map_size - 1),
-                clamp(int(atlas_uv.y * float(map_size)), 0, map_size - 1)
-            );
-            float stored = shadow_map.read(uint2(atlas_px));
-            shadow_sum += select(0.0, 1.0, stored >= depth_test);
-        }
-    }
-    float shadow_val = shadow_sum / 4.0;
+    float2 atlas_scale = u_shadow.atlas_scale_offset[slot].xy;
+    float2 atlas_offset = u_shadow.atlas_scale_offset[slot].zw;
+    float2 atlas_uv = uv * atlas_scale + atlas_offset;
+
+    // Use custom linear comparison sampler for Percentage-Closer Filtering (PCF)
+    float shadow_val = shadow_map.sample_compare(shadow_sampler, atlas_uv, depth_test);
+
     float fade = 1.0 - smoothstep(light_range * 0.8, light_range, light_dist);
     return mix(1.0, shadow_val, fade);
 }
@@ -166,7 +158,8 @@ float3 evaluate_light(
     float     roughness,
     float     metallic,
     constant ShadowUniform &u_shadow,
-    depth2d<float>         shadow_map
+    depth2d<float>         shadow_map,
+    sampler                shadow_sampler
 ) {
     float3 to_light  = light.position_kind.xyz - world_pos;
     float  distance  = max(length(to_light), 1e-4);
@@ -204,7 +197,7 @@ float3 evaluate_light(
     float shadow_term = 1.0;
     int   shadow_slot = int(round(light.shadow.y));
     if (shadow_slot >= 0 && uint(shadow_slot) < u_shadow.shadow_count) {
-        shadow_term = sample_shadow(shadow_slot, world_pos, light.position_kind.xyz, light.params.x, u_shadow, shadow_map);
+        shadow_term = sample_shadow(shadow_slot, world_pos, light.position_kind.xyz, light.params.x, u_shadow, shadow_map, shadow_sampler);
     } else if (light.shadow.x > 0.5) {
         float penumbra_floor = mix(0.35, 0.80, 1.0 - light.params.z);
         shadow_term = mix(penumbra_floor, 1.0, ndotl);
@@ -221,6 +214,7 @@ fragment float4 scene_3d_fragment(
     constant Lighting      &u_lighting    [[buffer(2)]],
     constant ShadowUniform &u_shadow       [[buffer(3)]],
     depth2d<float>         shadow_map     [[texture(0)]],
+    sampler                shadow_sampler [[sampler(0)]],
     bool                    is_front       [[front_facing]]
 ) {
     float3 base_color = in.color.rgb;
@@ -244,7 +238,7 @@ fragment float4 scene_3d_fragment(
             lit += evaluate_light(
                 u_lights[i], normal, in.world_pos, base_color,
                 view_dir, in.roughness, in.metallic,
-                u_shadow, shadow_map
+                u_shadow, shadow_map, shadow_sampler
             );
         }
     }

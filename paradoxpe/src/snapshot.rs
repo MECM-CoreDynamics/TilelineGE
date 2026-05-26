@@ -5,6 +5,7 @@
 //! - rollback/rewind support
 //! - NPS transform snapshot export
 
+use crate::SafeClamp;
 use std::collections::VecDeque;
 
 use nalgebra::{UnitQuaternion, Vector3};
@@ -109,7 +110,7 @@ fn interpolate_body_frames(
     next: &BodyStateFrame,
     alpha: f32,
 ) -> InterpolatedBodyPose {
-    let alpha = alpha.clamp(0.0, 1.0);
+    let alpha = alpha.safe_clamp(0.0, 1.0);
     InterpolatedBodyPose {
         handle: next.handle,
         position: previous.position + (next.position - previous.position) * alpha,

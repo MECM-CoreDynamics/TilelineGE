@@ -4,6 +4,7 @@
 //! designed to run inside Tileline's CPU tasking environment and uses deterministic chunked worker
 //! scans without allocating in the hot `rebuild_pairs_parallel` loop.
 
+use crate::SafeClamp;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::body::{Aabb, BodyKind};
@@ -286,8 +287,24 @@ fn order_pair(left: BodyHandle, right: BodyHandle) -> (BodyHandle, BodyHandle) {
     }
 }
 
-#[inline]
 fn swept_aabb(aabb: Aabb, velocity: nalgebra::Vector3<f32>, dt: f32, max_distance: f32) -> Aabb {
+    if aabb.min.x.is_nan()
+        || aabb.min.y.is_nan()
+        || aabb.min.z.is_nan()
+        || aabb.max.x.is_nan()
+        || aabb.max.y.is_nan()
+        || aabb.max.z.is_nan()
+        || velocity.x.is_nan()
+        || velocity.y.is_nan()
+        || velocity.z.is_nan()
+        || dt.is_nan()
+        || max_distance.is_nan()
+        || aabb.min.x > aabb.max.x
+        || aabb.min.y > aabb.max.y
+        || aabb.min.z > aabb.max.z
+    {
+        return aabb;
+    }
     let dt = dt.max(0.0);
     let max_distance = max_distance.max(0.0);
     if dt <= 1e-6 || max_distance <= 1e-6 {
@@ -295,9 +312,9 @@ fn swept_aabb(aabb: Aabb, velocity: nalgebra::Vector3<f32>, dt: f32, max_distanc
     }
 
     let mut travel = velocity * dt;
-    travel.x = travel.x.clamp(-max_distance, max_distance);
-    travel.y = travel.y.clamp(-max_distance, max_distance);
-    travel.z = travel.z.clamp(-max_distance, max_distance);
+    travel.x = travel.x.safe_clamp(-max_distance, max_distance);
+    travel.y = travel.y.safe_clamp(-max_distance, max_distance);
+    travel.z = travel.z.safe_clamp(-max_distance, max_distance);
     if travel.x.abs() <= 1e-6 && travel.y.abs() <= 1e-6 && travel.z.abs() <= 1e-6 {
         return aabb;
     }
@@ -370,5 +387,14 @@ mod tests {
         broadphase.sync_for_body_count(bodies.len());
         let pairs = broadphase.rebuild_pairs_parallel(&bodies);
         assert!(pairs.contains(&(moving, wall)));
+    }
+
+    #[test]
+    fn swept_aabb_gracefully_handles_nan_inputs() {
+        let aabb = Aabb::from_center_half_extents(Vector3::zeros(), Vector3::repeat(1.0));
+        let nan_velocity = Vector3::new(f32::NAN, 0.0, 0.0);
+        let result = swept_aabb(aabb, nan_velocity, 0.1, 1.0);
+        // It should gracefully return the original aabb without panicking
+        assert_eq!(result, aabb);
     }
 }

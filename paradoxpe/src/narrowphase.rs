@@ -3,6 +3,7 @@
 //! This stage consumes broadphase body pairs, queries the attached primary collider shapes, and
 //! emits a reusable manifold buffer for the solver.
 
+use crate::SafeClamp;
 use std::collections::HashMap;
 
 use nalgebra::Vector3;
@@ -127,7 +128,7 @@ impl NarrowphasePipeline {
             max_prediction_distance.max(self.config.speculative_contact_distance);
     }
 
-    pub fn sync_for_pair_capacity(&mut self, pair_capacity: usize) {
+    pub fn sync_for_pair_capacity(&mut self, _pair_capacity: usize) {
         let target = self.config.max_manifolds;
         if self.manifolds.capacity() < target {
             self.manifolds
@@ -395,6 +396,17 @@ fn sphere_sphere(
     center_b: Vector3<f32>,
     radius_b: f32,
 ) -> Option<(Vector3<f32>, Vector3<f32>, f32)> {
+    if center_a.x.is_nan()
+        || center_a.y.is_nan()
+        || center_a.z.is_nan()
+        || radius_a.is_nan()
+        || center_b.x.is_nan()
+        || center_b.y.is_nan()
+        || center_b.z.is_nan()
+        || radius_b.is_nan()
+    {
+        return None;
+    }
     let delta = center_b - center_a;
     let distance_sq = delta.norm_squared();
     let radius_sum = radius_a.max(0.0) + radius_b.max(0.0);
@@ -412,7 +424,6 @@ fn sphere_sphere(
     Some((point, normal, penetration))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn speculative_sphere_sphere(
     center_a: Vector3<f32>,
     radius_a: f32,
@@ -423,6 +434,23 @@ fn speculative_sphere_sphere(
     margin: f32,
     max_prediction: f32,
 ) -> Option<(Vector3<f32>, Vector3<f32>, f32)> {
+    if center_a.x.is_nan()
+        || center_a.y.is_nan()
+        || center_a.z.is_nan()
+        || radius_a.is_nan()
+        || center_b.x.is_nan()
+        || center_b.y.is_nan()
+        || center_b.z.is_nan()
+        || radius_b.is_nan()
+        || relative_velocity_ab.x.is_nan()
+        || relative_velocity_ab.y.is_nan()
+        || relative_velocity_ab.z.is_nan()
+        || dt.is_nan()
+        || margin.is_nan()
+        || max_prediction.is_nan()
+    {
+        return None;
+    }
     let delta = center_b - center_a;
     let distance_sq = delta.norm_squared();
     if distance_sq <= 1e-10 {
@@ -454,10 +482,26 @@ fn sphere_aabb(
     radius: f32,
     box_aabb: Aabb,
 ) -> Option<(Vector3<f32>, Vector3<f32>, f32)> {
+    if sphere_center.x.is_nan()
+        || sphere_center.y.is_nan()
+        || sphere_center.z.is_nan()
+        || radius.is_nan()
+        || box_aabb.min.x.is_nan()
+        || box_aabb.min.y.is_nan()
+        || box_aabb.min.z.is_nan()
+        || box_aabb.max.x.is_nan()
+        || box_aabb.max.y.is_nan()
+        || box_aabb.max.z.is_nan()
+        || box_aabb.min.x > box_aabb.max.x
+        || box_aabb.min.y > box_aabb.max.y
+        || box_aabb.min.z > box_aabb.max.z
+    {
+        return None;
+    }
     let clamped = Vector3::new(
-        sphere_center.x.clamp(box_aabb.min.x, box_aabb.max.x),
-        sphere_center.y.clamp(box_aabb.min.y, box_aabb.max.y),
-        sphere_center.z.clamp(box_aabb.min.z, box_aabb.max.z),
+        sphere_center.x.safe_clamp(box_aabb.min.x, box_aabb.max.x),
+        sphere_center.y.safe_clamp(box_aabb.min.y, box_aabb.max.y),
+        sphere_center.z.safe_clamp(box_aabb.min.z, box_aabb.max.z),
     );
     let delta = sphere_center - clamped;
     let distance_sq = delta.norm_squared();
@@ -525,7 +569,6 @@ fn sphere_aabb(
     Some((point, normal, penetration))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn speculative_sphere_aabb(
     sphere_center: Vector3<f32>,
     radius: f32,
@@ -535,10 +578,32 @@ fn speculative_sphere_aabb(
     margin: f32,
     max_prediction: f32,
 ) -> Option<(Vector3<f32>, Vector3<f32>, f32)> {
+    if sphere_center.x.is_nan()
+        || sphere_center.y.is_nan()
+        || sphere_center.z.is_nan()
+        || radius.is_nan()
+        || box_aabb.min.x.is_nan()
+        || box_aabb.min.y.is_nan()
+        || box_aabb.min.z.is_nan()
+        || box_aabb.max.x.is_nan()
+        || box_aabb.max.y.is_nan()
+        || box_aabb.max.z.is_nan()
+        || box_aabb.min.x > box_aabb.max.x
+        || box_aabb.min.y > box_aabb.max.y
+        || box_aabb.min.z > box_aabb.max.z
+        || relative_velocity_ab.x.is_nan()
+        || relative_velocity_ab.y.is_nan()
+        || relative_velocity_ab.z.is_nan()
+        || dt.is_nan()
+        || margin.is_nan()
+        || max_prediction.is_nan()
+    {
+        return None;
+    }
     let clamped = Vector3::new(
-        sphere_center.x.clamp(box_aabb.min.x, box_aabb.max.x),
-        sphere_center.y.clamp(box_aabb.min.y, box_aabb.max.y),
-        sphere_center.z.clamp(box_aabb.min.z, box_aabb.max.z),
+        sphere_center.x.safe_clamp(box_aabb.min.x, box_aabb.max.x),
+        sphere_center.y.safe_clamp(box_aabb.min.y, box_aabb.max.y),
+        sphere_center.z.safe_clamp(box_aabb.min.z, box_aabb.max.z),
     );
     let delta = clamped - sphere_center;
     let distance_sq = delta.norm_squared();
@@ -659,7 +724,7 @@ fn stabilize_contact_normal(
     }
 
     let persistence = persisted_frames.saturating_sub(1).min(10) as f32;
-    let blend = (0.18 + persistence * 0.04).clamp(0.18, 0.52);
+    let blend = (0.18 + persistence * 0.04).safe_clamp(0.18, 0.52);
     let mixed = cur * (1.0 - blend) + prev * blend;
     let mixed_len_sq = mixed.norm_squared();
     if mixed_len_sq > 1e-6 {
@@ -677,7 +742,7 @@ fn stabilize_contact_point(
 ) -> Vector3<f32> {
     let prev = Vector3::new(previous[0], previous[1], previous[2]);
     let persistence = persisted_frames.saturating_sub(1).min(10) as f32;
-    let blend = (0.08 + persistence * 0.03).clamp(0.08, 0.32);
+    let blend = (0.08 + persistence * 0.03).safe_clamp(0.08, 0.32);
     current * (1.0 - blend) + prev * blend
 }
 
@@ -905,5 +970,27 @@ mod tests {
         // For persistent contacts we keep a bias toward previous normal.
         assert!(stabilized.dot(&Vector3::new(1.0, 0.0, 0.0)) > current.x);
         assert!(stabilized.norm() > 0.99);
+    }
+
+    #[test]
+    fn narrowphase_returns_none_for_nan_inputs() {
+        let nan_vec = Vector3::new(f32::NAN, 0.0, 0.0);
+        let normal_vec = Vector3::new(0.0, 0.0, 0.0);
+        let box_aabb = Aabb::from_center_half_extents(Vector3::zeros(), Vector3::repeat(1.0));
+        let nan_aabb = Aabb::from_center_half_extents(nan_vec, Vector3::repeat(1.0));
+
+        // sphere_sphere NaN
+        assert!(sphere_sphere(nan_vec, 1.0, normal_vec, 1.0).is_none());
+        assert!(sphere_sphere(normal_vec, f32::NAN, normal_vec, 1.0).is_none());
+
+        // speculative_sphere_sphere NaN
+        assert!(speculative_sphere_sphere(nan_vec, 1.0, normal_vec, 1.0, normal_vec, 0.1, 0.0, 1.0).is_none());
+
+        // sphere_aabb NaN
+        assert!(sphere_aabb(nan_vec, 1.0, box_aabb).is_none());
+        assert!(sphere_aabb(normal_vec, 1.0, nan_aabb).is_none());
+
+        // speculative_sphere_aabb NaN
+        assert!(speculative_sphere_aabb(nan_vec, 1.0, box_aabb, normal_vec, 0.1, 0.0, 1.0).is_none());
     }
 }
