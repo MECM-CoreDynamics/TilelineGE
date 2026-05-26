@@ -668,12 +668,13 @@ fn configure_parallel_runtime() {
 fn prefer_native_runtime_renderer() -> bool {
     #[cfg(target_os = "linux")]
     {
-        matches!(
-            env::var("TILELINE_RENDERER")
-                .ok()
-                .map(|value| value.trim().to_ascii_lowercase()),
-            Some(value) if value == "vulkan" || value == "vk"
-        )
+        if let Ok(value) = env::var("TILELINE_RENDERER") {
+            let lower = value.trim().to_ascii_lowercase();
+            if lower == "wgpu" || lower == "legacy" {
+                return false;
+            }
+        }
+        true
     }
     #[cfg(target_os = "macos")]
     {
