@@ -310,7 +310,7 @@ pub enum TlscriptPerformancePreset {
 impl TlscriptPerformancePreset {
     fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "8k" | "showcase" | "showcase8k" => Some(Self::Showcase8k),
+            "8k" | "10k" | "showcase" | "showcase8k" | "showcase10k" => Some(Self::Showcase8k),
             "30k" | "dense" | "dense30k" => Some(Self::Dense30k),
             "60k" | "extreme" | "extreme60k" | "stress" => Some(Self::Extreme60k),
             _ => None,
@@ -1554,12 +1554,12 @@ fn numeric_binary(left: DemoValue, right: DemoValue, f: impl FnOnce(f64, f64) ->
 fn apply_perf_preset_to_patch(state: &mut EvalState<'_>, preset: &str) {
     let Some(preset_kind) = TlscriptPerformancePreset::parse(preset) else {
         state.warn(format!(
-            "set_perf_preset expects '8k'|'30k'|'60k', got '{preset}'"
+            "set_perf_preset expects '8k'|'10k'|'30k'|'60k', got '{preset}'"
         ));
         return;
     };
     let (target_ball_count, spawn_per_tick, gfx_profile) = match preset_kind {
-        TlscriptPerformancePreset::Showcase8k => (8_000, 96, TlscriptGfxProfile::High),
+        TlscriptPerformancePreset::Showcase8k => (10_000, 96, TlscriptGfxProfile::High),
         TlscriptPerformancePreset::Dense30k => (30_000, 128, TlscriptGfxProfile::Med),
         TlscriptPerformancePreset::Extreme60k => (60_000, 144, TlscriptGfxProfile::Low),
     };

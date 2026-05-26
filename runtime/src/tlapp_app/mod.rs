@@ -213,7 +213,7 @@ impl PerformanceContractScenario {
 
     fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "8k" | "showcase" | "showcase8k" => Some(Self::Showcase8k),
+            "8k" | "10k" | "showcase" | "showcase8k" | "showcase10k" => Some(Self::Showcase8k),
             "30k" | "dense" | "dense30k" => Some(Self::Dense30k),
             "60k" | "extreme" | "extreme60k" | "stress" => Some(Self::Extreme60k),
             _ => None,
@@ -222,7 +222,7 @@ impl PerformanceContractScenario {
 
     fn reference_balls(self) -> usize {
         match self {
-            Self::Showcase8k => 8_000,
+            Self::Showcase8k => 10_000,
             Self::Dense30k => 30_000,
             Self::Extreme60k => 60_000,
         }
