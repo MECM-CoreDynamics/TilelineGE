@@ -106,6 +106,8 @@ These are intentionally out of scope for `v0.5.0`:
   sequential ownership of hot phases)
 - ParadoxPE can route supported phases through an engine-owned GPU compute backend without
   destabilizing CPU fallback behavior
+- ParadoxPE can use a cooperative CPU + secondary integrated-GPU lane for physics compute where
+  available, while leaving render/post-FX/AI GPU work to GMS-managed discrete-GPU distribution
 - MPS is the primary CPU execution path for physics/runtime jobs
 - `Heimdall` profile exists as an explicit opt-in tuning mode with thermal/power caveats documented
 - GMS Native SM/CU scaler is active in shipping path with deterministic budget clamps and guardrails
@@ -508,6 +510,11 @@ Target work:
 - add a ParadoxPE-owned compute backend contract for physics hot phases
 - start with integration-stage offload wiring, then expand to broadphase/narrowphase/solver in
   later slices
+- support a cooperative CPU + iGPU physics lane:
+  - CPU remains the authoritative deterministic fallback and handles unsupported/tail work
+  - secondary integrated GPU is preferred for eligible physics compute batches when present
+  - discrete GPUs remain primarily available to GMS for render, post-FX, AI/ML, and other
+    non-physics domains unless explicitly pinned otherwise
 - keep dispatch fail-soft:
   - no backend -> CPU fallback
   - unsupported stage -> CPU fallback
@@ -517,11 +524,16 @@ Target work:
   - executed dispatches
   - fallback reasons
   - reported GPU time
+  - selected physics compute lane (`cpu`, `cpu+igpu`, `gpu-fallback`)
+  - secondary adapter name/type when iGPU offload is active
 
 Acceptance gates:
 
 - compute path can be enabled without breaking deterministic fixed-step execution
 - CPU fallback remains authoritative when compute dispatch is unavailable
+- CPU + iGPU physics mode does not steal the primary/present dGPU from render or GMS domain work
+- telemetry can show whether physics ran on CPU-only, CPU+iGPU, or fail-soft fallback during each
+  sampled window
 - runtime can inspect compute usage through ParadoxPE telemetry instead of guessing
 
 ## Workstream D: MPS Revision
@@ -682,6 +694,9 @@ Target work:
   - prefer quality reduction before determinism loss
 - support primary-present + secondary-work lane normalization on MultiGPU;
   fail-soft to single-GPU with `fallback_reason` when required capabilities are absent
+- reserve a distinct physics-assist lane for CPU + secondary iGPU ParadoxPE compute when available,
+  so GMS can continue distributing render/post-FX/AI/ML work across discrete GPUs without physics
+  contention on the present adapter
 - expose controls in all three canonical surfaces:
   - `.tlpfile` `[gms_scaler]`
   - runtime CLI (`gms.*`)
@@ -694,6 +709,8 @@ Required telemetry:
 - `sm_cu_utilization`
 - `lane_queue_depth`
 - `physics_lag_frames`
+- `physics_compute_lane`
+- `physics_compute_adapter`
 - `ai_ml_drop_rate`
 - `fallback_reason`
 
@@ -701,6 +718,7 @@ Acceptance gate:
 
 - SM/CU budget distribution remains deterministic under fixed inputs
 - no domain starvation under sustained load
+- CPU+iGPU physics assist does not starve render/post-FX/AI domains on dGPU-backed GMS lanes
 - overlap path remains race-safe and diagnosable
 - control-surface precedence is enforced:
   - `CLI > .tlscript > .tlpfile`
