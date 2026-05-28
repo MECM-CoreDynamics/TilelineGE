@@ -23,9 +23,9 @@ use std::sync::Arc;
 use nalgebra::{Isometry3, Matrix4, Perspective3, Point3, Vector3};
 use tl_core::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
-    FrameSpriteRecord,
-    FrameTextureRecord, RenderStateSnapshot, SceneVertex, VulkanBackend, VulkanBackendConfig,
-    VulkanBackendError, VulkanFrameExecutionTelemetry, VulkanMultiGpuFramePlan,
+    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, SceneVertex, VulkanBackend,
+    VulkanBackendConfig, VulkanBackendError, VulkanFrameExecutionTelemetry,
+    VulkanMultiGpuFramePlan,
 };
 use wgpu::Backend;
 use winit::window::Window;
@@ -144,7 +144,13 @@ impl VulkanSceneRenderer {
             force_full_fbx_sphere: false,
             msaa_sample_count: 1,
             fsr_config: FsrConfig::default(),
-            fsr_status: resolve_fsr_status(FsrConfig { mode: FsrMode::Off, ..FsrConfig::default() }, Backend::Vulkan),
+            fsr_status: resolve_fsr_status(
+                FsrConfig {
+                    mode: FsrMode::Off,
+                    ..FsrConfig::default()
+                },
+                Backend::Vulkan,
+            ),
             ray_tracing_status: resolve_rt_status(RayTracingMode::Auto, false),
             last_upload_stats: WgpuSceneRendererUploadStats::default(),
             last_frame_result: None,
@@ -212,7 +218,13 @@ impl VulkanSceneRenderer {
     /// the stored config is preserved for later but the effective status stays off.
     pub fn set_fsr_config(&mut self, config: FsrConfig) {
         self.fsr_config = config;
-        self.fsr_status = resolve_fsr_status(FsrConfig { mode: FsrMode::Off, ..config }, Backend::Vulkan);
+        self.fsr_status = resolve_fsr_status(
+            FsrConfig {
+                mode: FsrMode::Off,
+                ..config
+            },
+            Backend::Vulkan,
+        );
     }
 
     /// Current effective FSR status.
@@ -264,7 +276,10 @@ impl VulkanSceneRenderer {
         let vertices: Vec<SceneVertex> = mesh_data
             .positions
             .iter()
-            .map(|&p| SceneVertex { position: p, uv: [0.0, 0.0] })
+            .map(|&p| SceneVertex {
+                position: p,
+                uv: [0.0, 0.0],
+            })
             .collect();
         self.backend
             .upload_mesh_slot(slot, &vertices, &mesh_data.indices)
@@ -309,13 +324,42 @@ impl VulkanSceneRenderer {
                 let vertices: Vec<SceneVertex> = mesh
                     .positions
                     .iter()
-                    .map(|&p| SceneVertex { position: p, uv: [0.0, 0.0] })
+                    .map(|&p| SceneVertex {
+                        position: p,
+                        uv: [0.0, 0.0],
+                    })
                     .collect();
-                let _ = self.backend.upload_mesh_slot(slot, &vertices, &mesh.indices);
+                let _ = self
+                    .backend
+                    .upload_mesh_slot(slot, &vertices, &mesh.indices);
                 return;
             }
         }
         let _ = self.backend.upload_builtin_sphere_mesh_slot(slot);
+    }
+
+    /// Bind a built-in unit panel mesh (XY quad, centered at origin) into a runtime slot.
+    pub fn bind_builtin_panel_mesh_slot(&mut self, slot: u8) {
+        let vertices = vec![
+            SceneVertex {
+                position: [-0.5, -0.5, 0.0],
+                uv: [0.0, 0.0],
+            },
+            SceneVertex {
+                position: [0.5, -0.5, 0.0],
+                uv: [1.0, 0.0],
+            },
+            SceneVertex {
+                position: [0.5, 0.5, 0.0],
+                uv: [1.0, 1.0],
+            },
+            SceneVertex {
+                position: [-0.5, 0.5, 0.0],
+                uv: [0.0, 1.0],
+            },
+        ];
+        let indices = vec![0_u32, 1, 2, 2, 3, 0, 2, 1, 0, 0, 3, 2];
+        let _ = self.backend.upload_mesh_slot(slot, &vertices, &indices);
     }
 
     /// Estimate the amount of cross-adapter state that would have to move for this frame.

@@ -2,8 +2,8 @@
 //!
 //! Keeps mobile path orchestration in `runtime/src` and mirrors the GMS dispatch helper semantics.
 
-use tl_core::mgs::MpsWorkloadHint;
 use mps::{CorePreference, NativeTask, TaskPriority};
+use tl_core::mgs::MpsWorkloadHint;
 use tl_core::{
     MgsBridgeFrameId, MgsBridgeMpsSubmission, MgsBridgeSubmitReceipt, MgsBridgeTaskDescriptor,
 };

@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use winit::dpi::PhysicalSize;
 
-use crate::{FsrMode, FsrQualityPreset, GraphicsSchedulerPath, PerformanceProfile, DEFAULT_MSAA_SAMPLE_COUNT};
+use crate::{
+    FsrMode, FsrQualityPreset, GraphicsSchedulerPath, PerformanceProfile, DEFAULT_MSAA_SAMPLE_COUNT,
+};
 
 #[derive(Debug, Clone)]
 pub struct CliOptions {
@@ -14,6 +16,7 @@ pub struct CliOptions {
     pub vsync: VsyncMode,
     pub fps_cap: Option<f32>,
     pub pipeline_mode: PipelineMode,
+    pub scheduler_override: Option<GraphicsSchedulerPath>,
     pub tick_profile: TickProfile,
     pub tick_cap: Option<f32>,
     pub render_distance: Option<f32>,
@@ -44,6 +47,7 @@ impl Default for CliOptions {
             vsync: VsyncMode::Auto,
             fps_cap: None,
             pipeline_mode: PipelineMode::default_for_build(),
+            scheduler_override: None,
             tick_profile: TickProfile::Max,
             tick_cap: None,
             render_distance: None,
@@ -303,6 +307,17 @@ pub fn parse_msaa(value: &str) -> Result<u32, Box<dyn Error>> {
     }
 }
 
+pub fn parse_scheduler_override(
+    value: &str,
+) -> Result<Option<GraphicsSchedulerPath>, Box<dyn Error>> {
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => Ok(None),
+        "gms" => Ok(Some(GraphicsSchedulerPath::Gms)),
+        "mgs" => Ok(Some(GraphicsSchedulerPath::Mgs)),
+        _ => Err(format!("invalid scheduler value: {value} (expected auto|gms|mgs)").into()),
+    }
+}
+
 pub fn parse_tick_cap(value: &str) -> Result<Option<f32>, Box<dyn Error>> {
     if value.eq_ignore_ascii_case("off") || value.eq_ignore_ascii_case("none") {
         return Ok(None);
@@ -370,6 +385,9 @@ fn apply_env_overrides(options: &mut CliOptions) -> Result<(), Box<dyn Error>> {
     if let Ok(value) = env::var("TILELINE_FPS_CAP") {
         options.fps_cap = parse_fps_cap(&value)?;
     }
+    if let Ok(value) = env::var("TILELINE_SCHEDULER") {
+        options.scheduler_override = parse_scheduler_override(&value)?;
+    }
     if let Ok(value) = env::var("TILELINE_TICK_PROFILE") {
         options.tick_profile = TickProfile::parse(&value)?;
     }
@@ -428,9 +446,10 @@ fn apply_env_overrides(options: &mut CliOptions) -> Result<(), Box<dyn Error>> {
         options.pak_path = Some(PathBuf::from(value));
     }
     if let Ok(value) = env::var("TILELINE_PERF_MODE") {
-        options.performance_profile = PerformanceProfile::parse(&value).ok_or_else(|| -> Box<dyn Error> {
-            "invalid TILELINE_PERF_MODE value (expected balanced|aggressive|heimdall)".into()
-        })?;
+        options.performance_profile =
+            PerformanceProfile::parse(&value).ok_or_else(|| -> Box<dyn Error> {
+                "invalid TILELINE_PERF_MODE value (expected balanced|aggressive|heimdall)".into()
+            })?;
     }
     Ok(())
 }
@@ -466,6 +485,10 @@ fn parse_cli_overrides(args: &[String], options: &mut CliOptions) -> Result<bool
                 let value = next_arg(&mut iter, "--pipeline")?;
                 options.pipeline_mode = PipelineMode::parse(&value)?;
                 pipeline_explicit = true;
+            }
+            "--scheduler" => {
+                let value = next_arg(&mut iter, "--scheduler")?;
+                options.scheduler_override = parse_scheduler_override(&value)?;
             }
             "--tick-profile" => {
                 let value = next_arg(&mut iter, "--tick-profile")?;
@@ -540,15 +563,17 @@ fn parse_cli_overrides(args: &[String], options: &mut CliOptions) -> Result<bool
             }
             "--perf-mode" => {
                 let value = next_arg(&mut iter, "--perf-mode")?;
-                options.performance_profile = PerformanceProfile::parse(&value).ok_or_else(
-                    || -> Box<dyn Error> {
+                options.performance_profile =
+                    PerformanceProfile::parse(&value).ok_or_else(|| -> Box<dyn Error> {
                         "invalid --perf-mode value (expected balanced|aggressive|heimdall)".into()
-                    },
-                )?;
+                    })?;
             }
             "--network" => {
                 let value = next_arg(&mut iter, "--network")?;
-                options.network_enabled = matches!(value.trim().to_ascii_lowercase().as_str(), "on" | "true" | "1" | "yes" | "enabled");
+                options.network_enabled = matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "on" | "true" | "1" | "yes" | "enabled"
+                );
             }
             "--network-bind" => {
                 let value = next_arg(&mut iter, "--network-bind")?;
@@ -581,6 +606,9 @@ fn apply_ini_overrides(
             "vsync" => options.vsync = VsyncMode::parse(&value)?,
             "fps_cap" => options.fps_cap = parse_fps_cap(&value)?,
             "pipeline" => options.pipeline_mode = PipelineMode::parse(&value)?,
+            "scheduler" | "scheduler_path" => {
+                options.scheduler_override = parse_scheduler_override(&value)?
+            }
             "tick_profile" => options.tick_profile = TickProfile::parse(&value)?,
             "tick_cap" => options.tick_cap = parse_tick_cap(&value)?,
             "render_distance" => options.render_distance = parse_render_distance(&value)?,
@@ -708,6 +736,7 @@ fn print_usage() {
     println!(
         "  --pipeline <mode>         Runtime frame pipeline: parallel|legacy (default: parallel)"
     );
+    println!("  --scheduler <mode>        Graphics scheduler path: auto|gms|mgs (default: auto)");
     println!("  --tick-profile <mode>     Physics tick planner: balanced|max (default: max)");
     println!("  --tick-cap <Hz|off>       Maximum physics tick Hz (default: off = auto)");
     println!("  --render-distance <N|off> Distance cull radius for 3D balls (default: auto)");
@@ -763,8 +792,10 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
-    use super::{apply_ini_overrides, scan_ini_path_from_args, CliOptions};
-    use crate::{RuntimeAdapterInfo, RuntimeGpuBackend, RuntimeGpuDeviceType};
+    use super::{apply_ini_overrides, parse_cli_overrides, scan_ini_path_from_args, CliOptions};
+    use crate::{
+        GraphicsSchedulerPath, RuntimeAdapterInfo, RuntimeGpuBackend, RuntimeGpuDeviceType,
+    };
 
     fn make_adapter_info(
         name: &str,
@@ -898,6 +929,44 @@ mod tests {
             options.pak_path.as_deref(),
             Some(Path::new("assets/base.pak"))
         );
+
+        let _ = fs::remove_file(&ini_path);
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn cli_scheduler_override_accepts_mgs() {
+        let args = vec![
+            "--scheduler".to_string(),
+            "mgs".to_string(),
+            "--pipeline".to_string(),
+            "parallel".to_string(),
+        ];
+        let mut options = CliOptions::default();
+        let pipeline_explicit =
+            parse_cli_overrides(&args, &mut options).expect("cli overrides should parse");
+        assert!(pipeline_explicit);
+        assert_eq!(options.scheduler_override, Some(GraphicsSchedulerPath::Mgs));
+    }
+
+    #[test]
+    fn ini_scheduler_override_accepts_gms() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tileline-cli-scheduler-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_dir).expect("temp dir should be creatable");
+        let ini_path = temp_dir.join("tlapp.ini");
+        fs::write(&ini_path, "scheduler = gms\n").expect("ini should be writable");
+
+        let mut options = CliOptions::default();
+        let warnings = apply_ini_overrides(&mut options, &ini_path).expect("ini should parse");
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(options.scheduler_override, Some(GraphicsSchedulerPath::Gms));
 
         let _ = fs::remove_file(&ini_path);
         let _ = fs::remove_dir_all(&temp_dir);

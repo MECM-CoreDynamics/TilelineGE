@@ -17,13 +17,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use mps::MpsScheduler;
+use paradoxpe::PhysicsWorld;
 use tl_core::nps::{
     packet_semantics, select_mesh_snapshot_targets, BootstrapHello, BootstrapWelcome,
     DecodedPacketEvent, DecodedPayload, EncodedDatagram, MeshFanoutConfig, NetworkPacketConfig,
     NetworkPacketManager, NetworkPacketMetrics, NetworkTopology, PacketDecodeFailure,
     PacketEncodeFailure, PacketLane, PeerId, PeerLinkMetrics, NPS_HEADER_BYTES,
 };
-use paradoxpe::PhysicsWorld;
 use tokio::net::{ToSocketAddrs, UdpSocket};
 
 /// Snapshot emission cadence for authoritative physics state.
@@ -811,8 +811,8 @@ impl NetworkTransportRuntime {
 mod tests {
     use std::time::Duration;
 
-    use tl_core::nps::{BootstrapHello, BootstrapWelcome, DecodedPayload, InputFrame, PayloadKind};
     use paradoxpe::{BodyDesc, BodyKind, PhysicsWorldConfig};
+    use tl_core::nps::{BootstrapHello, BootstrapWelcome, DecodedPayload, InputFrame, PayloadKind};
     use tokio::task::yield_now;
     use tokio::time::timeout;
 

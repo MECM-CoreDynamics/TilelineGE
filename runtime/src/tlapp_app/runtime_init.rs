@@ -1,5 +1,6 @@
 use super::*;
 use crate::network_transport::NetworkTransportRuntime;
+use crate::scene::BUILTIN_GLASS_PANEL_MESH_SLOT;
 use crate::tlscript_parallel::TlscriptParallelRuntimeCoordinator;
 use tokio::net::UdpSocket;
 
@@ -306,7 +307,30 @@ impl TlAppRuntime {
             script_runtime = Some(ScriptRuntime::Single(script_program));
         }
 
-        let scheduler_resolution = if let Some(manifest_scheduler) = project_scheduler_manifest {
+        let scheduler_resolution = if let Some(override_path) = options.scheduler_override {
+            match override_path {
+                GraphicsSchedulerPath::Gms => {
+                    if gms_supported_on_platform(platform, &runtime_adapter_info) {
+                        SchedulerResolution {
+                            selected: GraphicsSchedulerPath::Gms,
+                            fallback_applied: false,
+                            reason: "CLI/env scheduler override forced gms".to_string(),
+                        }
+                    } else {
+                        return Err(format!(
+                            "scheduler override=gms is unsupported on {:?} (backend={:?}, type={:?})",
+                            platform, runtime_adapter_info.backend, runtime_adapter_info.device_type
+                        )
+                        .into());
+                    }
+                }
+                GraphicsSchedulerPath::Mgs => SchedulerResolution {
+                    selected: GraphicsSchedulerPath::Mgs,
+                    fallback_applied: false,
+                    reason: "CLI/env scheduler override forced mgs".to_string(),
+                },
+            }
+        } else if let Some(manifest_scheduler) = project_scheduler_manifest {
             resolve_project_scheduler(manifest_scheduler, platform, &runtime_adapter_info).map_err(
                 |reason| {
                     format!(
@@ -409,18 +433,15 @@ impl TlAppRuntime {
             .unwrap_or(1)
             .max(1);
         let physical_threads = num_cpus::get_physical().max(1);
-        let mgs_like_path = matches!(scheduler_resolution.selected, GraphicsSchedulerPath::Mgs);
-        // Treat MGS + ARM/Android as mobile-class scheduling: tighter tick ceilings and smaller
-        // chunks help avoid frame-time chopping on heterogeneous SoCs (e.g., RK3588S).
-        // Desktop-class adapters (Apple M-series, discrete GPUs) are excluded even when the MGS
-        // path is active via an env-var override, so their full throughput budget is preserved.
-        let mgs_is_mobile_hardware =
-            mgs_like_path && !MobileGpuProfile::detect(&adapter_info.name).is_desktop_class();
+        // Treat genuine mobile-class GPUs (Mali/Adreno/etc.) as mobile tuned hardware no matter
+        // which scheduler path is active. That keeps GMS-vs-MGS comparisons fair on the same
+        // device instead of silently switching between desktop and mobile tuning profiles.
+        let mobile_class_hardware = is_mobile_class_hardware(&runtime_adapter_info);
         // Mobile-class CPU tuning: Android, actual mobile MGS hardware, or ARM targets other
         // than macOS (e.g., Raspberry Pi, ARM Linux). macOS on aarch64 is Apple Silicon —
         // those machines are desktop-class and are handled by the Apple Silicon path below.
         let mobile_class_tuning = matches!(platform, RuntimePlatform::Android)
-            || mgs_is_mobile_hardware
+            || mobile_class_hardware
             || (cfg!(any(target_arch = "aarch64", target_arch = "arm"))
                 && cfg!(not(target_os = "macos")));
         let little_core_class = mobile_class_tuning && logical_threads <= 8;
@@ -612,7 +633,7 @@ impl TlAppRuntime {
                         max_instances: 65_536,
                         ..Default::default()
                     },
-                    prefer_secondary_gpu: true,
+                    prefer_secondary_gpu: false,
                 };
                 match VulkanSceneRenderer::new(window.clone(), vk_config) {
                     Ok(renderer) => {
@@ -647,9 +668,7 @@ impl TlAppRuntime {
                 };
                 match MetalSceneRenderer::new(window.clone(), metal_config) {
                     Ok(metal_renderer) => {
-                        eprintln!(
-                            "[renderer] using raw Metal runtime adapter"
-                        );
+                        eprintln!("[renderer] using raw Metal runtime adapter");
                         TlAppRenderer::Metal(metal_renderer)
                     }
                     Err(err) => {
@@ -700,7 +719,8 @@ impl TlAppRuntime {
         // Always keep a deterministic high-quality FBX-equivalent mesh in slot 2 so script
         // `set_ball_mesh_slot(2)` stays stable even when tlsprite binding fails.
         renderer.bind_builtin_sphere_mesh_slot(&device, DEFAULT_FBX_BALL_SLOT, true);
-        renderer.bind_builtin_sphere_mesh_slot(&device, AUTO_LOW_POLY_BALL_SLOT, false);
+        renderer.bind_builtin_sphere_mesh_slot(&device, AUTO_LOW_POLY_BALL_SLOT, true);
+        renderer.bind_builtin_panel_mesh_slot(&device, BUILTIN_GLASS_PANEL_MESH_SLOT);
         let camera = FreeCameraController::default();
         let gamepad = GamepadManager::new();
         let (eye, target) = camera.eye_target();
@@ -815,14 +835,23 @@ impl TlAppRuntime {
         let fps_report_interval = options.fps_report_interval;
 
         let (network_transport, network_socket) = if options.network_enabled {
-            let std_socket = std::net::UdpSocket::bind(&options.network_bind_addr)
-                .map_err(|e| format!("failed to bind UDP socket to {}: {e}", options.network_bind_addr))?;
-            std_socket.set_nonblocking(true)
+            let std_socket =
+                std::net::UdpSocket::bind(&options.network_bind_addr).map_err(|e| {
+                    format!(
+                        "failed to bind UDP socket to {}: {e}",
+                        options.network_bind_addr
+                    )
+                })?;
+            std_socket
+                .set_nonblocking(true)
                 .map_err(|e| format!("failed to set UDP socket nonblocking: {e}"))?;
             let tokio_socket = UdpSocket::from_std(std_socket)
                 .map_err(|e| format!("failed to wrap std UDP socket in tokio: {e}"))?;
             let transport = NetworkTransportRuntime::new(Default::default(), Default::default());
-            eprintln!("[network] transport enabled on {}", options.network_bind_addr);
+            eprintln!(
+                "[network] transport enabled on {}",
+                options.network_bind_addr
+            );
             (Some(transport), Some(tokio_socket))
         } else {
             (None, None)
@@ -881,6 +910,14 @@ impl TlAppRuntime {
             tick_hz: 1.0 / fixed_dt.max(1e-6),
             actual_tick_hz: 1.0 / fixed_dt.max(1e-6),
             actual_tick_ema_hz: 1.0 / fixed_dt.max(1e-6),
+            last_tick_debug_desired_hz: 0.0,
+            last_tick_debug_floor_hz: 0.0,
+            last_tick_debug_catch_up_hz: 0.0,
+            last_tick_debug_physics_ceiling_hz: 0.0,
+            last_tick_debug_load_scale: 1.0,
+            last_tick_debug_fps_hint_hz: fps_limit_hint,
+            last_tick_debug_pressure: 0.0,
+            last_tick_debug_render_bound: false,
             last_physics_queue_saturation_events: 0,
             physics_backlog_hold_timer: 0.0,
             fps_limit_hint,
@@ -898,7 +935,7 @@ impl TlAppRuntime {
             adaptive_ball_render_limit: None,
             adaptive_live_ball_budget: None,
             adaptive_low_poly_override: false,
-            mgs_is_mobile_hardware,
+            mobile_class_hardware,
             render_distance,
             render_distance_min,
             render_distance_max,

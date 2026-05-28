@@ -451,9 +451,9 @@ pub struct AdaptiveBurstController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mgs::MobileGpuProfile;
     use std::time::{Duration, Instant};
     use wgpu::{PresentMode, StoreOp};
-    use crate::mgs::MobileGpuProfile;
 
     fn make_adapter_info(
         name: &str,

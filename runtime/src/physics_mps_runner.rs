@@ -30,7 +30,7 @@ impl JobQueue for MpsJobQueue {
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tl_core::write_world_render_transforms_to_dispatcher_storage;
 
 /// Completion handle for an async physics step.
@@ -171,6 +171,7 @@ impl PhysicsMpsRunner {
         let fallback_tx = tx.clone();
         let world = Arc::clone(&self.world);
         let frame_id = self.next_frame_id.fetch_add(1, Ordering::Relaxed);
+        let wall_started = Instant::now();
         let planned_step = {
             let result = catch_unwind(AssertUnwindSafe(|| {
                 let mut world = world.lock().unwrap();
@@ -267,6 +268,8 @@ impl PhysicsMpsRunner {
                 }
                 world.last_step_timings.sleep_us = timings.sleep_us;
                 world.last_step_timings.substeps = sleep_plan.substeps as u32;
+                world.last_step_timings.wall_us =
+                    wall_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
                 write_world_render_transforms_to_dispatcher_storage(
                     &world,
                     ctx.transforms.as_ref(),

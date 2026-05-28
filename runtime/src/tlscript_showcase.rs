@@ -16,8 +16,8 @@ use tl_core::{
     LoweringExternalSignature, MlsBackendKind, MlsExecutionMode, MlsPrecisionMode, Module,
     ParallelDispatchDecision, ParallelDispatchPlanner, ParallelDispatchPlannerConfig,
     ParallelExecutionPolicy, ParallelHookAnalyzer, ParallelHookOutcome, ParallelScheduleHint,
-    Parser, SemanticAnalyzer, SemanticOutcome, SemanticReport, SemanticType, Stmt, TypedIrLoweringConfig,
-    TypedIrFunction, TypedIrModule, UnaryOp,
+    Parser, SemanticAnalyzer, SemanticOutcome, SemanticReport, SemanticType, Stmt, TypedIrFunction,
+    TypedIrLoweringConfig, TypedIrModule, UnaryOp,
 };
 
 use crate::runtime_bridge::{
@@ -82,6 +82,8 @@ const SHOWCASE_BUILTIN_CALLS: &[&str] = &[
     "set_initial_speed_max",
     "set_spawn_profile_2d",
     "set_ball_mesh_slot",
+    "set_container_wall_mesh_slot",
+    "set_container_edge_mesh_slot",
     "set_container_mesh_slot",
     "set_fbx_full_render",
     "set_light_enabled",
@@ -2323,6 +2325,14 @@ fn apply_builtin_patch_call(
             [v] => state.patch.ball_mesh_slot = Some(v.to_i64().clamp(0, 255) as u8),
             _ => state.warn("set_ball_mesh_slot expects 1 arg"),
         },
+        "set_container_wall_mesh_slot" => match args {
+            [v] => state.patch.container_wall_mesh_slot = Some(v.to_i64().clamp(0, 255) as u8),
+            _ => state.warn("set_container_wall_mesh_slot expects 1 arg"),
+        },
+        "set_container_edge_mesh_slot" => match args {
+            [v] => state.patch.container_edge_mesh_slot = Some(v.to_i64().clamp(0, 255) as u8),
+            _ => state.warn("set_container_edge_mesh_slot expects 1 arg"),
+        },
         "set_container_mesh_slot" => match args {
             [v] => state.patch.container_mesh_slot = Some(v.to_i64().clamp(0, 255) as u8),
             _ => state.warn("set_container_mesh_slot expects 1 arg"),
@@ -3020,7 +3030,9 @@ mod tests {
             "@export\n",
             "def showcase_tick(frame: int, live_balls: int, spawned_this_tick: int):\n",
             "    set_ball_mesh_slot(3)\n",
-            "    set_container_mesh_slot(1)\n",
+            "    set_container_wall_mesh_slot(1)\n",
+            "    set_container_edge_mesh_slot(4)\n",
+            "    set_container_mesh_slot(2)\n",
             "    set_camera_move_speed(22.0)\n",
             "    set_camera_look_sensitivity(0.002)\n",
             "    set_camera_pose(0.0, 10.0, 30.0, 0.0, 0.0, 0.0)\n",
@@ -3035,7 +3047,9 @@ mod tests {
             key_f_down: false,
         });
         assert_eq!(out.patch.ball_mesh_slot, Some(3));
-        assert_eq!(out.patch.container_mesh_slot, Some(1));
+        assert_eq!(out.patch.container_wall_mesh_slot, Some(1));
+        assert_eq!(out.patch.container_edge_mesh_slot, Some(4));
+        assert_eq!(out.patch.container_mesh_slot, Some(2));
         assert!(out.camera_move_speed.unwrap_or(0.0) > 0.0);
         assert!(out.camera_look_sensitivity.unwrap_or(0.0) > 0.0);
         assert!(out.camera_pose.is_some());

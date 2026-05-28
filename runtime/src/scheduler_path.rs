@@ -279,6 +279,14 @@ mod tests {
     }
 
     #[test]
+    fn chooses_gms_for_discrete_radeon_desktop_profile() {
+        let info = make_adapter_info("AMD Radeon RX 7900 XTX", RuntimeGpuDeviceType::DiscreteGpu);
+        let decision =
+            choose_scheduler_path_for_platform_from_adapter(&info, RuntimePlatform::Desktop);
+        assert_eq!(decision.path, GraphicsSchedulerPath::Gms);
+    }
+
+    #[test]
     fn chooses_mgs_for_android_even_on_discrete_label() {
         let info = make_adapter_info(
             "NVIDIA GeForce RTX 5060 Ti",

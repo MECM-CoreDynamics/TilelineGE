@@ -12,7 +12,7 @@ impl TlAppRuntime {
             self.next_redraw_at = now + interval;
         } else {
             let mobile_path =
-                matches!(self.platform, RuntimePlatform::Android) || self.mgs_is_mobile_hardware;
+                matches!(self.platform, RuntimePlatform::Android) || self.mobile_class_hardware;
             if mobile_path {
                 // Avoid uncapped busy-spin on mobile/TBDR paths; it can cause whole-system
                 // chopping even when the app's own FPS appears acceptable.
@@ -171,7 +171,7 @@ impl TlAppRuntime {
     pub(super) fn render_frame(&mut self) -> Result<(), Box<dyn Error>> {
         let frame_begin = Instant::now();
         let mobile_path =
-            matches!(self.platform, RuntimePlatform::Android) || self.mgs_is_mobile_hardware;
+            matches!(self.platform, RuntimePlatform::Android) || self.mobile_class_hardware;
         let tick_tuning_metrics = self.world.thread_pool_metrics();
         let raw_dt = (frame_begin - self.frame_started_at).as_secs_f32();
         // Keep simulation time real-time (decoupled from render FPS) and only guard against large
@@ -210,9 +210,14 @@ impl TlAppRuntime {
                 self.physics_backlog_hold_timer
                     .max(if mobile_path { 0.78 } else { 0.62 });
         } else if physics_backlog.moderate {
-            self.physics_backlog_hold_timer =
-                self.physics_backlog_hold_timer
-                    .max(if mobile_path { 0.44 } else { 0.34 });
+            let desktop_max_profile = matches!(self.tick_profile, TickProfile::Max) && !mobile_path;
+            self.physics_backlog_hold_timer = self.physics_backlog_hold_timer.max(if mobile_path {
+                0.44
+            } else if desktop_max_profile {
+                0.12
+            } else {
+                0.34
+            });
         }
         physics_backlog = evaluate_physics_backlog(
             &tick_tuning_metrics,
@@ -280,26 +285,37 @@ impl TlAppRuntime {
             .is_ok();
 
         // Script parallel planning + MPS dispatch routing (pre-WASM host: dummy tasks)
-        let mut script_parallel_submissions: Vec<crate::tlscript_parallel::TlscriptDispatchSubmission> = Vec::new();
+        let mut script_parallel_submissions: Vec<
+            crate::tlscript_parallel::TlscriptDispatchSubmission,
+        > = Vec::new();
         if let Some(mps) = self.mps_scheduler.as_ref() {
             let world = self.world.borrow();
             match &self.script_runtime {
                 ScriptRuntime::Single(program) => {
                     if let Some(func) = program.entry_ir_function() {
-                        let decision = self.script_parallel.plan_paradox_body_dispatch(func, &world);
-                        if matches!(decision.mode, tl_core::ParallelDispatchMode::ParallelChunked) {
+                        let decision = self
+                            .script_parallel
+                            .plan_paradox_body_dispatch(func, &world);
+                        if matches!(
+                            decision.mode,
+                            tl_core::ParallelDispatchMode::ParallelChunked
+                        ) {
                             let chunk_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                            let submission = self.script_parallel.dispatch_native_paradox_body_chunks_for_function(
-                                mps,
-                                func,
-                                &world,
-                                |_chunk: crate::tlscript_parallel::TlscriptWorkChunk| {
-                                    let chunk_counter = Arc::clone(&chunk_counter);
-                                    Box::new(move || {
-                                        chunk_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    }) as mps::NativeTask
-                                },
-                            );
+                            let submission = self
+                                .script_parallel
+                                .dispatch_native_paradox_body_chunks_for_function(
+                                    mps,
+                                    func,
+                                    &world,
+                                    |_chunk: crate::tlscript_parallel::TlscriptWorkChunk| {
+                                        let chunk_counter = Arc::clone(&chunk_counter);
+                                        Box::new(move || {
+                                            chunk_counter
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        })
+                                            as mps::NativeTask
+                                    },
+                                );
                             script_parallel_submissions.push(submission);
                         }
                     }
@@ -307,20 +323,32 @@ impl TlAppRuntime {
                 ScriptRuntime::Joint(bundle) => {
                     for program in &bundle.scripts {
                         if let Some(func) = program.entry_ir_function() {
-                            let decision = self.script_parallel.plan_paradox_body_dispatch(func, &world);
-                            if matches!(decision.mode, tl_core::ParallelDispatchMode::ParallelChunked) {
-                                let chunk_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                                let submission = self.script_parallel.dispatch_native_paradox_body_chunks_for_function(
-                                    mps,
-                                    func,
-                                    &world,
-                                    |_chunk: crate::tlscript_parallel::TlscriptWorkChunk| {
-                                        let chunk_counter = Arc::clone(&chunk_counter);
-                                        Box::new(move || {
-                                            chunk_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        }) as mps::NativeTask
-                                    },
-                                );
+                            let decision = self
+                                .script_parallel
+                                .plan_paradox_body_dispatch(func, &world);
+                            if matches!(
+                                decision.mode,
+                                tl_core::ParallelDispatchMode::ParallelChunked
+                            ) {
+                                let chunk_counter =
+                                    Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                                let submission = self
+                                    .script_parallel
+                                    .dispatch_native_paradox_body_chunks_for_function(
+                                        mps,
+                                        func,
+                                        &world,
+                                        |_chunk: crate::tlscript_parallel::TlscriptWorkChunk| {
+                                            let chunk_counter = Arc::clone(&chunk_counter);
+                                            Box::new(move || {
+                                                chunk_counter.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            })
+                                                as mps::NativeTask
+                                        },
+                                    );
                                 script_parallel_submissions.push(submission);
                             }
                         }
@@ -329,20 +357,32 @@ impl TlAppRuntime {
                 ScriptRuntime::MultiScripts(programs) => {
                     for program in programs {
                         if let Some(func) = program.entry_ir_function() {
-                            let decision = self.script_parallel.plan_paradox_body_dispatch(func, &world);
-                            if matches!(decision.mode, tl_core::ParallelDispatchMode::ParallelChunked) {
-                                let chunk_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-                                let submission = self.script_parallel.dispatch_native_paradox_body_chunks_for_function(
-                                    mps,
-                                    func,
-                                    &world,
-                                    |_chunk: crate::tlscript_parallel::TlscriptWorkChunk| {
-                                        let chunk_counter = Arc::clone(&chunk_counter);
-                                        Box::new(move || {
-                                            chunk_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        }) as mps::NativeTask
-                                    },
-                                );
+                            let decision = self
+                                .script_parallel
+                                .plan_paradox_body_dispatch(func, &world);
+                            if matches!(
+                                decision.mode,
+                                tl_core::ParallelDispatchMode::ParallelChunked
+                            ) {
+                                let chunk_counter =
+                                    Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                                let submission = self
+                                    .script_parallel
+                                    .dispatch_native_paradox_body_chunks_for_function(
+                                        mps,
+                                        func,
+                                        &world,
+                                        |_chunk: crate::tlscript_parallel::TlscriptWorkChunk| {
+                                            let chunk_counter = Arc::clone(&chunk_counter);
+                                            Box::new(move || {
+                                                chunk_counter.fetch_add(
+                                                    1,
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                            })
+                                                as mps::NativeTask
+                                        },
+                                    );
                                 script_parallel_submissions.push(submission);
                             }
                         }
@@ -548,11 +588,13 @@ impl TlAppRuntime {
         }
 
         let live_balls = self.scene.live_ball_count();
-        let parallel_ready = frame_eval
-            .dispatch_decision
-            .as_ref()
-            .map(|d| d.is_parallel())
-            .unwrap_or(false);
+        let last_step_timings = self.world.borrow().last_step_timings;
+        let parallel_ready = physics_parallel_ready(&tick_tuning_metrics, &last_step_timings);
+        let active_tick_profile = effective_tick_profile(
+            self.tick_profile,
+            self.runtime_bridge_metrics.performance_profile,
+        );
+        let desktop_max_profile = matches!(active_tick_profile, TickProfile::Max) && !mobile_path;
         let force_full_fbx = frame_eval
             .force_full_fbx_sphere
             .unwrap_or(self.force_full_fbx_from_sprite);
@@ -581,34 +623,66 @@ impl TlAppRuntime {
             self.adaptive_load_pressure_ema,
             self.frame_time_jitter_ema_ms,
         );
+        let render_bound_headroom = physics_has_render_bound_headroom(
+            active_tick_profile,
+            mobile_path,
+            parallel_ready,
+            physics_backlog,
+            last_step_timings.ceiling_basis_us(),
+            effective_load_frame_time_ms,
+            self.framebuffer_fill_ema,
+        );
+        let render_tick_decoupled = physics_can_hold_tick_under_render_load(
+            active_tick_profile,
+            mobile_path,
+            parallel_ready,
+            physics_backlog,
+            last_step_timings.ceiling_basis_us(),
+        );
         self.adaptive_load_pressure_ema = smoothed_pressure;
+        self.last_tick_debug_pressure = smoothed_pressure;
+        self.last_tick_debug_render_bound = render_bound_headroom;
         let moderate_jitter = self.frame_time_ema_ms > self.frame_time_budget_ms * 1.10
             || self.frame_time_jitter_ema_ms > 1.8;
         let severe_jitter = self.frame_time_ema_ms > self.frame_time_budget_ms * 1.25
             || self.frame_time_jitter_ema_ms > 3.2;
         if raw_pressure >= 7 && smoothed_pressure >= 5.0 {
-            load_plan.tick_scale *= if mobile_path { 0.78 } else { 0.84 };
+            load_plan.tick_scale *= if render_bound_headroom {
+                0.97
+            } else if mobile_path {
+                0.78
+            } else {
+                0.84
+            };
         }
         if physics_backlog.moderate {
             load_plan.tick_scale *= if physics_backlog.severe {
                 if mobile_path {
                     0.56
+                } else if desktop_max_profile {
+                    0.78
                 } else {
                     0.64
                 }
             } else if mobile_path {
                 0.72
+            } else if desktop_max_profile {
+                0.92
             } else {
                 0.80
             };
             load_plan.max_substeps = load_plan.max_substeps.min(if physics_backlog.severe {
                 if mobile_path {
                     4
+                } else if desktop_max_profile {
+                    10
                 } else {
                     6
                 }
             } else if mobile_path {
                 5
+            } else if desktop_max_profile {
+                12
             } else {
                 8
             });
@@ -617,13 +691,37 @@ impl TlAppRuntime {
                 .min(if physics_backlog.severe { 96 } else { 144 });
         }
         if moderate_jitter {
-            load_plan.tick_scale *= 0.82;
-            load_plan.max_substeps = load_plan.max_substeps.min(8);
+            load_plan.tick_scale *= if render_bound_headroom {
+                0.98
+            } else if desktop_max_profile {
+                0.90
+            } else {
+                0.82
+            };
+            load_plan.max_substeps = load_plan.max_substeps.min(if render_bound_headroom {
+                16
+            } else if desktop_max_profile {
+                12
+            } else {
+                8
+            });
             load_plan.spawn_per_tick_cap = load_plan.spawn_per_tick_cap.min(180);
         }
         if severe_jitter {
-            load_plan.tick_scale *= 0.68;
-            load_plan.max_substeps = load_plan.max_substeps.min(6);
+            load_plan.tick_scale *= if render_bound_headroom {
+                0.94
+            } else if desktop_max_profile {
+                0.80
+            } else {
+                0.68
+            };
+            load_plan.max_substeps = load_plan.max_substeps.min(if render_bound_headroom {
+                14
+            } else if desktop_max_profile {
+                10
+            } else {
+                6
+            });
             load_plan.spawn_per_tick_cap = load_plan.spawn_per_tick_cap.min(120);
         }
         if mobile_path {
@@ -636,27 +734,54 @@ impl TlAppRuntime {
                     .spawn_per_tick_cap
                     .min(if severe_jitter { 96 } else { 112 });
         }
-        if matches!(self.tick_profile, TickProfile::Max) {
+        if matches!(active_tick_profile, TickProfile::Max) {
             let min_tick_scale = if severe_jitter {
-                0.62
+                if mobile_path {
+                    0.62
+                } else if render_bound_headroom {
+                    1.02
+                } else {
+                    0.86
+                }
             } else if moderate_jitter {
-                0.74
+                if mobile_path {
+                    0.74
+                } else if render_bound_headroom {
+                    1.06
+                } else {
+                    0.96
+                }
             } else if mobile_path {
                 0.68
+            } else if render_bound_headroom {
+                1.10
             } else {
-                0.90
+                1.00
             };
             load_plan.tick_scale = load_plan.tick_scale.max(min_tick_scale);
             let profile_cap = if mobile_path {
                 (5_u32 + (self.mps_logical_threads as u32 / 10)).clamp(5, 8)
+            } else if render_bound_headroom {
+                (16_u32 + (self.mps_logical_threads as u32 / 4)).clamp(16, 32)
             } else {
-                (10_u32 + (self.mps_logical_threads as u32 / 6)).clamp(10, 20)
+                (12_u32 + (self.mps_logical_threads as u32 / 5)).clamp(12, 24)
             };
-            let min_substeps = if mobile_path { 3 } else { 10 };
+            let min_substeps = if mobile_path {
+                3
+            } else if render_bound_headroom {
+                16
+            } else {
+                12
+            };
             load_plan.max_substeps = load_plan
                 .max_substeps
                 .clamp(min_substeps, profile_cap.max(min_substeps));
         }
+        if render_tick_decoupled {
+            load_plan.tick_scale = load_plan.tick_scale.max(1.0);
+            load_plan.max_substeps = load_plan.max_substeps.max(12);
+        }
+        self.last_tick_debug_load_scale = load_plan.tick_scale;
         self.adaptive_ball_render_limit = load_plan.visible_ball_limit;
         self.adaptive_live_ball_budget = load_plan.live_ball_budget;
         self.adaptive_low_poly_override = load_plan.force_low_poly_ball_mesh;
@@ -702,7 +827,6 @@ impl TlAppRuntime {
                 .enforce_live_ball_budget(&mut *self.world.borrow_mut(), cap);
         }
 
-        let last_step_timings = self.world.borrow().last_step_timings;
         self.tick_retune_timer -= sim_dt;
         if self.tick_retune_timer <= 0.0 {
             self.max_substeps = self
@@ -710,7 +834,7 @@ impl TlAppRuntime {
                 .unwrap_or_else(|| load_plan.max_substeps.max(2));
             let mut desired_hz = choose_aggressive_tick_hz(
                 self.tick_policy,
-                self.tick_profile,
+                active_tick_profile,
                 self.fps_tracker.ema_fps().max(1.0),
                 parallel_ready,
                 self.last_substeps,
@@ -738,7 +862,7 @@ impl TlAppRuntime {
                 desired_hz *= backlog_scale;
             }
             if mobile_path {
-                let mobile_ceiling = match self.tick_profile {
+                let mobile_ceiling = match active_tick_profile {
                     TickProfile::Balanced => 120.0,
                     TickProfile::Max => 160.0,
                 };
@@ -746,39 +870,67 @@ impl TlAppRuntime {
             }
             // Avoid fixed-step overload: if tick is too high for current FPS and max_substeps,
             // simulation falls behind (slow-motion). Clamp to catch-up-safe frequency.
-            let catch_up_factor = if mobile_path { 0.78 } else { 0.88 };
+            let catch_up_factor = if mobile_path { 0.88 } else { 0.96 };
             let catch_up_hz =
                 (self.fps_tracker.ema_fps().max(1.0) * self.max_substeps as f32 * catch_up_factor)
                     .clamp(24.0, 900.0);
             desired_hz = desired_hz.min(catch_up_hz);
-            if let Some(physics_ceiling_hz) = physics_safe_tick_ceiling_hz(
-                last_step_timings.total_us(),
+            let physics_ceiling_hz = physics_safe_tick_ceiling_hz(
+                last_step_timings.ceiling_basis_us(),
                 last_step_timings.substeps.max(self.last_substeps),
-                self.tick_profile,
+                active_tick_profile,
                 self.mps_logical_threads,
                 mobile_path,
-            ) {
+            );
+            if let Some(physics_ceiling_hz) = physics_ceiling_hz {
                 desired_hz = desired_hz.min(physics_ceiling_hz);
             }
             if let Some(cap) = self.tick_cap {
                 desired_hz = desired_hz.min(cap);
             }
+            let scheduler_backlogged = physics_backlog.queue_pressure > 0.25
+                || physics_backlog.inflight_pressure > 0.25
+                || physics_backlog.phase_skew > 1.20
+                || physics_backlog.hot_worker_ratio > 1.70;
+            let allow_desktop_max_backlog_ramp = matches!(active_tick_profile, TickProfile::Max)
+                && !mobile_path
+                && !physics_backlog.severe
+                && !scheduler_backlogged;
             if physics_backlog.severe && self.actual_tick_ema_hz > 1.0 {
                 desired_hz = desired_hz.min((self.actual_tick_ema_hz * 0.96).max(24.0));
-            } else if physics_backlog.block_ramp_up && self.actual_tick_ema_hz > 1.0 {
-                desired_hz = desired_hz.min((self.actual_tick_ema_hz * 1.04).max(24.0));
+            } else if physics_backlog.block_ramp_up
+                && scheduler_backlogged
+                && self.actual_tick_ema_hz > 1.0
+            {
+                let backlog_cap = if allow_desktop_max_backlog_ramp {
+                    1.18
+                } else if mobile_path {
+                    1.04
+                } else {
+                    1.08
+                };
+                desired_hz = desired_hz.min((self.actual_tick_ema_hz * backlog_cap).max(24.0));
             }
-            let ramp_up = desired_hz > self.tick_hz && !physics_backlog.block_ramp_up;
+            let ramp_blocked = physics_backlog.block_ramp_up
+                && scheduler_backlogged
+                && !allow_desktop_max_backlog_ramp;
+            let ramp_up = desired_hz > self.tick_hz && !ramp_blocked;
             let base_smoothing = if mobile_path {
-                match (self.tick_profile, ramp_up) {
-                    (TickProfile::Max, true) => 0.16,
+                match (active_tick_profile, ramp_up) {
+                    (TickProfile::Max, true) => 0.20,
                     (TickProfile::Max, false) => 0.52,
                     (_, true) => 0.14,
                     (_, false) => 0.44,
                 }
+            } else if render_bound_headroom {
+                if ramp_up {
+                    0.28
+                } else {
+                    0.40
+                }
             } else {
-                match (self.tick_profile, ramp_up) {
-                    (TickProfile::Max, true) => 0.12,
+                match (active_tick_profile, ramp_up) {
+                    (TickProfile::Max, true) => 0.18,
                     (TickProfile::Max, false) => 0.46,
                     (_, true) => 0.10,
                     (_, false) => 0.38,
@@ -799,15 +951,23 @@ impl TlAppRuntime {
                 base_smoothing
             };
             let max_rise_ratio = if physics_backlog.block_ramp_up {
-                1.0
+                if allow_desktop_max_backlog_ramp {
+                    1.08
+                } else {
+                    1.0
+                }
+            } else if render_bound_headroom {
+                1.45
             } else if severe_jitter {
                 1.01
             } else if moderate_jitter {
                 1.03
             } else if mobile_path {
-                1.05
-            } else {
                 1.08
+            } else if matches!(active_tick_profile, TickProfile::Max) {
+                1.18
+            } else {
+                1.14
             };
             let max_drop_ratio = if physics_backlog.severe {
                 0.56
@@ -825,7 +985,7 @@ impl TlAppRuntime {
             let clamped_target_hz =
                 clamp_tick_target_delta(self.tick_hz, desired_hz, max_rise_ratio, max_drop_ratio);
             self.tick_hz = smooth_tick_hz(self.tick_hz, clamped_target_hz, smoothing);
-            let hard_floor = match self.tick_profile {
+            let hard_floor = match active_tick_profile {
                 TickProfile::Balanced => 35.0,
                 TickProfile::Max => {
                     let ema_floor = if mobile_path {
@@ -853,6 +1013,11 @@ impl TlAppRuntime {
             } else if physics_backlog.moderate && self.actual_tick_ema_hz > 1.0 {
                 floor_hz = floor_hz.min((self.actual_tick_ema_hz * 0.98).max(24.0));
             }
+            self.last_tick_debug_desired_hz = desired_hz;
+            self.last_tick_debug_floor_hz = floor_hz;
+            self.last_tick_debug_catch_up_hz = catch_up_hz;
+            self.last_tick_debug_physics_ceiling_hz = physics_ceiling_hz.unwrap_or(0.0);
+            self.last_tick_debug_fps_hint_hz = self.fps_limit_hint;
             self.tick_hz = self.tick_hz.max(floor_hz).min(catch_up_hz);
             // Apply user-specified tick cap. This limits how fast the physics
             // ticks, keeping the main thread from over-spinning on timestep
@@ -870,6 +1035,10 @@ impl TlAppRuntime {
             } else if physics_backlog.moderate {
                 if mobile_path {
                     0.05
+                } else if render_bound_headroom {
+                    0.015
+                } else if matches!(active_tick_profile, TickProfile::Max) {
+                    0.035
                 } else {
                     0.045
                 }
@@ -879,6 +1048,10 @@ impl TlAppRuntime {
                 } else {
                     0.08
                 }
+            } else if ramp_up && render_bound_headroom {
+                0.015
+            } else if ramp_up && matches!(active_tick_profile, TickProfile::Max) {
+                0.10
             } else if ramp_up {
                 0.18
             } else {
@@ -1001,6 +1174,7 @@ impl TlAppRuntime {
                 }
             }
         }
+        retune_container_edge_overlay_instances(&mut frame, self.scene.config(), eye);
         // Follow-camera lights: move to camera eye and look along camera forward vector.
         // Offset the light slightly below the eye (like a flashlight held at chest level)
         // so that shadow-casting objects create visible shadows on surfaces behind them.
@@ -1308,7 +1482,8 @@ impl TlAppRuntime {
             #[cfg(target_os = "macos")]
             TlAppRenderer::Metal(renderer) => {
                 if !self.console_overlay_sprites.is_empty() {
-                    draw.sprites.extend(self.console_overlay_sprites.iter().cloned());
+                    draw.sprites
+                        .extend(self.console_overlay_sprites.iter().cloned());
                     draw.stats.sprite_instances = draw.sprites.len();
                     draw.stats.total_draw_calls = draw.stats.opaque_batches
                         + draw.stats.transparent_batches
@@ -1319,9 +1494,7 @@ impl TlAppRuntime {
                 let rt_status = renderer.ray_tracing_status();
                 let fsr_status = renderer.fsr_status();
                 if !self.logged_metal_first_frame {
-                    eprintln!(
-                        "[renderer] presenting via raw Metal path"
-                    );
+                    eprintln!("[renderer] presenting via raw Metal path");
                     self.logged_metal_first_frame = true;
                 }
                 let upload_us = (Instant::now() - t_upload_begin).as_micros() as u64;
@@ -1496,7 +1669,10 @@ impl TlAppRuntime {
                 .runtime_bridge_metrics
                 .domain_budgets
                 .map(|budgets| {
-                    let gpu = |g: Option<u8>| g.map(|v| format!("@{v}")).unwrap_or_else(|| "@a".to_string());
+                    let gpu = |g: Option<u8>| {
+                        g.map(|v| format!("@{v}"))
+                            .unwrap_or_else(|| "@a".to_string())
+                    };
                     format!(
                         "r{}{}-p{}{}-a{}{}-x{}{}-u{}{}-l{}{}",
                         budgets.render_budget_pct,
@@ -1520,7 +1696,7 @@ impl TlAppRuntime {
                 .as_deref()
                 .unwrap_or("none");
             println!(
-                "tlapp fps | inst: {:>6.1} | ema: {:>6.1} | avg: {:>6.1} | stddev: {:>5.2} ms | scene_mode: {} | balls: {:>5} | draw: {:>5} | tiles_draw: {:>5} | tiles_vis: {:>5} | tiles_culled: {:>5} | tile_chunks: {:>4} | tile_dirty: {:>4} | lights: {:>2} | tick_actual: {:>6.1} | tick_target: {:>6.1} | substeps: {} | phys_us: {:>6} | int_us: {:>5} | bp_us: {:>5} | np_us: {:>5} | sv_us: {:>5} | sl_us: {:>5} | snap_us: {:>5} | pre_phys_us: {:>5} | scene_us: {:>5} | compile_us: {:>5} | upload_us: {:>5} | present_us: {:>6} | scattered: {:>4} | rd_culled: {:>4} | rd_blur: {:>4} | fill: {:>4.2} | fill_ema: {:>4.2} | phys_q: {:>4.2} | phys_i: {:>4.2} | phys_hot: {:>4.2} | phys_skew: {:>4.2} | phys_score: {:>4.2} | phys_sat: {:>3} | contract: {}:{} stable={} | rt_mode: {:?} | rt_active: {} | rt_dynamic: {:>4} | rt_reason: {} | fsr_mode: {:?} | fsr_active: {} | fsr_scale: {:>4.2} | fsr_sharpness: {:>4.2} | fsr_reason: {} | mps_threads: {} | phys_workers: {} | phys_queue: {} | phys_inflight: {} | phys_frame: {} | shards: {} | pairs: {} | manifolds: {} | platform: {:?} | backend: {:?} | render_backend: {} | scheduler: {} | present: {:?} | fallback: {} | adapter: {} | reason: {} | pipeline: {} | bridge_path: {} | queued_plan_depth: {} | bridge_pump_published: {} | bridge_pump_drained: {} | physics_lag_frames: {} | bridge_fallback: {} | gms_mode: {} | gms_budget: {} | gms_util: {:>4.2} | gms_q: {} | gms_ai_ml_drop: {:>4.3} | gms_reason: {} | c0_mode: i={} b={} n={} s={} | c0_reason: i={} b={} n={} s={} | c0_serial_us: i={} b={} n={} s={}",
+                "tlapp fps | inst: {:>6.1} | ema: {:>6.1} | avg: {:>6.1} | stddev: {:>5.2} ms | scene_mode: {} | balls: {:>5} | draw: {:>5} | tiles_draw: {:>5} | tiles_vis: {:>5} | tiles_culled: {:>5} | tile_chunks: {:>4} | tile_dirty: {:>4} | lights: {:>2} | tick_actual: {:>6.1} | tick_target: {:>6.1} | tick_dbg: hint={:>6.1}/desired={:>6.1}/floor={:>6.1}/catch={:>6.1}/phys={:>6.1}/scale={:>4.2}/load={:>4.2}/rb={} | substeps: {} | phys_us: {:>6} | int_us: {:>5} | bp_us: {:>5} | np_us: {:>5} | sv_us: {:>5} | sl_us: {:>5} | snap_us: {:>5} | pre_phys_us: {:>5} | scene_us: {:>5} | compile_us: {:>5} | upload_us: {:>5} | present_us: {:>6} | scattered: {:>4} | rd_culled: {:>4} | rd_blur: {:>4} | fill: {:>4.2} | fill_ema: {:>4.2} | phys_q: {:>4.2} | phys_i: {:>4.2} | phys_hot: {:>4.2} | phys_skew: {:>4.2} | phys_score: {:>4.2} | phys_sat: {:>3} | contract: {}:{} stable={} | rt_mode: {:?} | rt_active: {} | rt_dynamic: {:>4} | rt_reason: {} | fsr_mode: {:?} | fsr_active: {} | fsr_scale: {:>4.2} | fsr_sharpness: {:>4.2} | fsr_reason: {} | mps_threads: {} | phys_workers: {} | phys_queue: {} | phys_inflight: {} | phys_frame: {} | shards: {} | pairs: {} | manifolds: {} | platform: {:?} | backend: {:?} | render_backend: {} | scheduler: {} | present: {:?} | fallback: {} | adapter: {} | reason: {} | pipeline: {} | bridge_path: {} | queued_plan_depth: {} | bridge_pump_published: {} | bridge_pump_drained: {} | physics_lag_frames: {} | bridge_fallback: {} | gms_mode: {} | gms_budget: {} | gms_util: {:>4.2} | gms_q: {} | gms_ai_ml_drop: {:>4.3} | gms_reason: {} | c0_mode: i={} b={} n={} s={} | c0_reason: i={} b={} n={} s={} | c0_serial_us: i={} b={} n={} s={}",
                 report.instant_fps,
                 report.ema_fps,
                 report.avg_fps,
@@ -1536,6 +1712,14 @@ impl TlAppRuntime {
                 upload.light_count,
                 self.actual_tick_ema_hz,
                 self.tick_hz,
+                self.last_tick_debug_fps_hint_hz,
+                self.last_tick_debug_desired_hz,
+                self.last_tick_debug_floor_hz,
+                self.last_tick_debug_catch_up_hz,
+                self.last_tick_debug_physics_ceiling_hz,
+                self.last_tick_debug_load_scale,
+                self.last_tick_debug_pressure,
+                if self.last_tick_debug_render_bound { "on" } else { "off" },
                 substeps,
                 step_timings.total_us(),
                 step_timings.integrate_us,

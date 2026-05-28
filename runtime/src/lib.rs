@@ -101,7 +101,6 @@ pub use network_transport::{
     NetworkTransportConfig, NetworkTransportMetrics, NetworkTransportRuntime,
     SnapshotCadenceConfig,
 };
-pub use tl_core::nps::{MeshFanoutConfig, NetworkTopology};
 pub use pak::{
     create_pak_from_dir, list_pak, read_file_from_pak, unpack_pak, PakBuildReport, PakEntry,
     PakIndex, PakUnpackReport,
@@ -145,6 +144,7 @@ pub use tile_world_2d::{
     TileVisibleInstance2d, TileVisibleSet2d, TileWorld2dConfig, TileWorldFrameTelemetry,
     TILE_ID_EMPTY,
 };
+pub use tl_core::nps::{MeshFanoutConfig, NetworkTopology};
 pub use tl_core::{
     MlsBackendAdapter, MlsBackendKind, MlsCapabilityMatrix, MlsDeviceProfile, MlsExecutionMode,
     MlsFallbackReason, MlsInferenceRequest, MlsModelArtifact, MlsPrecisionMode, MlsRuntime,

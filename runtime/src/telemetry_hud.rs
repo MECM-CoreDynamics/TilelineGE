@@ -175,7 +175,11 @@ impl TelemetryHudComposer {
         // Network transport health bar.
         let net_fill = if let Some(pump) = sample.network_pump {
             let total = pump.recv_datagrams + pump.sent_datagrams;
-            if total > 0 { 0.75 } else { 0.15 }
+            if total > 0 {
+                0.75
+            } else {
+                0.15
+            }
         } else {
             0.05
         };

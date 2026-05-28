@@ -68,6 +68,8 @@ pub struct FrameSpriteRecord {
 
 /// Transparent flag for one primitive draw range inside a frame snapshot.
 pub const FRAME_PRIMITIVE_RANGE_TRANSPARENT: u32 = 1 << 0;
+/// Overlay flag for one primitive draw range that should render after regular scene geometry.
+pub const FRAME_PRIMITIVE_RANGE_OVERLAY: u32 = 1 << 1;
 
 /// CPU-side primitive run metadata for raw backends that issue multiple mesh draws per snapshot.
 #[repr(C)]

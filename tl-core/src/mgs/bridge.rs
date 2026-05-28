@@ -156,8 +156,8 @@ fn hint_to_request(hint: &MpsWorkloadHint) -> TileWorkloadRequest {
 
 #[cfg(test)]
 mod tests {
-    use crate::mgs::*;
     use crate::mgs::hardware::MobileGpuProfile;
+    use crate::mgs::*;
 
     #[test]
     fn translate_returns_valid_plan_for_adreno() {

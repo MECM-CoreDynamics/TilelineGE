@@ -1,6 +1,8 @@
 //! Runtime bridge between scene payloads and MGS workload hints.
 
-use tl_core::mgs::{estimate_mps_workload_hint, MobileSceneSnapshot, MobileSceneTuning, MpsWorkloadHint};
+use tl_core::mgs::{
+    estimate_mps_workload_hint, MobileSceneSnapshot, MobileSceneTuning, MpsWorkloadHint,
+};
 
 use crate::scene::SceneFrameInstances;
 

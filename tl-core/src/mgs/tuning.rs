@@ -283,16 +283,14 @@ impl MgsTuningProfile {
                 // No changes; defaults are already conservative.
             }
             MgsPerformanceProfile::Aggressive => {
-                self.max_draw_calls_per_frame =
-                    (self.max_draw_calls_per_frame + 512).min(8192);
+                self.max_draw_calls_per_frame = (self.max_draw_calls_per_frame + 512).min(8192);
                 self.power_saving_mode = false;
                 if self.thermal_state == ThermalState::Unknown {
                     self.thermal_state = ThermalState::Nominal;
                 }
             }
             MgsPerformanceProfile::Heimdall => {
-                self.max_draw_calls_per_frame =
-                    (self.max_draw_calls_per_frame * 2).min(16384);
+                self.max_draw_calls_per_frame = (self.max_draw_calls_per_frame * 2).min(16384);
                 self.power_saving_mode = false;
                 self.thermal_state = ThermalState::Nominal;
                 self.render_pass_strategy = RenderPassStrategy::SinglePassPerFrame;

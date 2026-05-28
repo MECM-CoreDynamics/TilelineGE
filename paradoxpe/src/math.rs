@@ -25,6 +25,13 @@ impl SafeClamp for f32 {
         if min > max {
             std::mem::swap(&mut min, &mut max);
         }
-        self.clamp(min, max)
+        let mut x = self;
+        if x < min {
+            x = min;
+        }
+        if x > max {
+            x = max;
+        }
+        x
     }
 }

@@ -1,4 +1,3 @@
-use tl_core::mgs::MgsBridge;
 use paradoxpe::{PhysicsWorld, PhysicsWorldConfig};
 use runtime::{
     choose_scheduler_path, estimate_mobile_workload_hint, estimate_scene_workload_requests,
@@ -8,6 +7,7 @@ use runtime::{
     SceneWorkloadBridgeConfig, TelemetryHudComposer, TelemetryHudSample, TickRatePolicy,
     TlspriteHotReloadEvent, TlspriteProgramCache, TlspriteWatchReloader,
 };
+use tl_core::mgs::MgsBridge;
 use tl_core::MpsGmsBridgeConfig;
 use wgpu::{AdapterInfo, Backend, DeviceType};
 

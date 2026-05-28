@@ -24,7 +24,10 @@ fn main() {
             "encoded kind={:?} bytes={} reliable={}",
             packet.header.kind,
             packet.bytes.len(),
-            packet.header.flags.contains(tl_core::nps::PacketFlags::RELIABLE)
+            packet
+                .header
+                .flags
+                .contains(tl_core::nps::PacketFlags::RELIABLE)
         );
         manager.enqueue_inbound_datagram(1, None, Arc::clone(&packet.bytes));
     }

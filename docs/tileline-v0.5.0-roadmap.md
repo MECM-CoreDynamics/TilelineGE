@@ -40,7 +40,8 @@ The engine already has these major pieces in place:
 - GPU domain affinity (`auto_gpu_routing` + per-domain pinning) wired through `.tlpfile`, CLI,
   console, `.tlscript`, and telemetry
 - raw Vulkan backend skeleton exists in `tl-core` with experimental `TILELINE_RENDERER=vulkan` path;
-  `wgpu` still owns the shipping render loop during dual-path migration
+  on Linux desktop, `wgpu` remains the default renderer during the dual-path migration until raw
+  Vulkan passes visual stability and render-pressure gates
 
 That means `v0.5.0` should focus on **finishing dependency cleanup (WGPU exit), render production
 features (effects + textures), and release hardening**, with most structural/infrastructure work
@@ -248,6 +249,8 @@ Current status:
   `RuntimeDrawFrame` into a Vulkan snapshot + explicit MGPU frame plan
 - TLApp runtime now carries a shared renderer surface (`wgpu` + experimental `TILELINE_RENDERER=vulkan`)
   so the cutover can proceed incrementally without forking the app loop
+- Linux desktop defaults to the `wgpu` renderer while raw Vulkan is under active parity work; raw
+  Vulkan remains opt-in via `TILELINE_RENDERER=vulkan`
 - bridge/sync submission tracking has started moving from raw `wgpu` types toward backend-neutral handles
 
 Target work:
@@ -730,6 +733,8 @@ Status:
 - active; partial migration complete
 - Vulkan backend path exists and is integrated, but shipping runtime still has `wgpu` ownership in
   several hot/runtime-adjacent layers
+- Linux desktop default is temporarily `wgpu`; raw Vulkan is opt-in until transparency, lighting,
+  resize, and render-pressure parity gates are green
 
 ### E5. GPU Domain Affinity
 

@@ -9,8 +9,9 @@
 
 use std::collections::HashMap;
 use std::f32::consts::TAU;
+use std::f32::consts::{FRAC_PI_2, PI};
 
-use nalgebra::Vector3;
+use nalgebra::{UnitQuaternion, Vector3};
 use paradoxpe::{
     Aabb, BodyDesc, BodyHandle, BodyKind, ColliderDesc, ColliderMaterial, ColliderShape,
     PhysicsSimulationMode, PhysicsWorld,
@@ -23,6 +24,14 @@ const COLLISION_GROUP_WALL: u16 = 1 << 1;
 const SCATTER_MIN_LIVE_BALLS_BASE: usize = 600;
 const SCATTER_MIN_AFFECTED: usize = 12;
 pub const MAX_SCENE_LIGHTS: usize = 32;
+pub(crate) const BUILTIN_GLASS_PANEL_MESH_SLOT: u8 = 250;
+
+#[derive(Debug, Clone, Copy)]
+struct WallFaceSpec {
+    translation: [f32; 3],
+    rotation_xyzw: [f32; 4],
+    scale: [f32; 3],
+}
 
 #[inline]
 fn collision_filter_tag(group: u16, mask: u16) -> u32 {
@@ -657,6 +666,9 @@ pub struct BounceTankRuntimePatch {
     pub speculative_contact_distance: Option<f32>,
     pub speculative_max_prediction_distance: Option<f32>,
     pub ball_mesh_slot: Option<u8>,
+    pub container_wall_mesh_slot: Option<u8>,
+    pub container_edge_mesh_slot: Option<u8>,
+    /// Backward-compatible alias for edge mesh visuals.
     pub container_mesh_slot: Option<u8>,
 }
 
@@ -695,7 +707,8 @@ pub struct BounceTankSceneController {
     balls: Vec<BallVisual>,
     sprite_program: Option<TlspriteProgram>,
     ball_mesh_slot: Option<u8>,
-    container_mesh_slot: Option<u8>,
+    container_wall_mesh_slot: Option<u8>,
+    container_edge_mesh_slot: Option<u8>,
     last_scatter_tick: u64,
     scatter_face_cursor: u8,
     levitation_body_handles: Vec<BodyHandle>,
@@ -718,7 +731,8 @@ impl BounceTankSceneController {
             balls: Vec::new(),
             sprite_program: None,
             ball_mesh_slot: None,
-            container_mesh_slot: None,
+            container_wall_mesh_slot: None,
+            container_edge_mesh_slot: None,
             last_scatter_tick: 0,
             scatter_face_cursor: 0,
             levitation_body_handles: Vec::new(),
@@ -811,9 +825,19 @@ impl BounceTankSceneController {
         self.ball_mesh_slot
     }
 
-    /// Active mesh override slot for the container, if any.
+    /// Active mesh override slot for transparent wall panels, if any.
+    pub fn container_wall_mesh_slot(&self) -> Option<u8> {
+        self.container_wall_mesh_slot
+    }
+
+    /// Active mesh override slot for opaque edge prisms, if any.
+    pub fn container_edge_mesh_slot(&self) -> Option<u8> {
+        self.container_edge_mesh_slot
+    }
+
+    /// Backward-compatible accessor for the container edge mesh slot.
     pub fn container_mesh_slot(&self) -> Option<u8> {
-        self.container_mesh_slot
+        self.container_edge_mesh_slot
     }
 
     /// Set or clear the scene-level `.wav` path.
@@ -1251,9 +1275,21 @@ impl BounceTankSceneController {
                 updated = true;
             }
         }
+        if let Some(slot) = patch.container_wall_mesh_slot {
+            if self.container_wall_mesh_slot != Some(slot) {
+                self.container_wall_mesh_slot = Some(slot);
+                updated = true;
+            }
+        }
+        if let Some(slot) = patch.container_edge_mesh_slot {
+            if self.container_edge_mesh_slot != Some(slot) {
+                self.container_edge_mesh_slot = Some(slot);
+                updated = true;
+            }
+        }
         if let Some(slot) = patch.container_mesh_slot {
-            if self.container_mesh_slot != Some(slot) {
-                self.container_mesh_slot = Some(slot);
+            if self.container_edge_mesh_slot != Some(slot) {
+                self.container_edge_mesh_slot = Some(slot);
                 updated = true;
             }
         }
@@ -1415,10 +1451,10 @@ impl BounceTankSceneController {
                 zoom: self.config.side_view_zoom.clamp(0.05, 20.0),
             });
         }
-        if self.container_mesh_slot.is_some() {
+        if self.container_wall_mesh_slot.is_some() {
             self.append_container_wall_instances(&mut frame.transparent_3d);
         } else {
-            frame.transparent_3d.push(self.container_visual_instance());
+            self.append_builtin_container_wall_instances(&mut frame.transparent_3d);
         }
         self.append_container_edge_instances(&mut frame.opaque_3d);
 
@@ -2471,43 +2507,30 @@ impl BounceTankSceneController {
         tunnel_cap.max(design_cap).clamp(12.0, 220.0)
     }
 
-    fn container_visual_instance(&self) -> SceneInstance3d {
-        let center_z = if self.config.scene_mode.is_2d() {
-            self.config.side_view_plane_z
-        } else {
-            0.0
-        };
-        SceneInstance3d {
-            instance_id: u64::MAX - 1,
-            primitive: ScenePrimitive3d::Box,
-            transform: SceneTransform3d {
-                translation: [0.0, 0.0, center_z],
-                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
-                scale: [
-                    self.config.container_half_extents[0] * 2.0,
-                    self.config.container_half_extents[1] * 2.0,
-                    self.config.container_half_extents[2] * 2.0,
-                ],
-            },
-            material: SceneMaterial {
-                base_color_rgba: [0.58, 0.72, 0.98, 0.30],
-                roughness: 0.04,
-                metallic: 0.0,
-                emissive_rgb: [0.05, 0.06, 0.08],
-                texture_slot: 0,
-                shading: ShadingModel::LitPbr,
-            },
-            casts_shadow: false,
-            receives_shadow: true,
+    fn container_wall_material(&self) -> SceneMaterial {
+        SceneMaterial {
+            base_color_rgba: [0.72, 0.88, 1.0, 0.28],
+            roughness: 0.04,
+            metallic: 0.0,
+            emissive_rgb: [0.12, 0.18, 0.26],
+            texture_slot: 0,
+            shading: ShadingModel::Unlit,
         }
     }
 
-    /// Adds six wall panel mesh instances (three pairs) so custom FBX walls form a clean box.
-    fn append_container_wall_instances(&self, out: &mut Vec<SceneInstance3d>) {
-        let Some(slot) = self.container_mesh_slot else {
-            return;
-        };
-        let plane_z = if self.config.scene_mode.is_2d() {
+    fn container_edge_material(&self) -> SceneMaterial {
+        SceneMaterial {
+            base_color_rgba: [0.90, 0.96, 1.0, 1.0],
+            roughness: 0.06,
+            metallic: 0.0,
+            emissive_rgb: [0.18, 0.24, 0.32],
+            texture_slot: 0,
+            shading: ShadingModel::Unlit,
+        }
+    }
+
+    fn wall_face_specs(&self) -> [WallFaceSpec; 6] {
+        let center_z = if self.config.scene_mode.is_2d() {
             self.config.side_view_plane_z
         } else {
             0.0
@@ -2520,59 +2543,94 @@ impl BounceTankSceneController {
             .wall_thickness
             .max(self.config.ball_radius_max.max(0.02) * 1.35)
             .max(0.02);
-        let primitive = ScenePrimitive3d::Mesh { slot };
+        let visual_outset = (t * 0.35).max(self.config.ball_radius_max * 0.75).max(0.10);
+        let panel_trim = (t * 0.15).max(0.06);
+        let span_x = (hx - panel_trim).max(0.05) * 2.0;
+        let span_y = (hy - panel_trim).max(0.05) * 2.0;
+        let span_z = (hz - panel_trim).max(0.05) * 2.0;
+        let quat = |axis: Vector3<f32>, angle: f32| {
+            let unit_axis = nalgebra::Unit::new_normalize(axis);
+            let rotation = UnitQuaternion::from_axis_angle(&unit_axis, angle);
+            let q = rotation.quaternion();
+            [q.i, q.j, q.k, q.w]
+        };
+
+        [
+            WallFaceSpec {
+                translation: [hx + visual_outset, 0.0, center_z],
+                rotation_xyzw: quat(Vector3::y_axis().into_inner(), -FRAC_PI_2),
+                scale: [span_z, span_y, 1.0],
+            },
+            WallFaceSpec {
+                translation: [-hx - visual_outset, 0.0, center_z],
+                rotation_xyzw: quat(Vector3::y_axis().into_inner(), FRAC_PI_2),
+                scale: [span_z, span_y, 1.0],
+            },
+            WallFaceSpec {
+                translation: [0.0, hy + visual_outset, center_z],
+                rotation_xyzw: quat(Vector3::x_axis().into_inner(), -FRAC_PI_2),
+                scale: [span_x, span_z, 1.0],
+            },
+            WallFaceSpec {
+                translation: [0.0, -hy - visual_outset, center_z],
+                rotation_xyzw: quat(Vector3::x_axis().into_inner(), FRAC_PI_2),
+                scale: [span_x, span_z, 1.0],
+            },
+            WallFaceSpec {
+                translation: [0.0, 0.0, hz + visual_outset + center_z],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: [span_x, span_y, 1.0],
+            },
+            WallFaceSpec {
+                translation: [0.0, 0.0, -hz - visual_outset + center_z],
+                rotation_xyzw: quat(Vector3::y_axis().into_inner(), PI),
+                scale: [span_x, span_y, 1.0],
+            },
+        ]
+    }
+
+    fn append_builtin_container_wall_instances(&self, out: &mut Vec<SceneInstance3d>) {
+        for (index, face) in self.wall_face_specs().into_iter().enumerate() {
+            out.push(SceneInstance3d {
+                instance_id: (u64::MAX - 400).saturating_sub(index as u64),
+                primitive: ScenePrimitive3d::Mesh {
+                    slot: BUILTIN_GLASS_PANEL_MESH_SLOT,
+                },
+                transform: SceneTransform3d {
+                    translation: face.translation,
+                    rotation_xyzw: face.rotation_xyzw,
+                    scale: face.scale,
+                },
+                material: self.container_wall_material(),
+                casts_shadow: false,
+                receives_shadow: false,
+            });
+        }
+    }
+
+    /// Adds six wall panel mesh instances aligned to the collision box extents.
+    fn append_container_wall_instances(&self, out: &mut Vec<SceneInstance3d>) {
+        let Some(slot) = self.container_wall_mesh_slot else {
+            return;
+        };
         let mesh_scale = self.config.container_mesh_scale;
-        let faces = [
-            (
-                [hx + t * 0.5, 0.0, 0.0],
-                [t, (hy + t) * 2.0, (hz + t) * 2.0],
-            ),
-            (
-                [-hx - t * 0.5, 0.0, 0.0],
-                [t, (hy + t) * 2.0, (hz + t) * 2.0],
-            ),
-            (
-                [0.0, hy + t * 0.5, 0.0],
-                [(hx + t) * 2.0, t, (hz + t) * 2.0],
-            ),
-            (
-                [0.0, -hy - t * 0.5, 0.0],
-                [(hx + t) * 2.0, t, (hz + t) * 2.0],
-            ),
-            (
-                [0.0, 0.0, hz + t * 0.5],
-                [(hx + t) * 2.0, (hy + t) * 2.0, t],
-            ),
-            (
-                [0.0, 0.0, -hz - t * 0.5],
-                [(hx + t) * 2.0, (hy + t) * 2.0, t],
-            ),
-        ];
-        for (index, (mut translation, scale)) in faces.into_iter().enumerate() {
-            translation[2] += plane_z;
+        for (index, face) in self.wall_face_specs().into_iter().enumerate() {
             let shaped_scale = [
-                scale[0] * mesh_scale[0],
-                scale[1] * mesh_scale[1],
-                scale[2] * mesh_scale[2],
+                face.scale[0] * mesh_scale[0],
+                face.scale[1] * mesh_scale[1],
+                face.scale[2] * mesh_scale[2],
             ];
             out.push(SceneInstance3d {
                 instance_id: (u64::MAX - 200).saturating_sub(index as u64),
-                primitive,
+                primitive: ScenePrimitive3d::Mesh { slot },
                 transform: SceneTransform3d {
-                    translation,
-                    rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                    translation: face.translation,
+                    rotation_xyzw: face.rotation_xyzw,
                     scale: shaped_scale,
                 },
-                material: SceneMaterial {
-                    base_color_rgba: [0.80, 0.89, 1.0, 0.26],
-                    roughness: 0.06,
-                    metallic: 0.0,
-                    emissive_rgb: [0.05, 0.07, 0.10],
-                    texture_slot: 0,
-                    shading: ShadingModel::LitPbr,
-                },
+                material: self.container_wall_material(),
                 casts_shadow: false,
-                receives_shadow: true,
+                receives_shadow: false,
             });
         }
     }
@@ -2588,7 +2646,10 @@ impl BounceTankSceneController {
         let hy = self.config.container_half_extents[1] * 2.0;
         let hz = self.config.container_half_extents[2] * 2.0;
         let edge = self.config.wall_thickness.max(0.03) * 0.30;
-        let primitive = ScenePrimitive3d::Box;
+        let mesh_primitive = self
+            .container_edge_mesh_slot
+            .map(|slot| ScenePrimitive3d::Mesh { slot });
+        let mesh_scale = self.config.container_mesh_scale;
 
         // X-axis edges (y/z corners).
         let x_edges = [
@@ -2705,23 +2766,35 @@ impl BounceTankSceneController {
             translation[2] += plane_z;
             out.push(SceneInstance3d {
                 instance_id: (u64::MAX - 20).saturating_sub(edge_index),
-                primitive,
+                primitive: ScenePrimitive3d::Box,
                 transform: SceneTransform3d {
                     translation,
                     rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
                     scale,
                 },
-                material: SceneMaterial {
-                    base_color_rgba: [0.90, 0.96, 1.0, 0.56],
-                    roughness: 0.06,
-                    metallic: 0.0,
-                    emissive_rgb: [0.06, 0.09, 0.12],
-                    texture_slot: 0,
-                    shading: ShadingModel::LitPbr,
-                },
+                material: self.container_edge_material(),
                 casts_shadow: false,
                 receives_shadow: false,
             });
+            if let Some(primitive) = mesh_primitive {
+                let shaped_scale = [
+                    scale[0] * mesh_scale[0] * 0.96,
+                    scale[1] * mesh_scale[1] * 0.96,
+                    scale[2] * mesh_scale[2] * 0.96,
+                ];
+                out.push(SceneInstance3d {
+                    instance_id: (u64::MAX - 80).saturating_sub(edge_index),
+                    primitive,
+                    transform: SceneTransform3d {
+                        translation,
+                        rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                        scale: shaped_scale,
+                    },
+                    material: self.container_edge_material(),
+                    casts_shadow: false,
+                    receives_shadow: false,
+                });
+            }
             edge_index = edge_index.saturating_add(1);
         }
     }
@@ -2920,6 +2993,38 @@ mod tests {
     }
 
     #[test]
+    fn builtin_container_fallback_emits_six_glass_panels_and_twelve_edges() {
+        let world = PhysicsWorld::new(PhysicsWorldConfig {
+            fixed_dt: 1.0 / 120.0,
+            ..PhysicsWorldConfig::default()
+        });
+        let scene = BounceTankSceneController::new(BounceTankSceneConfig::default());
+
+        let frame = scene.build_frame_instances(&world, Some(1.0));
+        assert_eq!(frame.transparent_3d.len(), 6);
+        assert!(frame.transparent_3d.iter().all(|instance| {
+            matches!(
+                instance.primitive,
+                ScenePrimitive3d::Mesh {
+                    slot: BUILTIN_GLASS_PANEL_MESH_SLOT
+                }
+            ) && !instance.casts_shadow
+                && !instance.receives_shadow
+                && instance.material.shading == ShadingModel::Unlit
+                && (0.24..=0.30).contains(&instance.material.base_color_rgba[3])
+        }));
+
+        assert_eq!(frame.opaque_3d.len(), 12);
+        assert!(frame.opaque_3d.iter().all(|instance| {
+            matches!(instance.primitive, ScenePrimitive3d::Box)
+                && !instance.casts_shadow
+                && !instance.receives_shadow
+                && instance.material.shading == ShadingModel::Unlit
+                && (instance.material.base_color_rgba[3] - 1.0).abs() <= 1e-6
+        }));
+    }
+
+    #[test]
     fn side_view_mode_emits_2d_view_hint() {
         let mut world = PhysicsWorld::new(PhysicsWorldConfig {
             fixed_dt: 1.0 / 120.0,
@@ -2996,7 +3101,8 @@ mod tests {
             spawn_per_tick: 96,
             ..BounceTankSceneConfig::default()
         });
-        scene.container_mesh_slot = Some(7);
+        scene.container_wall_mesh_slot = Some(7);
+        scene.container_edge_mesh_slot = Some(7);
 
         let _ = scene.physics_tick(&mut world);
         let _ = world.step(world.config().fixed_dt);
@@ -3026,11 +3132,16 @@ mod tests {
         assert_eq!(
             wall_instances.len(),
             6,
-            "mesh-backed rectangular wall set should emit six faces"
+            "transparent wall set should emit six panel faces"
         );
         assert!(wall_instances.iter().any(|instance| {
             (instance.transform.translation[2] - side_view_plane_z).abs() > 0.1
         }));
+
+        assert!(frame
+            .opaque_3d
+            .iter()
+            .any(|instance| matches!(instance.primitive, ScenePrimitive3d::Mesh { slot: 7 })));
     }
 
     #[test]
@@ -3155,6 +3266,7 @@ mod tests {
             &mut world,
             BounceTankRuntimePatch {
                 ball_mesh_slot: Some(5),
+                container_wall_mesh_slot: Some(7),
                 container_mesh_slot: Some(2),
                 ..BounceTankRuntimePatch::default()
             },
@@ -3163,8 +3275,12 @@ mod tests {
         let frame = scene.build_frame_instances(&world, Some(1.0));
         assert!(matches!(
             frame.transparent_3d.first().map(|i| i.primitive),
-            Some(ScenePrimitive3d::Mesh { slot: 2 })
+            Some(ScenePrimitive3d::Mesh { slot: 7 })
         ));
+        assert!(frame
+            .opaque_3d
+            .iter()
+            .any(|i| matches!(i.primitive, ScenePrimitive3d::Mesh { slot: 2 })));
         assert!(frame
             .opaque_3d
             .iter()

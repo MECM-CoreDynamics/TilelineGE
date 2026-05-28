@@ -2,13 +2,13 @@
 
 #![cfg(target_os = "macos")]
 
-use std::collections::HashMap;
+use crate::graphics::shader_flags::ShaderFeatureFlags;
 use metal::{
     Device, Function, MTLBlendFactor, MTLBlendOperation, MTLPixelFormat, MTLVertexFormat,
-    MTLVertexStepFunction, RenderPipelineColorAttachmentDescriptorRef,
-    RenderPipelineDescriptor, RenderPipelineState, VertexDescriptor,
+    MTLVertexStepFunction, RenderPipelineColorAttachmentDescriptorRef, RenderPipelineDescriptor,
+    RenderPipelineState, VertexDescriptor,
 };
-use crate::graphics::shader_flags::ShaderFeatureFlags;
+use std::collections::HashMap;
 
 /// How the color attachment should blend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -142,11 +142,17 @@ fn build_pipeline(
     let vertex_descriptor = VertexDescriptor::new();
     let mut global_attr_index = 0;
     for (buffer_index, layout) in vertex_layout.buffer_layouts.iter().enumerate() {
-        let buffer_layout_desc = vertex_descriptor.layouts().object_at(buffer_index as u64).unwrap();
+        let buffer_layout_desc = vertex_descriptor
+            .layouts()
+            .object_at(buffer_index as u64)
+            .unwrap();
         buffer_layout_desc.set_stride(layout.stride as u64);
         buffer_layout_desc.set_step_function(layout.step_function);
         for attr in layout.attributes.iter() {
-            let attr_desc = vertex_descriptor.attributes().object_at(global_attr_index as u64).unwrap();
+            let attr_desc = vertex_descriptor
+                .attributes()
+                .object_at(global_attr_index as u64)
+                .unwrap();
             attr_desc.set_format(attr.format);
             attr_desc.set_offset(attr.offset as u64);
             attr_desc.set_buffer_index(attr.buffer_index as u64);
@@ -160,10 +166,7 @@ fn build_pipeline(
         .map_err(|e| format!("pipeline creation failed: {e}"))
 }
 
-fn configure_blend(
-    color_attachment: &RenderPipelineColorAttachmentDescriptorRef,
-    mode: BlendMode,
-) {
+fn configure_blend(color_attachment: &RenderPipelineColorAttachmentDescriptorRef, mode: BlendMode) {
     match mode {
         BlendMode::None => {
             color_attachment.set_blending_enabled(false);
@@ -174,8 +177,7 @@ fn configure_blend(
             color_attachment.set_alpha_blend_operation(MTLBlendOperation::Add);
             color_attachment.set_source_rgb_blend_factor(MTLBlendFactor::SourceAlpha);
             color_attachment.set_source_alpha_blend_factor(MTLBlendFactor::SourceAlpha);
-            color_attachment
-                .set_destination_rgb_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
+            color_attachment.set_destination_rgb_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
             color_attachment
                 .set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
         }

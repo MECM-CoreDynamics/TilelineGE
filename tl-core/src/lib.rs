@@ -27,6 +27,7 @@ pub mod nps;
 pub mod physics;
 pub mod tlscript;
 
+pub use crate::gms::{AdaptiveBufferDecision, AdaptiveFrameTelemetry};
 pub use core::bridge::{
     BridgeFrameId, BridgeFramePlan, BridgeGpuTaskKind, BridgeMpsSubmission, BridgeSubmitReceipt,
     BridgeTaskDescriptor, BridgeTaskRouting, MpsGmsBridge, MpsGmsBridgeConfig, MpsGmsBridgeMetrics,
@@ -36,10 +37,10 @@ pub use core::mgs_bridge::{
     MgsBridgeSubmitReceipt, MgsBridgeTaskDescriptor, MpsMgsBridge, MpsMgsBridgeConfig,
     MpsMgsBridgeMetrics,
 };
-pub use crate::gms::{AdaptiveBufferDecision, AdaptiveFrameTelemetry};
 pub use graphics::frame_snapshot::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
-    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_OVERLAY,
+    FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 #[cfg(target_os = "macos")]
 pub use graphics::metal_backend::{
@@ -58,12 +59,12 @@ pub use graphics::multigpu::sync::{
 };
 #[cfg(target_os = "linux")]
 pub use graphics::vulkan_backend::{
-    FrameSubmissionTelemetry, LinuxWindowSystemIntegration, PresentModePreference,
-    SceneVertex, SPRITE_ATLAS_LAYER_COUNT, SPRITE_ATLAS_TILE_SIZE, VulkanBackend,
-    VulkanBackendConfig, VulkanBackendError, VulkanDeviceExtensionSupport,
+    FrameSubmissionTelemetry, LinuxWindowSystemIntegration, PresentModePreference, SceneVertex,
+    VulkanBackend, VulkanBackendConfig, VulkanBackendError, VulkanDeviceExtensionSupport,
     VulkanFrameExecutionTelemetry, VulkanMultiGpuCapabilities, VulkanMultiGpuConfig,
     VulkanMultiGpuFramePlan, VulkanNativeMultiGpuSupport, VulkanPhysicalDeviceProfile,
-    VulkanQueueSelection, VulkanSnapshotSlotState,
+    VulkanQueueSelection, VulkanSnapshotSlotState, SPRITE_ATLAS_LAYER_COUNT,
+    SPRITE_ATLAS_TILE_SIZE,
 };
 #[cfg(target_os = "linux")]
 pub use graphics::vulkan_physics_compute::{

@@ -23,7 +23,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::runtime_bridge::{GmsGuardrailProfile, GmsScalerConfig, GmsScalerMode, PerformanceProfile};
+use crate::runtime_bridge::{
+    GmsGuardrailProfile, GmsScalerConfig, GmsScalerMode, PerformanceProfile,
+};
 use crate::tljoint::{compile_tljoint_scene_from_path, TljointDiagnosticLevel, TljointSceneBundle};
 use crate::tlscript_showcase::{
     compile_tlscript_showcase, TlscriptShowcaseConfig, TlscriptShowcaseProgram,
@@ -200,7 +202,11 @@ impl TlpfileSceneCompileOutcome {
     }
 }
 
-fn parse_gpu_index(value: &str, line_no: usize, diagnostics: &mut Vec<TlpfileDiagnostic>) -> Option<u8> {
+fn parse_gpu_index(
+    value: &str,
+    line_no: usize,
+    diagnostics: &mut Vec<TlpfileDiagnostic>,
+) -> Option<u8> {
     if value.eq_ignore_ascii_case("auto") || value.is_empty() {
         None
     } else {
@@ -210,9 +216,7 @@ fn parse_gpu_index(value: &str, line_no: usize, diagnostics: &mut Vec<TlpfileDia
                 diagnostics.push(TlpfileDiagnostic {
                     level: TlpfileDiagnosticLevel::Error,
                     line: line_no,
-                    message: format!(
-                        "invalid GPU index '{value}' (expected auto|0|1|2|...)"
-                    ),
+                    message: format!("invalid GPU index '{value}' (expected auto|0|1|2|...)"),
                 });
                 None
             }
@@ -508,18 +512,38 @@ pub fn parse_tlpfile(source: &str) -> TlpfileParseOutcome {
                         message: format!("invalid gms_scaler.light_budget_pct '{value}'"),
                     }),
                 },
-                "light_gpu" => project_gms_scaler.budgets.light_gpu = parse_gpu_index(value, line_no, &mut diagnostics),
-                "render_gpu" => project_gms_scaler.budgets.render_gpu = parse_gpu_index(value, line_no, &mut diagnostics),
-                "physics_gpu" => project_gms_scaler.budgets.physics_gpu = parse_gpu_index(value, line_no, &mut diagnostics),
-                "ai_ml_gpu" => project_gms_scaler.budgets.ai_ml_gpu = parse_gpu_index(value, line_no, &mut diagnostics),
-                "postfx_gpu" => project_gms_scaler.budgets.postfx_gpu = parse_gpu_index(value, line_no, &mut diagnostics),
-                "ui_gpu" => project_gms_scaler.budgets.ui_gpu = parse_gpu_index(value, line_no, &mut diagnostics),
+                "light_gpu" => {
+                    project_gms_scaler.budgets.light_gpu =
+                        parse_gpu_index(value, line_no, &mut diagnostics)
+                }
+                "render_gpu" => {
+                    project_gms_scaler.budgets.render_gpu =
+                        parse_gpu_index(value, line_no, &mut diagnostics)
+                }
+                "physics_gpu" => {
+                    project_gms_scaler.budgets.physics_gpu =
+                        parse_gpu_index(value, line_no, &mut diagnostics)
+                }
+                "ai_ml_gpu" => {
+                    project_gms_scaler.budgets.ai_ml_gpu =
+                        parse_gpu_index(value, line_no, &mut diagnostics)
+                }
+                "postfx_gpu" => {
+                    project_gms_scaler.budgets.postfx_gpu =
+                        parse_gpu_index(value, line_no, &mut diagnostics)
+                }
+                "ui_gpu" => {
+                    project_gms_scaler.budgets.ui_gpu =
+                        parse_gpu_index(value, line_no, &mut diagnostics)
+                }
                 "auto_gpu_routing" => match value.parse::<bool>() {
                     Ok(v) => project_gms_scaler.auto_gpu_routing = v,
                     Err(_) => diagnostics.push(TlpfileDiagnostic {
                         level: TlpfileDiagnosticLevel::Error,
                         line: line_no,
-                        message: format!("invalid gms_scaler.auto_gpu_routing '{value}' (expected true|false)"),
+                        message: format!(
+                            "invalid gms_scaler.auto_gpu_routing '{value}' (expected true|false)"
+                        ),
                     }),
                 },
                 "guardrail" => {

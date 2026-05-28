@@ -114,19 +114,24 @@ impl TlAppRuntime {
         let scene_config = self.scene.config();
         let sprite_program = self.scene.sprite_program_cloned();
         let ball_mesh_slot = self.scene.ball_mesh_slot();
-        let container_mesh_slot = self.scene.container_mesh_slot();
+        let container_wall_mesh_slot = self.scene.container_wall_mesh_slot();
+        let container_edge_mesh_slot = self.scene.container_edge_mesh_slot();
         self.world.replace(PhysicsWorld::new(world_config));
         self.scene = BounceTankSceneController::new(scene_config);
         self.reset_tile_world_to_default();
         if let Some(program) = sprite_program {
             self.scene.set_sprite_program(program);
         }
-        if ball_mesh_slot.is_some() || container_mesh_slot.is_some() {
+        if ball_mesh_slot.is_some()
+            || container_wall_mesh_slot.is_some()
+            || container_edge_mesh_slot.is_some()
+        {
             let _ = self.scene.apply_runtime_patch(
                 &mut *self.world.borrow_mut(),
                 BounceTankRuntimePatch {
                     ball_mesh_slot,
-                    container_mesh_slot,
+                    container_wall_mesh_slot,
+                    container_edge_mesh_slot,
                     ..BounceTankRuntimePatch::default()
                 },
             );
@@ -344,7 +349,7 @@ impl TlAppRuntime {
 
     pub(super) fn apply_gfx_profile(&mut self, profile: &str) -> Result<String, String> {
         let mobile_path =
-            matches!(self.platform, RuntimePlatform::Android) || self.mgs_is_mobile_hardware;
+            matches!(self.platform, RuntimePlatform::Android) || self.mobile_class_hardware;
         match profile {
             "low" => {
                 self.fsr_config.mode = FsrMode::On;
@@ -621,7 +626,9 @@ impl TlAppRuntime {
         }
         bridge.set_gms_gpu(domain, gpu);
         self.runtime_bridge_metrics = bridge.metrics();
-        let gpu_str = gpu.map(|g| format!("GPU{g}")).unwrap_or_else(|| "auto".to_string());
+        let gpu_str = gpu
+            .map(|g| format!("GPU{g}"))
+            .unwrap_or_else(|| "auto".to_string());
         Ok(format!(
             "gms gpu override: {}={} (CLI precedence active)",
             domain.as_str(),
@@ -680,9 +687,7 @@ impl TlAppRuntime {
             profile.as_str()
         );
         if profile == PerformanceProfile::Heimdall {
-            note.push_str(
-                " | WARNING: higher power draw, heat, and cooling noise expected",
-            );
+            note.push_str(" | WARNING: higher power draw, heat, and cooling noise expected");
         }
         Ok(note)
     }
@@ -925,7 +930,7 @@ impl TlAppRuntime {
         scenario: PerformanceContractScenario,
     ) -> Result<String, String> {
         let mobile_path =
-            matches!(self.platform, RuntimePlatform::Android) || self.mgs_is_mobile_hardware;
+            matches!(self.platform, RuntimePlatform::Android) || self.mobile_class_hardware;
         let gfx_profile = scenario.recommended_gfx_profile(mobile_path);
         let spawn_per_tick =
             scenario.recommended_spawn_per_tick(self.mps_logical_threads, mobile_path);

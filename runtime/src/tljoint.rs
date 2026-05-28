@@ -919,6 +919,12 @@ fn merge_patch(target: &mut BounceTankRuntimePatch, patch: BounceTankRuntimePatc
     if patch.ball_mesh_slot.is_some() {
         target.ball_mesh_slot = patch.ball_mesh_slot;
     }
+    if patch.container_wall_mesh_slot.is_some() {
+        target.container_wall_mesh_slot = patch.container_wall_mesh_slot;
+    }
+    if patch.container_edge_mesh_slot.is_some() {
+        target.container_edge_mesh_slot = patch.container_edge_mesh_slot;
+    }
     if patch.container_mesh_slot.is_some() {
         target.container_mesh_slot = patch.container_mesh_slot;
     }
@@ -1094,5 +1100,49 @@ mod tests {
             Some(&runtime_lookup),
         );
         assert_eq!(frame.patch.spawn_per_tick, Some(333));
+    }
+
+    #[test]
+    fn later_scripts_preserve_wall_and_edge_mesh_slots() {
+        let script_a_source = concat!(
+            "@export\n",
+            "def showcase_tick(frame: int, live_balls: int, spawned_this_tick: int):\n",
+            "    set_container_wall_mesh_slot(4)\n",
+            "    set_container_edge_mesh_slot(3)\n",
+        );
+        let script_b_source = concat!(
+            "@export\n",
+            "def showcase_tick(frame: int, live_balls: int, spawned_this_tick: int):\n",
+            "    set_ball_mesh_slot(2)\n",
+        );
+        let script_a =
+            compile_tlscript_showcase(script_a_source, TlscriptShowcaseConfig::default())
+                .program
+                .expect("script a");
+        let script_b =
+            compile_tlscript_showcase(script_b_source, TlscriptShowcaseConfig::default())
+                .program
+                .expect("script b");
+        let bundle = TljointSceneBundle {
+            manifest_path: PathBuf::from("inline.tljoint"),
+            scene_name: "main".to_string(),
+            script_paths: vec![PathBuf::from("a.tlscript"), PathBuf::from("b.tlscript")],
+            sprite_paths: Vec::new(),
+            scripts: vec![script_a, script_b],
+            merged_sprite_program: None,
+        };
+
+        let frame = bundle.evaluate_frame(
+            TlscriptShowcaseFrameInput {
+                frame_index: 0,
+                live_balls: 0,
+                spawned_this_tick: 0,
+                key_f_down: false,
+            },
+            TlscriptShowcaseControlInput::default(),
+        );
+        assert_eq!(frame.patch.ball_mesh_slot, Some(2));
+        assert_eq!(frame.patch.container_wall_mesh_slot, Some(4));
+        assert_eq!(frame.patch.container_edge_mesh_slot, Some(3));
     }
 }

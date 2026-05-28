@@ -14,8 +14,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam::queue::SegQueue;
 use crate::mgs::{MgsBridge, MgsBridgePlan, MobileGpuProfile, MpsWorkloadHint};
+use crossbeam::queue::SegQueue;
 use mps::{CorePreference, MpsScheduler, NativeTask, SchedulerMetrics, TaskPriority};
 
 // ── Frame / Submission identifiers ──────────────────────────────────────────

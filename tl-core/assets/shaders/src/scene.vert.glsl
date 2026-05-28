@@ -1,6 +1,7 @@
 #version 450
 layout(set = 0, binding = 0) uniform CameraUniform {
     mat4 view_proj;
+    vec4 camera_eye;
 } u_camera;
 
 layout(location = 0) in vec3 in_position;

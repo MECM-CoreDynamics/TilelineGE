@@ -818,10 +818,10 @@ fn drain_segqueue<T: Clone>(queue: &SegQueue<T>, max_events: usize) -> Vec<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::nps::*;
-    use std::sync::Arc;
     use crate::nps::reliability::AuthorityTransferReason;
+    use crate::nps::*;
     use paradoxpe::{BodyHandle, BodyStateFrame, PhysicsSnapshot};
+    use std::sync::Arc;
 
     #[test]
     fn manager_roundtrips_physics_batch_without_mps() {

@@ -13,14 +13,14 @@ use std::mem::size_of;
 use std::path::Path;
 use std::sync::Arc;
 
+use metal::MTLIndexType;
 use nalgebra::{Isometry3, Matrix4, Perspective3, Point3, Vector3};
+use tl_core::graphics::metal::mesh_slot::MeshSlot;
 use tl_core::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
     FrameSpriteRecord, FrameTextureRecord, MetalBackend, MetalBackendConfig, MetalBackendError,
     MetalFrameExecutionTelemetry, RenderStateSnapshot,
 };
-use metal::MTLIndexType;
-use tl_core::graphics::metal::mesh_slot::MeshSlot;
 use wgpu::Backend;
 use winit::window::Window;
 
@@ -262,8 +262,17 @@ impl MetalSceneRenderer {
     pub fn bind_fbx_mesh_slot_from_path(&mut self, slot: u8, path: &Path) -> Result<(), String> {
         let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         let parsed = crate::fbx_mesh::parse_first_mesh_from_fbx(&bytes)?;
-        let vertices: Vec<SceneVertex> = parsed.positions.iter().map(|&p| SceneVertex::new(p)).collect();
-        let mesh = MeshSlot::new(self.backend.device(), &vertices, &parsed.indices, MTLIndexType::UInt32);
+        let vertices: Vec<SceneVertex> = parsed
+            .positions
+            .iter()
+            .map(|&p| SceneVertex::new(p))
+            .collect();
+        let mesh = MeshSlot::new(
+            self.backend.device(),
+            &vertices,
+            &parsed.indices,
+            MTLIndexType::UInt32,
+        );
         self.backend.bind_mesh_slot(slot, mesh);
         Ok(())
     }
@@ -280,7 +289,23 @@ impl MetalSceneRenderer {
     /// Bind a procedural sphere mesh to a Metal mesh slot.
     pub fn bind_builtin_sphere_mesh_slot(&mut self, slot: u8, high_quality: bool) {
         let mesh = if high_quality {
-            build_icosa_sphere_mesh(self.backend.device())
+            if let Ok(parsed) = crate::fbx_mesh::parse_first_mesh_from_fbx(
+                crate::fbx_mesh::DEFAULT_SPHERE_FBX_BYTES,
+            ) {
+                let vertices: Vec<SceneVertex> = parsed
+                    .positions
+                    .iter()
+                    .map(|&p| SceneVertex::new(p))
+                    .collect();
+                MeshSlot::new(
+                    self.backend.device(),
+                    &vertices,
+                    &parsed.indices,
+                    MTLIndexType::UInt32,
+                )
+            } else {
+                build_icosa_sphere_mesh(self.backend.device())
+            }
         } else {
             build_octa_sphere_mesh(self.backend.device())
         };
@@ -592,11 +617,10 @@ struct SceneVertex {
 
 impl SceneVertex {
     fn new(position: [f32; 3]) -> Self {
-        let len = (position[0] * position[0]
-            + position[1] * position[1]
-            + position[2] * position[2])
-            .sqrt()
-            .max(1e-6);
+        let len =
+            (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
+                .sqrt()
+                .max(1e-6);
         let normal = [position[0] / len, position[1] / len, position[2] / len];
         Self {
             position,
@@ -606,11 +630,10 @@ impl SceneVertex {
     }
 
     fn new_sphere(position: [f32; 3]) -> Self {
-        let len = (position[0] * position[0]
-            + position[1] * position[1]
-            + position[2] * position[2])
-            .sqrt()
-            .max(1e-6);
+        let len =
+            (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
+                .sqrt()
+                .max(1e-6);
         let normal = [position[0] / len, position[1] / len, position[2] / len];
         let u = 0.5 + f32::atan2(position[2], position[0]) / (2.0 * std::f32::consts::PI);
         let v = 0.5 - position[1] * 0.5;
@@ -622,11 +645,10 @@ impl SceneVertex {
     }
 
     fn new_box(position: [f32; 3]) -> Self {
-        let len = (position[0] * position[0]
-            + position[1] * position[1]
-            + position[2] * position[2])
-            .sqrt()
-            .max(1e-6);
+        let len =
+            (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
+                .sqrt()
+                .max(1e-6);
         let normal = [position[0] / len, position[1] / len, position[2] / len];
         Self {
             position,
@@ -646,8 +668,7 @@ fn build_octa_sphere_mesh(device: &metal::Device) -> MeshSlot {
         SceneVertex::new_sphere([0.0, 0.0, -1.0]),
     ];
     let indices: [u16; 24] = [
-        0, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0,
-        4, 3, 0, 1, 3, 4, 5, 3, 1, 0, 3, 5,
+        0, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0, 4, 3, 0, 1, 3, 4, 5, 3, 1, 0, 3, 5,
     ];
     MeshSlot::new(device, &vertices, &indices, MTLIndexType::UInt16)
 }
@@ -670,10 +691,9 @@ fn build_icosa_sphere_mesh(device: &metal::Device) -> MeshSlot {
     ];
     let vertices: Vec<SceneVertex> = v.iter().map(|&p| SceneVertex::new_sphere(p)).collect();
     let indices: [u16; 60] = [
-        0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11,
-        1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
-        3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9,
-        4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1,
+        0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7,
+        1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9,
+        8, 1,
     ];
     MeshSlot::new(device, &vertices, &indices, MTLIndexType::UInt16)
 }

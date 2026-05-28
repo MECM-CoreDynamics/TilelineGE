@@ -162,8 +162,8 @@ use super::metal::shader_library::{
     BlendMode, PipelineKey, ShaderLibrary, VertexAttributeDesc, VertexBufferLayoutDesc,
     VertexLayout,
 };
-use super::shader_flags::ShaderFeatureFlags;
 use super::metal::shaders::{SCENE_3D_MSL, SCENE_SHADOW_MSL, SCENE_SPRITE_MSL, SCENE_UPSCALE_MSL};
+use super::shader_flags::ShaderFeatureFlags;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -381,12 +381,16 @@ impl MetalBackend {
         ));
 
         let view = {
-            let handle = window
-                .window_handle()
-                .map_err(|_| MetalBackendError::InvalidConfig("failed to get window handle".into()))?;
+            let handle = window.window_handle().map_err(|_| {
+                MetalBackendError::InvalidConfig("failed to get window handle".into())
+            })?;
             match handle.as_raw() {
                 RawWindowHandle::AppKit(appkit) => appkit.ns_view.as_ptr() as *mut Object,
-                _ => return Err(MetalBackendError::InvalidConfig("not a macOS window".into())),
+                _ => {
+                    return Err(MetalBackendError::InvalidConfig(
+                        "not a macOS window".into(),
+                    ))
+                }
             }
         };
         unsafe {
@@ -399,7 +403,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     (max_transforms * std::mem::size_of::<GpuInstance3d>()) as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -407,7 +412,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     std::mem::size_of::<CameraUniform>() as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -415,7 +421,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     (METAL_MAX_LIGHTS * std::mem::size_of::<LightData>()) as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -423,7 +430,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     std::mem::size_of::<LightingUniform>() as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -447,7 +455,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     (METAL_SHADOW_LAYERS * std::mem::size_of::<ShadowPassUniform>()) as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -455,7 +464,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     std::mem::size_of::<ShadowUniform>() as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -466,7 +476,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     std::mem::size_of::<UpscaleUniform>() as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -481,9 +492,9 @@ impl MetalBackend {
         let sprite_vertex_buffer = device.new_buffer_with_data(
             [
                 -0.5f32, -0.5f32, // bottom-left
-                0.5f32, -0.5f32,  // bottom-right
-                -0.5f32, 0.5f32,  // top-left
-                0.5f32, 0.5f32,   // top-right
+                0.5f32, -0.5f32, // bottom-right
+                -0.5f32, 0.5f32, // top-left
+                0.5f32, 0.5f32, // top-right
             ]
             .as_ptr() as *const _,
             8 * std::mem::size_of::<f32>() as u64,
@@ -494,7 +505,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     (max_sprites * std::mem::size_of::<FrameSpriteRecord>()) as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -603,7 +615,9 @@ impl MetalBackend {
         let slot = self
             .frame_slots
             .get_mut(frame_slot)
-            .ok_or(MetalBackendError::InvalidConfig("frame slot out of range".into()))?;
+            .ok_or(MetalBackendError::InvalidConfig(
+                "frame slot out of range".into(),
+            ))?;
 
         if snapshot.transforms.len() > slot.instance_capacity {
             return Err(MetalBackendError::SnapshotCapacityExceeded {
@@ -768,8 +782,17 @@ impl MetalBackend {
             let casts_shadow = light.shadow[0] > 0.5;
             let kind = light.position_kind[3] as u32;
             if METAL_REAL_SHADOW_MAPS_ENABLED && casts_shadow && kind == 1 {
-                let pos = Point3::new(light.position_kind[0], light.position_kind[1], light.position_kind[2]);
-                let dir = Vector3::new(light.direction_inner[0], light.direction_inner[1], light.direction_inner[2]).normalize();
+                let pos = Point3::new(
+                    light.position_kind[0],
+                    light.position_kind[1],
+                    light.position_kind[2],
+                );
+                let dir = Vector3::new(
+                    light.direction_inner[0],
+                    light.direction_inner[1],
+                    light.direction_inner[2],
+                )
+                .normalize();
                 let up = if dir.y.abs() < 0.99 {
                     Vector3::y()
                 } else {
@@ -801,11 +824,14 @@ impl MetalBackend {
                 ];
                 shadow_uniform.shadow_light_indices[slot] = i as i32;
 
-                let pass_uniform = ShadowPassUniform { light_view_proj: vp };
+                let pass_uniform = ShadowPassUniform {
+                    light_view_proj: vp,
+                };
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         &pass_uniform as *const ShadowPassUniform as *const u8,
-                        (spub.contents() as *mut u8).add(slot * std::mem::size_of::<ShadowPassUniform>()),
+                        (spub.contents() as *mut u8)
+                            .add(slot * std::mem::size_of::<ShadowPassUniform>()),
                         std::mem::size_of::<ShadowPassUniform>(),
                     );
                 }
@@ -859,7 +885,10 @@ impl MetalBackend {
             });
             let offset = (layer * std::mem::size_of::<ShadowPassUniform>()) as u64;
             encoder.set_vertex_buffer(2, Some(spub), offset);
-            for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
+            for range in ranges
+                .iter()
+                .filter(|range| !Self::is_transparent_range(range))
+            {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.draw_indexed_primitives_instanced_base_instance(
@@ -1051,7 +1080,9 @@ impl MetalBackend {
                         (true, true) => {
                             let dist_a = Self::range_camera_distance(a, transforms, camera_eye);
                             let dist_b = Self::range_camera_distance(b, transforms, camera_eye);
-                            dist_b.partial_cmp(&dist_a).unwrap_or(std::cmp::Ordering::Equal)
+                            dist_b
+                                .partial_cmp(&dist_a)
+                                .unwrap_or(std::cmp::Ordering::Equal)
                         }
                         (true, false) => std::cmp::Ordering::Greater,
                         (false, true) => std::cmp::Ordering::Less,
@@ -1071,10 +1102,7 @@ impl MetalBackend {
                 }
                 if let Some(ref compressor) = self.snapshot_compressor {
                     let instance_bytes = unsafe {
-                        std::slice::from_raw_parts(
-                            instance_data.as_ptr() as *const u8,
-                            trans_bytes,
-                        )
+                        std::slice::from_raw_parts(instance_data.as_ptr() as *const u8, trans_bytes)
                     };
                     match compressor.compress(instance_bytes) {
                         Ok(pages) => {
@@ -1268,7 +1296,8 @@ impl MetalBackend {
     #[inline]
     fn is_sphere_visible(center: [f32; 3], radius_sq: f32, planes: &[[f32; 4]; 6]) -> bool {
         for plane in planes {
-            let dist = plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
+            let dist =
+                plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
             if dist < 0.0 && dist * dist > radius_sq {
                 return false;
             }
@@ -1493,7 +1522,10 @@ impl MetalBackend {
                 encoder.set_depth_clip_mode(metal::MTLDepthClipMode::Clamp);
                 encoder.set_vertex_buffer(1, Some(tb), 0);
                 encoder.set_vertex_buffer(2, Some(vpb), 0);
-                for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
+                for range in ranges
+                    .iter()
+                    .filter(|range| !Self::is_transparent_range(range))
+                {
                     if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                         encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                         encoder.draw_indexed_primitives_instanced_base_instance(
@@ -1541,7 +1573,10 @@ impl MetalBackend {
                 encoder.set_fragment_buffer(3, Some(sub), 0);
                 encoder.set_fragment_texture(0, Some(&self.shadow_texture));
                 encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
-                for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
+                for range in ranges
+                    .iter()
+                    .filter(|range| !Self::is_transparent_range(range))
+                {
                     if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                         encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                         encoder.draw_indexed_primitives_instanced_base_instance(
@@ -1559,8 +1594,7 @@ impl MetalBackend {
                 }
                 encoder.end_encoding();
 
-                early_z_reject_estimate =
-                    prepass_draw_calls.saturating_sub(main_pass_draw_calls);
+                early_z_reject_estimate = prepass_draw_calls.saturating_sub(main_pass_draw_calls);
             } else {
                 let pass_desc = RenderPassDescriptor::new();
                 let color_attachment = pass_desc.color_attachments().object_at(0).unwrap();
@@ -1591,7 +1625,10 @@ impl MetalBackend {
                 encoder.set_fragment_buffer(3, Some(sub), 0);
                 encoder.set_fragment_texture(0, Some(&self.shadow_texture));
                 encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
-                for range in ranges.iter().filter(|range| !Self::is_transparent_range(range)) {
+                for range in ranges
+                    .iter()
+                    .filter(|range| !Self::is_transparent_range(range))
+                {
                     if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                         encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                         encoder.draw_indexed_primitives_instanced_base_instance(
@@ -1650,7 +1687,10 @@ impl MetalBackend {
             encoder.set_fragment_buffer(3, Some(sub), 0);
             encoder.set_fragment_texture(0, Some(&self.shadow_texture));
             encoder.set_fragment_sampler_state(0, Some(&self.shadow_sampler));
-            for range in ranges.iter().filter(|range| Self::is_transparent_range(range)) {
+            for range in ranges
+                .iter()
+                .filter(|range| Self::is_transparent_range(range))
+            {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.draw_indexed_primitives_instanced_base_instance(
@@ -1742,7 +1782,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     (max_transforms * std::mem::size_of::<GpuInstance3d>()) as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -1750,7 +1791,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     std::mem::size_of::<CameraUniform>() as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -1758,7 +1800,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     (METAL_MAX_LIGHTS * std::mem::size_of::<LightData>()) as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -1766,7 +1809,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     std::mem::size_of::<LightingUniform>() as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -1791,7 +1835,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     (METAL_SHADOW_LAYERS * std::mem::size_of::<ShadowPassUniform>()) as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -1799,7 +1844,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     std::mem::size_of::<ShadowUniform>() as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -1810,7 +1856,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     std::mem::size_of::<UpscaleUniform>() as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -1824,10 +1871,7 @@ impl MetalBackend {
         let sprite_pipeline = build_sprite_pipeline(&device)?;
         let sprite_vertex_buffer = device.new_buffer_with_data(
             [
-                -0.5f32, -0.5f32,
-                0.5f32, -0.5f32,
-                -0.5f32, 0.5f32,
-                0.5f32, 0.5f32,
+                -0.5f32, -0.5f32, 0.5f32, -0.5f32, -0.5f32, 0.5f32, 0.5f32, 0.5f32,
             ]
             .as_ptr() as *const _,
             8 * std::mem::size_of::<f32>() as u64,
@@ -1838,7 +1882,8 @@ impl MetalBackend {
             .map(|_| {
                 device.new_buffer(
                     (max_sprites * std::mem::size_of::<FrameSpriteRecord>()) as u64,
-                    MTLResourceOptions::CPUCacheModeDefaultCache | MTLResourceOptions::StorageModeShared,
+                    MTLResourceOptions::CPUCacheModeDefaultCache
+                        | MTLResourceOptions::StorageModeShared,
                 )
             })
             .collect();
@@ -1945,7 +1990,9 @@ impl MetalBackend {
                     (true, true) => {
                         let dist_a = Self::range_camera_distance(a, transforms, camera_eye);
                         let dist_b = Self::range_camera_distance(b, transforms, camera_eye);
-                        dist_b.partial_cmp(&dist_a).unwrap_or(std::cmp::Ordering::Equal)
+                        dist_b
+                            .partial_cmp(&dist_a)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     }
                     (true, false) => std::cmp::Ordering::Greater,
                     (false, true) => std::cmp::Ordering::Less,
@@ -1965,10 +2012,7 @@ impl MetalBackend {
             }
             if let Some(ref compressor) = self.snapshot_compressor {
                 let instance_bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        instance_data.as_ptr() as *const u8,
-                        trans_bytes,
-                    )
+                    std::slice::from_raw_parts(instance_data.as_ptr() as *const u8, trans_bytes)
                 };
                 match compressor.compress(instance_bytes) {
                     Ok(pages) => {
@@ -2126,11 +2170,9 @@ fn build_scene_pipelines(
     ))
 }
 
-fn build_shadow_pipeline(
-    device: &Device,
-) -> Result<RenderPipelineState, MetalBackendError> {
-    let mut shader_library =
-        ShaderLibrary::new(device, SCENE_SHADOW_MSL).map_err(MetalBackendError::ShaderCompilation)?;
+fn build_shadow_pipeline(device: &Device) -> Result<RenderPipelineState, MetalBackendError> {
+    let mut shader_library = ShaderLibrary::new(device, SCENE_SHADOW_MSL)
+        .map_err(MetalBackendError::ShaderCompilation)?;
     let layout = scene_3d_vertex_layout();
     let layout_hash = layout.hash_key();
 
@@ -2150,12 +2192,12 @@ fn build_shadow_pipeline(
         .clone())
 }
 
-fn build_upscale_pipeline(
-    device: &Device,
-) -> Result<RenderPipelineState, MetalBackendError> {
-    let mut shader_library =
-        ShaderLibrary::new(device, SCENE_UPSCALE_MSL).map_err(MetalBackendError::ShaderCompilation)?;
-    let empty_layout = VertexLayout { buffer_layouts: vec![] };
+fn build_upscale_pipeline(device: &Device) -> Result<RenderPipelineState, MetalBackendError> {
+    let mut shader_library = ShaderLibrary::new(device, SCENE_UPSCALE_MSL)
+        .map_err(MetalBackendError::ShaderCompilation)?;
+    let empty_layout = VertexLayout {
+        buffer_layouts: vec![],
+    };
     let layout_hash = empty_layout.hash_key();
 
     let key = PipelineKey {
@@ -2174,11 +2216,9 @@ fn build_upscale_pipeline(
         .clone())
 }
 
-fn build_sprite_pipeline(
-    device: &Device,
-) -> Result<RenderPipelineState, MetalBackendError> {
-    let mut shader_library =
-        ShaderLibrary::new(device, SCENE_SPRITE_MSL).map_err(MetalBackendError::ShaderCompilation)?;
+fn build_sprite_pipeline(device: &Device) -> Result<RenderPipelineState, MetalBackendError> {
+    let mut shader_library = ShaderLibrary::new(device, SCENE_SPRITE_MSL)
+        .map_err(MetalBackendError::ShaderCompilation)?;
     let layout = sprite_vertex_layout();
     let layout_hash = layout.hash_key();
 
@@ -2425,12 +2465,15 @@ mod tests {
                 _padding: 0,
             })
             .collect();
-        let primitive_ranges = Box::leak(vec![FramePrimitiveRange {
-            primitive_code: 0,
-            first_instance: 0,
-            instance_count: instance_count as u32,
-            flags: range_flags,
-        }].into_boxed_slice());
+        let primitive_ranges = Box::leak(
+            vec![FramePrimitiveRange {
+                primitive_code: 0,
+                first_instance: 0,
+                instance_count: instance_count as u32,
+                flags: range_flags,
+            }]
+            .into_boxed_slice(),
+        );
         let transforms = Box::leak(transforms.into_boxed_slice());
         RenderStateSnapshot {
             frame_id: 1,
@@ -2456,13 +2499,7 @@ mod tests {
     }
 
     fn dummy_snapshot_with_instances(instance_count: usize) -> RenderStateSnapshot<'static> {
-        dummy_snapshot(
-            instance_count,
-            [0.0, 0.0, 0.0],
-            0,
-            instance_count as u32,
-            0,
-        )
+        dummy_snapshot(instance_count, [0.0, 0.0, 0.0], 0, instance_count as u32, 0)
     }
 
     fn dummy_snapshot_with_translation(
@@ -2530,9 +2567,8 @@ mod tests {
         };
 
         let vertices: Vec<f32> = vec![
-            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
-            0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
         ];
         let indices: Vec<u32> = vec![0, 1, 2];
         let mesh = MeshSlot::new(backend.device(), &vertices, &indices, MTLIndexType::UInt32);
@@ -2566,9 +2602,8 @@ mod tests {
         };
 
         let vertices: Vec<f32> = vec![
-            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
-            0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
         ];
         let indices: Vec<u32> = vec![0, 1, 2];
         let mesh = MeshSlot::new(backend.device(), &vertices, &indices, MTLIndexType::UInt32);
@@ -2602,9 +2637,8 @@ mod tests {
         };
 
         let vertices: Vec<f32> = vec![
-            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
-            0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
         ];
         let indices: Vec<u32> = vec![0, 1, 2];
         let mesh = MeshSlot::new(backend.device(), &vertices, &indices, MTLIndexType::UInt32);
@@ -2636,9 +2670,8 @@ mod tests {
         };
 
         let vertices: Vec<f32> = vec![
-            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
-            0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
         ];
         let indices: Vec<u32> = vec![0, 1, 2];
         let mesh = MeshSlot::new(backend.device(), &vertices, &indices, MTLIndexType::UInt32);
@@ -2670,14 +2703,16 @@ mod tests {
             Err(err) => panic!("unexpected Metal backend init error: {err}"),
         };
 
-        let lights = Box::leak(vec![FrameLightRecord {
-            position_kind: [0.0, 4.0, 0.0, 1.0],
-            direction_inner: [0.0, -1.0, 0.0, 0.9],
-            color_intensity: [1.0, 0.9, 0.7, 8.0],
-            params: [32.0, 0.8, 0.35, 1.0],
-            shadow: [1.0, 0.0, 0.0, 0.0],
-        }]
-        .into_boxed_slice());
+        let lights = Box::leak(
+            vec![FrameLightRecord {
+                position_kind: [0.0, 4.0, 0.0, 1.0],
+                direction_inner: [0.0, -1.0, 0.0, 0.9],
+                color_intensity: [1.0, 0.9, 0.7, 8.0],
+                params: [32.0, 0.8, 0.35, 1.0],
+                shadow: [1.0, 0.0, 0.0, 0.0],
+            }]
+            .into_boxed_slice(),
+        );
         let snapshot = RenderStateSnapshot {
             frame_id: 1,
             camera_view_proj: [
@@ -2713,7 +2748,10 @@ mod tests {
         // light_view_proj[0] should be a non-zero matrix (spotlight projection
         // for a light looking down from y=4 with range=32).
         let vp = stored.light_view_proj[0];
-        assert!(vp.iter().flatten().any(|&v| v != 0.0), "shadow view-proj matrix should be non-zero");
+        assert!(
+            vp.iter().flatten().any(|&v| v != 0.0),
+            "shadow view-proj matrix should be non-zero"
+        );
     }
 
     #[test]
@@ -2735,22 +2773,23 @@ mod tests {
         };
 
         let vertices: Vec<f32> = vec![
-            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0,
-            0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0,
         ];
         let indices: Vec<u32> = vec![0, 1, 2];
         let mesh = MeshSlot::new(backend.device(), &vertices, &indices, MTLIndexType::UInt32);
         backend.bind_mesh_slot(0, mesh);
 
-        let lights = Box::leak(vec![FrameLightRecord {
-            position_kind: [0.0, 4.0, 0.0, 1.0],
-            direction_inner: [0.0, -1.0, 0.0, 0.9],
-            color_intensity: [1.0, 0.9, 0.7, 8.0],
-            params: [32.0, 0.8, 0.35, 1.0],
-            shadow: [1.0, 0.0, 0.0, 0.0],
-        }]
-        .into_boxed_slice());
+        let lights = Box::leak(
+            vec![FrameLightRecord {
+                position_kind: [0.0, 4.0, 0.0, 1.0],
+                direction_inner: [0.0, -1.0, 0.0, 0.9],
+                color_intensity: [1.0, 0.9, 0.7, 8.0],
+                params: [32.0, 0.8, 0.35, 1.0],
+                shadow: [1.0, 0.0, 0.0, 0.0],
+            }]
+            .into_boxed_slice(),
+        );
 
         let transforms: Vec<FrameInstanceTransform> = vec![FrameInstanceTransform {
             model: [
@@ -2765,12 +2804,15 @@ mod tests {
             flags: 0,
             _padding: 0,
         }];
-        let primitive_ranges = Box::leak(vec![FramePrimitiveRange {
-            primitive_code: 0,
-            first_instance: 0,
-            instance_count: 1,
-            flags: 0,
-        }].into_boxed_slice());
+        let primitive_ranges = Box::leak(
+            vec![FramePrimitiveRange {
+                primitive_code: 0,
+                first_instance: 0,
+                instance_count: 1,
+                flags: 0,
+            }]
+            .into_boxed_slice(),
+        );
         let transforms = Box::leak(transforms.into_boxed_slice());
         let snapshot = RenderStateSnapshot {
             frame_id: 1,

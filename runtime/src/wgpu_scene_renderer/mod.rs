@@ -22,13 +22,17 @@ use crate::upscaler::{resolve_fsr_status, FsrConfig, FsrStatus};
 const SPRITE_ATLAS_GRID_DIM: u32 = 16;
 const SPRITE_ATLAS_TILE_SIZE: u32 = 64;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const OIT_ACCUM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const OIT_REVEAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 pub const DEFAULT_MSAA_SAMPLE_COUNT: u32 = 4;
 /// Max shadow-casting lights that get their own shadow map each frame.
 const MAX_SHADOW_LIGHTS: usize = 4;
 /// Resolution of each shadow map (square). 1024 gives good quality for a flashlight at scene scale.
 const SHADOW_MAP_SIZE: u32 = 1024;
 // Hysteresis avoids rapid mesh-mode flapping when instance counts hover around thresholds.
+#[cfg(test)]
 const SPHERE_LOD_ENABLE_THRESHOLD: usize = 2_500;
+#[cfg(test)]
 const SPHERE_LOD_DISABLE_THRESHOLD: usize = 1_800;
 const RT_DYNAMIC_CAP: u32 = 16_384;
 const EXTERNAL_IMAGE_SLOT_BASE: u16 = 64;
@@ -49,7 +53,7 @@ struct GpuInstance3d {
     model_col3: [f32; 4],
     base_color: [f32; 4],
     material_params: [f32; 4],
-    emissive: [f32; 4],
+    emissive: [f32; 4], // rgb + shading_code
 }
 
 #[repr(C)]
@@ -164,6 +168,7 @@ struct GpuSpriteInstance {
 struct GpuBatchRange {
     lane: DrawLane,
     primitive_code: u8,
+    shading_code: u8,
     start: u32,
     count: u32,
 }
@@ -228,6 +233,7 @@ struct GpuMesh {
     index_format: wgpu::IndexFormat,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SphereLodMode {
     #[default]
@@ -244,17 +250,31 @@ pub struct WgpuSceneRenderer {
     light_buffer: wgpu::Buffer,
     lighting_buffer: wgpu::Buffer,
     pipeline_opaque: wgpu::RenderPipeline,
-    pipeline_transparent: wgpu::RenderPipeline,
+    pipeline_opaque_single: wgpu::RenderPipeline,
+    pipeline_transparent_oit: wgpu::RenderPipeline,
+    pipeline_overlay_single: wgpu::RenderPipeline,
     pipeline_sprite: wgpu::RenderPipeline,
+    pipeline_sprite_single: wgpu::RenderPipeline,
     pipeline_sprite_glow: wgpu::RenderPipeline,
+    pipeline_sprite_glow_single: wgpu::RenderPipeline,
     pipeline_sprite_overlay: wgpu::RenderPipeline,
     pipeline_upscale: wgpu::RenderPipeline,
+    pipeline_oit_composite: wgpu::RenderPipeline,
     msaa_sample_count: u32,
     // Stored to allow pipeline rebuild when MSAA count changes at runtime.
     pipeline_layout_3d: wgpu::PipelineLayout,
     _shader_3d: wgpu::ShaderModule,
+    _shader_3d_oit: wgpu::ShaderModule,
+    oit_bind_group_layout: wgpu::BindGroupLayout,
+    oit_bind_group: wgpu::BindGroup,
     pipeline_layout_sprite: wgpu::PipelineLayout,
     _shader_sprite: wgpu::ShaderModule,
+    _opaque_scene_texture: wgpu::Texture,
+    opaque_scene_view: wgpu::TextureView,
+    _oit_accum_texture: wgpu::Texture,
+    oit_accum_view: wgpu::TextureView,
+    _oit_reveal_texture: wgpu::Texture,
+    oit_reveal_view: wgpu::TextureView,
     _depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
     _msaa_color_texture: wgpu::Texture,
@@ -301,12 +321,17 @@ pub struct WgpuSceneRenderer {
     rt_tlas: Option<wgpu::Tlas>,
     /// Bind group layout for group 1 (RT-only pipelines): just the TLAS binding.
     _rt_tlas_bgl: Option<wgpu::BindGroupLayout>,
+    _rt_pipeline_layout_3d: Option<wgpu::PipelineLayout>,
+    _rt_shader_3d: Option<wgpu::ShaderModule>,
+    _rt_shader_3d_oit: Option<wgpu::ShaderModule>,
     /// Bind group for the TLAS (group 1 in RT 3D pipelines).
     rt_tlas_bg: Option<wgpu::BindGroup>,
     /// RT-enabled opaque 3D pipeline (uses scene_3d_rt.wgsl).
     pipeline_opaque_rt: Option<wgpu::RenderPipeline>,
-    /// RT-enabled transparent 3D pipeline.
-    pipeline_transparent_rt: Option<wgpu::RenderPipeline>,
+    /// RT-enabled opaque 3D pipeline for the single-sample/OIT path.
+    pipeline_opaque_rt_single: Option<wgpu::RenderPipeline>,
+    /// RT-enabled transparent OIT pipeline.
+    pipeline_transparent_rt_oit: Option<wgpu::RenderPipeline>,
     /// CPU-side instance list rebuilt every upload_draw_frame call; fed into the TLAS.
     rt_instances: Vec<RtInstance>,
     /// CPU-side AS build recording time for the last frame (microseconds).
@@ -546,6 +571,10 @@ impl WgpuSceneRenderer {
             label: Some("runtime-scene-3d-shader"),
             source: wgpu::ShaderSource::Wgsl(SCENE_3D_WGSL.into()),
         });
+        let shader_3d_oit = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("runtime-scene-3d-oit-shader"),
+            source: wgpu::ShaderSource::Wgsl(SCENE_3D_OIT_WGSL.into()),
+        });
         let shader_sprite = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("runtime-scene-sprite-shader"),
             source: wgpu::ShaderSource::Wgsl(SCENE_SPRITE_WGSL.into()),
@@ -557,6 +586,10 @@ impl WgpuSceneRenderer {
         let shader_upscale = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("runtime-scene-upscale-shader"),
             source: wgpu::ShaderSource::Wgsl(SCENE_UPSCALE_WGSL.into()),
+        });
+        let shader_oit_composite = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("runtime-scene-oit-composite-shader"),
+            source: wgpu::ShaderSource::Wgsl(SCENE_OIT_COMPOSITE_WGSL.into()),
         });
 
         let sprite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -611,6 +644,41 @@ impl WgpuSceneRenderer {
                 },
             ],
         });
+        let oit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("runtime-scene-oit-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
 
         let layout_3d = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("runtime-scene-3d-layout"),
@@ -625,6 +693,11 @@ impl WgpuSceneRenderer {
         let layout_upscale = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("runtime-scene-upscale-layout"),
             bind_group_layouts: &[&fsr_bgl],
+            immediate_size: 0,
+        });
+        let layout_oit_composite = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("runtime-scene-oit-composite-layout"),
+            bind_group_layouts: &[&oit_bgl],
             immediate_size: 0,
         });
         let layout_shadow = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -645,16 +718,30 @@ impl WgpuSceneRenderer {
             "runtime-scene-opaque-pipeline",
             msaa_sample_count,
         );
-        let pipeline_transparent = create_3d_pipeline(
+        let pipeline_opaque_single = create_3d_pipeline(
             device,
             &layout_3d,
             &shader_3d,
             color_format,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
+            Some(wgpu::BlendState::REPLACE),
+            true,
             Some(wgpu::Face::Back),
-            "runtime-scene-transparent-pipeline",
-            msaa_sample_count,
+            "runtime-scene-opaque-single-pipeline",
+            1,
+        );
+        let pipeline_transparent_oit = create_oit_3d_pipeline(
+            device,
+            &layout_3d,
+            &shader_3d_oit,
+            None,
+            "runtime-scene-transparent-oit-pipeline",
+        );
+        let pipeline_overlay_single = create_overlay_3d_pipeline(
+            device,
+            &layout_3d,
+            &shader_3d,
+            color_format,
+            "runtime-scene-overlay-single-pipeline",
         );
         let pipeline_sprite = create_sprite_pipeline(
             device,
@@ -663,6 +750,8 @@ impl WgpuSceneRenderer {
             color_format,
             msaa_sample_count,
         );
+        let pipeline_sprite_single =
+            create_sprite_pipeline(device, &layout_sprite, &shader_sprite, color_format, 1);
         let pipeline_sprite_glow = create_sprite_glow_pipeline(
             device,
             &layout_sprite,
@@ -670,10 +759,39 @@ impl WgpuSceneRenderer {
             color_format,
             msaa_sample_count,
         );
+        let pipeline_sprite_glow_single =
+            create_sprite_glow_pipeline(device, &layout_sprite, &shader_sprite, color_format, 1);
         let pipeline_sprite_overlay =
             create_sprite_overlay_pipeline(device, &layout_sprite, &shader_sprite, color_format);
         let pipeline_upscale =
             create_upscale_pipeline(device, &layout_upscale, &shader_upscale, color_format);
+        let pipeline_oit_composite = create_oit_composite_pipeline(
+            device,
+            &layout_oit_composite,
+            &shader_oit_composite,
+            color_format,
+        );
+        let (opaque_scene_texture, opaque_scene_view) = create_fsr_scene_resources(
+            device,
+            color_format,
+            surface_width.max(1),
+            surface_height.max(1),
+            "runtime-scene-opaque-source",
+        );
+        let (oit_accum_texture, oit_accum_view) = create_float_render_texture(
+            device,
+            OIT_ACCUM_FORMAT,
+            surface_width.max(1),
+            surface_height.max(1),
+            "runtime-scene-oit-accum",
+        );
+        let (oit_reveal_texture, oit_reveal_view) = create_float_render_texture(
+            device,
+            OIT_REVEAL_FORMAT,
+            surface_width.max(1),
+            surface_height.max(1),
+            "runtime-scene-oit-reveal",
+        );
         let (depth_texture, depth_view) = create_depth_resources(
             device,
             surface_width.max(1),
@@ -695,6 +813,24 @@ impl WgpuSceneRenderer {
             surface_height.max(1),
             "runtime-scene-fsr-source",
         );
+        let oit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("runtime-scene-oit-bg"),
+            layout: &oit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&opaque_scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&oit_accum_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&oit_reveal_view),
+                },
+            ],
+        });
         let fsr_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("runtime-scene-fsr-uniform-buffer"),
             size: std::mem::size_of::<GpuUpscaleUniform>() as u64,
@@ -772,20 +908,30 @@ impl WgpuSceneRenderer {
             rt_blas_sphere,
             rt_tlas,
             rt_tlas_bgl_opt,
+            rt_pipeline_layout_3d,
+            rt_shader_3d,
+            rt_shader_3d_oit,
             rt_tlas_bg,
             pipeline_opaque_rt,
-            pipeline_transparent_rt,
+            pipeline_opaque_rt_single,
+            pipeline_transparent_rt_oit,
         ) = match rt_infra {
             Some(r) => (
                 Some(r.blas_box),
                 Some(r.blas_sphere),
                 Some(r.tlas),
                 Some(r.tlas_bgl),
+                Some(r.pipeline_layout_3d_rt),
+                Some(r.shader_3d_rt),
+                Some(r.shader_3d_rt_oit),
                 Some(r.tlas_bg),
                 Some(r.pipeline_opaque_rt),
-                Some(r.pipeline_transparent_rt),
+                Some(r.pipeline_opaque_rt_single),
+                Some(r.pipeline_transparent_rt_oit),
             ),
-            None => (None, None, None, None, None, None, None),
+            None => (
+                None, None, None, None, None, None, None, None, None, None, None,
+            ),
         };
 
         let renderer = Self {
@@ -798,14 +944,28 @@ impl WgpuSceneRenderer {
             msaa_sample_count,
             pipeline_layout_3d: layout_3d,
             _shader_3d: shader_3d,
+            _shader_3d_oit: shader_3d_oit,
+            oit_bind_group_layout: oit_bgl,
+            oit_bind_group,
             pipeline_layout_sprite: layout_sprite,
             _shader_sprite: shader_sprite,
             pipeline_opaque,
-            pipeline_transparent,
+            pipeline_opaque_single,
+            pipeline_transparent_oit,
+            pipeline_overlay_single,
             pipeline_sprite,
+            pipeline_sprite_single,
             pipeline_sprite_glow,
+            pipeline_sprite_glow_single,
             pipeline_sprite_overlay,
             pipeline_upscale,
+            pipeline_oit_composite,
+            _opaque_scene_texture: opaque_scene_texture,
+            opaque_scene_view,
+            _oit_accum_texture: oit_accum_texture,
+            oit_accum_view,
+            _oit_reveal_texture: oit_reveal_texture,
+            oit_reveal_view,
             _depth_texture: depth_texture,
             depth_view,
             _msaa_color_texture: msaa_color_texture,
@@ -850,9 +1010,13 @@ impl WgpuSceneRenderer {
             rt_blas_sphere,
             rt_tlas,
             _rt_tlas_bgl: rt_tlas_bgl_opt,
+            _rt_pipeline_layout_3d: rt_pipeline_layout_3d,
+            _rt_shader_3d: rt_shader_3d,
+            _rt_shader_3d_oit: rt_shader_3d_oit,
             rt_tlas_bg,
             pipeline_opaque_rt,
-            pipeline_transparent_rt,
+            pipeline_opaque_rt_single,
+            pipeline_transparent_rt_oit,
             rt_instances: Vec::new(),
             fsr_config: FsrConfig::default(),
             fsr_status: resolve_fsr_status(FsrConfig::default(), adapter_backend),
@@ -879,6 +1043,33 @@ impl WgpuSceneRenderer {
         self.surface_width = width.max(1);
         self.surface_height = height.max(1);
         self.write_camera_uniform(queue, self.surface_width, self.surface_height);
+        let (opaque_scene_texture, opaque_scene_view) = create_fsr_scene_resources(
+            device,
+            self.surface_color_format,
+            self.surface_width,
+            self.surface_height,
+            "runtime-scene-opaque-source",
+        );
+        self._opaque_scene_texture = opaque_scene_texture;
+        self.opaque_scene_view = opaque_scene_view;
+        let (oit_accum_texture, oit_accum_view) = create_float_render_texture(
+            device,
+            OIT_ACCUM_FORMAT,
+            self.surface_width,
+            self.surface_height,
+            "runtime-scene-oit-accum",
+        );
+        self._oit_accum_texture = oit_accum_texture;
+        self.oit_accum_view = oit_accum_view;
+        let (oit_reveal_texture, oit_reveal_view) = create_float_render_texture(
+            device,
+            OIT_REVEAL_FORMAT,
+            self.surface_width,
+            self.surface_height,
+            "runtime-scene-oit-reveal",
+        );
+        self._oit_reveal_texture = oit_reveal_texture;
+        self.oit_reveal_view = oit_reveal_view;
         let (depth_texture, depth_view) = create_depth_resources(
             device,
             self.surface_width,
@@ -907,6 +1098,24 @@ impl WgpuSceneRenderer {
         );
         self._fsr_scene_texture = fsr_scene_texture;
         self.fsr_scene_view = fsr_scene_view;
+        self.oit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("runtime-scene-oit-bg"),
+            layout: &self.oit_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.opaque_scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.oit_accum_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.oit_reveal_view),
+                },
+            ],
+        });
         self.fsr_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("runtime-scene-fsr-bg"),
             layout: &self.fsr_bind_group_layout,
@@ -932,7 +1141,7 @@ impl WgpuSceneRenderer {
         self.msaa_sample_count
     }
 
-    /// Change MSAA sample count at runtime. Rebuilds MSAA textures and the four affected pipelines.
+    /// Change MSAA sample count at runtime. Rebuilds MSAA textures and the affected MSAA pipelines.
     /// Valid values: 1 (off), 2, or 4. Other values are clamped to the nearest supported count.
     pub fn set_msaa_sample_count(&mut self, device: &wgpu::Device, count: u32) {
         let count = match count {
@@ -966,17 +1175,6 @@ impl WgpuSceneRenderer {
             "runtime-scene-opaque-pipeline",
             count,
         );
-        self.pipeline_transparent = create_3d_pipeline(
-            device,
-            &self.pipeline_layout_3d,
-            &self._shader_3d,
-            self.surface_color_format,
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-            false,
-            Some(wgpu::Face::Back),
-            "runtime-scene-transparent-pipeline",
-            count,
-        );
         self.pipeline_sprite = create_sprite_pipeline(
             device,
             &self.pipeline_layout_sprite,
@@ -991,6 +1189,22 @@ impl WgpuSceneRenderer {
             self.surface_color_format,
             count,
         );
+        if let (Some(layout), Some(shader)) = (
+            self._rt_pipeline_layout_3d.as_ref(),
+            self._rt_shader_3d.as_ref(),
+        ) {
+            self.pipeline_opaque_rt = Some(create_3d_pipeline(
+                device,
+                layout,
+                shader,
+                self.surface_color_format,
+                Some(wgpu::BlendState::REPLACE),
+                true,
+                Some(wgpu::Face::Back),
+                "runtime-scene-opaque-rt-pipeline",
+                count,
+            ));
+        }
     }
 
     /// Overrides the active camera transform used by scene rendering.
@@ -1057,6 +1271,12 @@ impl WgpuSceneRenderer {
             create_icosa_sphere_mesh(device)
         };
         self.custom_mesh_slots.insert(slot, mesh);
+    }
+
+    /// Bind a built-in unit panel mesh (XY quad, centered at origin) into a runtime slot.
+    pub fn bind_builtin_panel_mesh_slot(&mut self, device: &wgpu::Device, slot: u8) {
+        self.custom_mesh_slots
+            .insert(slot, create_panel_mesh(device));
     }
 
     /// Bind a 2D sprite source (`.png` / `.svg`) into one atlas slot.
@@ -1184,27 +1404,7 @@ impl WgpuSceneRenderer {
         // Build CPU-side RT instance list for TLAS population this frame.
         if self.ray_tracing_status.active && self.rt_tlas.is_some() {
             let cap = self.ray_tracing_status.rt_dynamic_cap as usize;
-            self.rt_instances.clear();
-            'outer: for batch in &draw.opaque_batches {
-                let blas_kind = match batch.key.primitive_code {
-                    1 => RtBlasKind::Box,
-                    _ => RtBlasKind::Sphere, // Sphere proxy for built-in + custom meshes.
-                };
-                for instance in &batch.instances {
-                    if self.rt_instances.len() >= cap {
-                        break 'outer;
-                    }
-                    self.rt_instances.push(RtInstance {
-                        transform: col_major_4x4_to_row_major_3x4(
-                            instance.model_cols[0],
-                            instance.model_cols[1],
-                            instance.model_cols[2],
-                            instance.model_cols[3],
-                        ),
-                        blas_kind,
-                    });
-                }
-            }
+            self.rt_instances = collect_rt_instances(draw, cap);
         } else {
             self.rt_instances.clear();
         }
@@ -1214,14 +1414,9 @@ impl WgpuSceneRenderer {
             draw.lights.as_slice(),
             draw.stats.opaque_instances + draw.stats.transparent_instances,
         );
-        if self.force_full_fbx_sphere {
-            self.sphere_lod_mode = SphereLodMode::High;
-        } else {
-            self.sphere_lod_mode = select_sphere_lod_mode(
-                self.sphere_lod_mode,
-                count_sphere_instances(self.ranges.as_slice()),
-            );
-        }
+        // Keep sphere quality stable even under heavy load; TLApp relies on balls staying
+        // visually round instead of silently stepping down to a coarse proxy mesh.
+        self.sphere_lod_mode = SphereLodMode::High;
 
         let opaque_draw_calls = self
             .ranges
@@ -1264,7 +1459,8 @@ impl WgpuSceneRenderer {
         // Budget guard: if last frame exceeded the 2ms AS build budget, skip this frame
         // and keep using the stale TLAS.
         if self.rt_budget_exceeded {
-            self.ray_tracing_status.fallback_reason = "stale_tlas: as build budget exceeded last frame".to_string();
+            self.ray_tracing_status.fallback_reason =
+                "stale_tlas: as build budget exceeded last frame".to_string();
             self.last_rt_build_us = 0;
             return;
         }
@@ -1307,12 +1503,19 @@ impl WgpuSceneRenderer {
         const AS_BUILD_BUDGET_US: u64 = 2000;
         if elapsed_us > AS_BUILD_BUDGET_US {
             self.rt_budget_exceeded = true;
-            self.ray_tracing_status.fallback_reason =
-                format!("budget_exceeded: as build took {elapsed_us}us (budget {AS_BUILD_BUDGET_US}us)");
+            self.ray_tracing_status.fallback_reason = format!(
+                "budget_exceeded: as build took {elapsed_us}us (budget {AS_BUILD_BUDGET_US}us)"
+            );
         } else {
             self.rt_budget_exceeded = false;
-            if self.ray_tracing_status.fallback_reason.starts_with("budget_exceeded")
-                || self.ray_tracing_status.fallback_reason.starts_with("stale_tlas")
+            if self
+                .ray_tracing_status
+                .fallback_reason
+                .starts_with("budget_exceeded")
+                || self
+                    .ray_tracing_status
+                    .fallback_reason
+                    .starts_with("stale_tlas")
             {
                 self.ray_tracing_status.fallback_reason.clear();
             }
@@ -1461,118 +1664,313 @@ impl WgpuSceneRenderer {
         } else {
             target
         };
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("runtime-scene-pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.msaa_color_view,
-                depth_slice: None,
-                resolve_target: Some(scene_target),
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(clear),
-                    store: wgpu::StoreOp::Discard,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &self.msaa_depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Discard,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        if fsr_scene_active {
-            pass.set_viewport(
-                0.0,
-                0.0,
-                source_width as f32,
-                source_height as f32,
-                0.0,
-                1.0,
-            );
-            pass.set_scissor_rect(0, 0, source_width, source_height);
-        }
-
-        if !self.ranges.is_empty() {
-            pass.set_bind_group(0, &self.scene_bind_group, &[]);
-
-            // Select RT vs standard pipelines; bind the TLAS as group 1 when RT is active.
-            let rt_active = self.ray_tracing_status.active
-                && self.pipeline_opaque_rt.is_some()
-                && self.rt_tlas_bg.is_some();
-
-            if rt_active {
-                pass.set_bind_group(1, self.rt_tlas_bg.as_ref().unwrap(), &[]);
-            }
-
-            let pipeline_opaque = if rt_active {
-                self.pipeline_opaque_rt.as_ref().unwrap()
+        let has_transparent = self
+            .ranges
+            .iter()
+            .any(|range| range.lane == DrawLane::Transparent);
+        let rt_active = self.ray_tracing_status.active
+            && self.rt_tlas_bg.is_some()
+            && if has_transparent {
+                self.pipeline_opaque_rt_single.is_some()
+                    && self.pipeline_transparent_rt_oit.is_some()
             } else {
-                &self.pipeline_opaque
-            };
-            let pipeline_transparent = if rt_active {
-                self.pipeline_transparent_rt.as_ref().unwrap()
-            } else {
-                &self.pipeline_transparent
+                self.pipeline_opaque_rt.is_some()
             };
 
-            pass.set_pipeline(pipeline_opaque);
-            for range in self.ranges.iter().filter(|r| r.lane == DrawLane::Opaque) {
-                draw_3d_range(
-                    &mut pass,
-                    &self.box_mesh,
-                    &self.sphere_mesh_high,
-                    &self.sphere_mesh_low,
-                    &self.custom_mesh_slots,
-                    self.sphere_lod_mode,
-                    &self.instance_3d_buffer,
-                    range,
-                );
-            }
-
-            pass.set_pipeline(pipeline_transparent);
-            for range in self
-                .ranges
-                .iter()
-                .filter(|r| r.lane == DrawLane::Transparent)
+        if has_transparent {
             {
-                draw_3d_range(
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("runtime-scene-opaque-single-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.opaque_scene_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                apply_scene_viewport(&mut pass, source_width, source_height, fsr_scene_active);
+                if !self.ranges.is_empty() {
+                    pass.set_bind_group(0, &self.scene_bind_group, &[]);
+                    if rt_active {
+                        pass.set_bind_group(1, self.rt_tlas_bg.as_ref().unwrap(), &[]);
+                        pass.set_pipeline(self.pipeline_opaque_rt_single.as_ref().unwrap());
+                    } else {
+                        pass.set_pipeline(&self.pipeline_opaque_single);
+                    }
+                    draw_lane_ranges(
+                        &mut pass,
+                        self.ranges.as_slice(),
+                        DrawLane::Opaque,
+                        &self.box_mesh,
+                        &self.sphere_mesh_high,
+                        &self.sphere_mesh_low,
+                        &self.custom_mesh_slots,
+                        self.sphere_lod_mode,
+                        &self.instance_3d_buffer,
+                    );
+                }
+            }
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("runtime-scene-transparent-oit-pass"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.oit_accum_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.oit_reveal_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 1.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 0.0,
+                                }),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                    ],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                apply_scene_viewport(&mut pass, source_width, source_height, fsr_scene_active);
+                pass.set_bind_group(0, &self.scene_bind_group, &[]);
+                if rt_active {
+                    pass.set_bind_group(1, self.rt_tlas_bg.as_ref().unwrap(), &[]);
+                    pass.set_pipeline(self.pipeline_transparent_rt_oit.as_ref().unwrap());
+                } else {
+                    pass.set_pipeline(&self.pipeline_transparent_oit);
+                }
+                draw_lane_ranges(
                     &mut pass,
+                    self.ranges.as_slice(),
+                    DrawLane::Transparent,
                     &self.box_mesh,
                     &self.sphere_mesh_high,
                     &self.sphere_mesh_low,
                     &self.custom_mesh_slots,
                     self.sphere_lod_mode,
                     &self.instance_3d_buffer,
-                    range,
                 );
             }
-        }
 
-        if self.sprite_count > 0 || self.glow_sprite_count > 0 {
-            pass.set_bind_group(0, &self.sprite_atlas_bind_group, &[]);
-            pass.set_bind_group(1, &self.scene_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.sprite_vertex_buffer.slice(..));
-            let total_sprite_bytes = ((self.sprite_count + self.glow_sprite_count) as usize
-                * std::mem::size_of::<GpuSpriteInstance>())
-                as u64;
-            pass.set_vertex_buffer(1, self.sprite_instance_buffer.slice(0..total_sprite_bytes));
-
-            if self.sprite_count > 0 {
-                pass.set_pipeline(&self.pipeline_sprite);
-                pass.draw(0..6, 0..self.sprite_count);
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("runtime-scene-oit-composite-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: scene_target,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                apply_scene_viewport(&mut pass, source_width, source_height, fsr_scene_active);
+                pass.set_pipeline(&self.pipeline_oit_composite);
+                pass.set_bind_group(0, &self.oit_bind_group, &[]);
+                pass.draw(0..3, 0..1);
             }
 
-            if self.glow_sprite_count > 0 {
-                pass.set_pipeline(&self.pipeline_sprite_glow);
-                let glow_end = self.glow_sprite_start + self.glow_sprite_count;
-                pass.draw(0..6, self.glow_sprite_start..glow_end);
+            if self.ranges.iter().any(is_overlay_box_range) {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("runtime-scene-overlay-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: scene_target,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                apply_scene_viewport(&mut pass, source_width, source_height, fsr_scene_active);
+                pass.set_bind_group(0, &self.scene_bind_group, &[]);
+                pass.set_pipeline(&self.pipeline_overlay_single);
+                draw_overlay_box_ranges(
+                    &mut pass,
+                    self.ranges.as_slice(),
+                    &self.box_mesh,
+                    &self.sphere_mesh_high,
+                    &self.sphere_mesh_low,
+                    &self.custom_mesh_slots,
+                    self.sphere_lod_mode,
+                    &self.instance_3d_buffer,
+                );
             }
+
+            if self.sprite_count > 0 || self.glow_sprite_count > 0 {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("runtime-scene-sprite-single-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: scene_target,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                apply_scene_viewport(&mut pass, source_width, source_height, fsr_scene_active);
+                draw_scene_sprites(
+                    &mut pass,
+                    &self.sprite_atlas_bind_group,
+                    &self.scene_bind_group,
+                    &self.sprite_vertex_buffer,
+                    &self.sprite_instance_buffer,
+                    self.sprite_count,
+                    self.glow_sprite_start,
+                    self.glow_sprite_count,
+                    &self.pipeline_sprite_single,
+                    &self.pipeline_sprite_glow_single,
+                );
+            }
+        } else {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("runtime-scene-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.msaa_color_view,
+                    depth_slice: None,
+                    resolve_target: Some(scene_target),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Discard,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.msaa_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            apply_scene_viewport(&mut pass, source_width, source_height, fsr_scene_active);
+
+            if !self.ranges.is_empty() {
+                pass.set_bind_group(0, &self.scene_bind_group, &[]);
+                if rt_active {
+                    pass.set_bind_group(1, self.rt_tlas_bg.as_ref().unwrap(), &[]);
+                    pass.set_pipeline(self.pipeline_opaque_rt.as_ref().unwrap());
+                } else {
+                    pass.set_pipeline(&self.pipeline_opaque);
+                }
+                draw_lane_ranges(
+                    &mut pass,
+                    self.ranges.as_slice(),
+                    DrawLane::Opaque,
+                    &self.box_mesh,
+                    &self.sphere_mesh_high,
+                    &self.sphere_mesh_low,
+                    &self.custom_mesh_slots,
+                    self.sphere_lod_mode,
+                    &self.instance_3d_buffer,
+                );
+            }
+
+            draw_scene_sprites(
+                &mut pass,
+                &self.sprite_atlas_bind_group,
+                &self.scene_bind_group,
+                &self.sprite_vertex_buffer,
+                &self.sprite_instance_buffer,
+                self.sprite_count,
+                self.glow_sprite_start,
+                self.glow_sprite_count,
+                &self.pipeline_sprite,
+                &self.pipeline_sprite_glow,
+            );
         }
-        drop(pass);
+
+        if !has_transparent && self.ranges.iter().any(is_overlay_box_range) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("runtime-scene-overlay-msaa-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: scene_target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            apply_scene_viewport(&mut pass, source_width, source_height, fsr_scene_active);
+            pass.set_bind_group(0, &self.scene_bind_group, &[]);
+            pass.set_pipeline(&self.pipeline_overlay_single);
+            draw_overlay_box_ranges(
+                &mut pass,
+                self.ranges.as_slice(),
+                &self.box_mesh,
+                &self.sphere_mesh_high,
+                &self.sphere_mesh_low,
+                &self.custom_mesh_slots,
+                self.sphere_lod_mode,
+                &self.instance_3d_buffer,
+            );
+        }
 
         if fsr_scene_active {
             let mut upscale = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1705,31 +2103,17 @@ impl WgpuSceneRenderer {
         dynamic_instances: usize,
     ) {
         let selected = lights.len().min(MAX_SCENE_LIGHTS);
-        // First pass: assign shadow map slots to shadow-casting spot lights.
-        let mut shadow_slots = vec![-1i32; selected];
-        let mut shadow_uniform = GpuShadowUniform::default();
-        let mut slot = 0usize;
-        for (i, light) in lights.iter().take(selected).enumerate() {
-            if light.casts_shadow
-                && matches!(light.kind, SceneLightKind::Spot)
-                && slot < MAX_SHADOW_LIGHTS
-            {
-                shadow_slots[i] = slot as i32;
-                shadow_uniform.shadow_light_indices[slot] = i as i32;
-                shadow_uniform.light_view_proj[slot] = compute_spotlight_view_proj(light);
-                // Upload per-slot pass uniform so the shadow depth pass VS has the matrix.
-                queue.write_buffer(
-                    &self.shadow_pass_buffers[slot],
-                    0,
-                    bytemuck::bytes_of(&GpuShadowPassUniform {
-                        light_view_proj: shadow_uniform.light_view_proj[slot],
-                    }),
-                );
-                slot += 1;
-            }
+        let (shadow_slots, shadow_uniform) = select_shadow_slots(lights, selected);
+        for slot in 0..shadow_uniform.shadow_count as usize {
+            queue.write_buffer(
+                &self.shadow_pass_buffers[slot],
+                0,
+                bytemuck::bytes_of(&GpuShadowPassUniform {
+                    light_view_proj: shadow_uniform.light_view_proj[slot],
+                }),
+            );
         }
-        shadow_uniform.shadow_count = slot as u32;
-        self.shadow_active_count = slot as u32;
+        self.shadow_active_count = shadow_uniform.shadow_count;
 
         queue.write_buffer(
             &self.shadow_uniform_buffer,
@@ -1831,7 +2215,7 @@ fn build_upload_plan(draw: &RuntimeDrawFrame) -> UploadPlan {
                     instance.emissive_rgb[0],
                     instance.emissive_rgb[1],
                     instance.emissive_rgb[2],
-                    0.0,
+                    batch.key.shading_code as f32,
                 ],
             });
         }
@@ -1840,6 +2224,7 @@ fn build_upload_plan(draw: &RuntimeDrawFrame) -> UploadPlan {
             plan.ranges.push(GpuBatchRange {
                 lane: DrawLane::Opaque,
                 primitive_code: batch.key.primitive_code,
+                shading_code: batch.key.shading_code,
                 start,
                 count,
             });
@@ -1860,7 +2245,7 @@ fn build_upload_plan(draw: &RuntimeDrawFrame) -> UploadPlan {
                     instance.emissive_rgb[0],
                     instance.emissive_rgb[1],
                     instance.emissive_rgb[2],
-                    0.0,
+                    batch.key.shading_code as f32,
                 ],
             });
         }
@@ -1869,6 +2254,7 @@ fn build_upload_plan(draw: &RuntimeDrawFrame) -> UploadPlan {
             plan.ranges.push(GpuBatchRange {
                 lane: DrawLane::Transparent,
                 primitive_code: batch.key.primitive_code,
+                shading_code: batch.key.shading_code,
                 start,
                 count,
             });
@@ -1904,6 +2290,164 @@ fn build_upload_plan(draw: &RuntimeDrawFrame) -> UploadPlan {
     plan
 }
 
+fn collect_rt_instances(draw: &RuntimeDrawFrame, cap: usize) -> Vec<RtInstance> {
+    let mut rt_instances = Vec::with_capacity(draw.stats.opaque_instances.min(cap.max(1)));
+    'outer: for batch in &draw.opaque_batches {
+        let blas_kind = match batch.key.primitive_code {
+            1 => RtBlasKind::Box,
+            _ => RtBlasKind::Sphere,
+        };
+        for instance in &batch.instances {
+            if rt_instances.len() >= cap {
+                break 'outer;
+            }
+            rt_instances.push(RtInstance {
+                transform: col_major_4x4_to_row_major_3x4(
+                    instance.model_cols[0],
+                    instance.model_cols[1],
+                    instance.model_cols[2],
+                    instance.model_cols[3],
+                ),
+                blas_kind,
+            });
+        }
+    }
+    rt_instances
+}
+
+fn select_shadow_slots(
+    lights: &[SceneLight],
+    selected: usize,
+) -> ([i32; MAX_SCENE_LIGHTS], GpuShadowUniform) {
+    let mut shadow_slots = [-1; MAX_SCENE_LIGHTS];
+    let mut shadow_uniform = GpuShadowUniform::default();
+    let mut slot = 0usize;
+    for (index, light) in lights.iter().take(selected).enumerate() {
+        if light.casts_shadow
+            && matches!(light.kind, SceneLightKind::Spot)
+            && slot < MAX_SHADOW_LIGHTS
+        {
+            shadow_slots[index] = slot as i32;
+            shadow_uniform.shadow_light_indices[slot] = index as i32;
+            shadow_uniform.light_view_proj[slot] = compute_spotlight_view_proj(light);
+            slot += 1;
+        }
+    }
+    shadow_uniform.shadow_count = slot as u32;
+    (shadow_slots, shadow_uniform)
+}
+
+fn apply_scene_viewport(
+    pass: &mut wgpu::RenderPass<'_>,
+    source_width: u32,
+    source_height: u32,
+    clipped: bool,
+) {
+    if !clipped {
+        return;
+    }
+    pass.set_viewport(
+        0.0,
+        0.0,
+        source_width as f32,
+        source_height as f32,
+        0.0,
+        1.0,
+    );
+    pass.set_scissor_rect(0, 0, source_width, source_height);
+}
+
+fn draw_lane_ranges(
+    pass: &mut wgpu::RenderPass<'_>,
+    ranges: &[GpuBatchRange],
+    lane: DrawLane,
+    box_mesh: &GpuMesh,
+    sphere_mesh_high: &GpuMesh,
+    sphere_mesh_low: &GpuMesh,
+    custom_mesh_slots: &BTreeMap<u8, GpuMesh>,
+    sphere_lod_mode: SphereLodMode,
+    instance_buffer: &wgpu::Buffer,
+) {
+    for range in ranges
+        .iter()
+        .filter(|range| range.lane == lane && !is_overlay_box_range(range))
+    {
+        draw_3d_range(
+            pass,
+            box_mesh,
+            sphere_mesh_high,
+            sphere_mesh_low,
+            custom_mesh_slots,
+            sphere_lod_mode,
+            instance_buffer,
+            range,
+        );
+    }
+}
+
+fn draw_overlay_box_ranges(
+    pass: &mut wgpu::RenderPass<'_>,
+    ranges: &[GpuBatchRange],
+    box_mesh: &GpuMesh,
+    sphere_mesh_high: &GpuMesh,
+    sphere_mesh_low: &GpuMesh,
+    custom_mesh_slots: &BTreeMap<u8, GpuMesh>,
+    sphere_lod_mode: SphereLodMode,
+    instance_buffer: &wgpu::Buffer,
+) {
+    for range in ranges.iter().filter(|range| is_overlay_box_range(range)) {
+        draw_3d_range(
+            pass,
+            box_mesh,
+            sphere_mesh_high,
+            sphere_mesh_low,
+            custom_mesh_slots,
+            sphere_lod_mode,
+            instance_buffer,
+            range,
+        );
+    }
+}
+
+#[inline]
+fn is_overlay_box_range(range: &GpuBatchRange) -> bool {
+    range.lane == DrawLane::Opaque && range.primitive_code == 1 && range.shading_code == 1
+}
+
+fn draw_scene_sprites(
+    pass: &mut wgpu::RenderPass<'_>,
+    sprite_atlas_bind_group: &wgpu::BindGroup,
+    scene_bind_group: &wgpu::BindGroup,
+    sprite_vertex_buffer: &wgpu::Buffer,
+    sprite_instance_buffer: &wgpu::Buffer,
+    sprite_count: u32,
+    glow_sprite_start: u32,
+    glow_sprite_count: u32,
+    sprite_pipeline: &wgpu::RenderPipeline,
+    glow_pipeline: &wgpu::RenderPipeline,
+) {
+    if sprite_count == 0 && glow_sprite_count == 0 {
+        return;
+    }
+    pass.set_bind_group(0, sprite_atlas_bind_group, &[]);
+    pass.set_bind_group(1, scene_bind_group, &[]);
+    pass.set_vertex_buffer(0, sprite_vertex_buffer.slice(..));
+    let total_sprite_bytes = ((sprite_count + glow_sprite_count) as usize
+        * std::mem::size_of::<GpuSpriteInstance>()) as u64;
+    pass.set_vertex_buffer(1, sprite_instance_buffer.slice(0..total_sprite_bytes));
+
+    if sprite_count > 0 {
+        pass.set_pipeline(sprite_pipeline);
+        pass.draw(0..6, 0..sprite_count);
+    }
+
+    if glow_sprite_count > 0 {
+        pass.set_pipeline(glow_pipeline);
+        let glow_end = glow_sprite_start + glow_sprite_count;
+        pass.draw(0..6, glow_sprite_start..glow_end);
+    }
+}
+
 fn draw_3d_range(
     pass: &mut wgpu::RenderPass<'_>,
     box_mesh: &GpuMesh,
@@ -1934,6 +2478,7 @@ fn draw_3d_range(
     pass.draw_indexed(0..mesh.index_count, 0, 0..range.count);
 }
 
+#[cfg(test)]
 fn count_sphere_instances(ranges: &[GpuBatchRange]) -> usize {
     ranges
         .iter()
@@ -1942,6 +2487,7 @@ fn count_sphere_instances(ranges: &[GpuBatchRange]) -> usize {
         .sum()
 }
 
+#[cfg(test)]
 fn select_sphere_lod_mode(current: SphereLodMode, sphere_instances: usize) -> SphereLodMode {
     match current {
         SphereLodMode::High => {
@@ -2161,6 +2707,157 @@ fn create_3d_pipeline(
             count: sample_count,
             ..Default::default()
         },
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_oit_3d_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    cull_mode: Option<wgpu::Face>,
+    label: &str,
+) -> wgpu::RenderPipeline {
+    const ADDITIVE: wgpu::BlendState = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+    const REVEALAGE: wgpu::BlendState = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::OneMinusSrc,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::OneMinusSrc,
+            operation: wgpu::BlendOperation::Add,
+        },
+    };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuVertex3d>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                },
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuInstance3d>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        1 => Float32x4,
+                        2 => Float32x4,
+                        3 => Float32x4,
+                        4 => Float32x4,
+                        5 => Float32x4,
+                        6 => Float32x4,
+                        7 => Float32x4
+                    ],
+                },
+            ],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[
+                Some(wgpu::ColorTargetState {
+                    format: OIT_ACCUM_FORMAT,
+                    blend: Some(ADDITIVE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                }),
+                Some(wgpu::ColorTargetState {
+                    format: OIT_REVEAL_FORMAT,
+                    blend: Some(REVEALAGE),
+                    write_mask: wgpu::ColorWrites::RED,
+                }),
+            ],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_overlay_3d_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    color_format: wgpu::TextureFormat,
+    label: &str,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuVertex3d>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                },
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuInstance3d>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        1 => Float32x4,
+                        2 => Float32x4,
+                        3 => Float32x4,
+                        4 => Float32x4,
+                        5 => Float32x4,
+                        6 => Float32x4,
+                        7 => Float32x4
+                    ],
+                },
+            ],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
     })
@@ -2395,6 +3092,42 @@ fn create_upscale_pipeline(
     })
 }
 
+fn create_oit_composite_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    color_format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("runtime-scene-oit-composite-pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 #[inline]
 fn sprite_kind_code(kind: SpriteKind) -> u32 {
     match kind {
@@ -2476,6 +3209,27 @@ fn create_box_mesh(device: &wgpu::Device) -> GpuMesh {
     create_mesh_u16(device, "runtime-scene-box", &vertices, &indices)
 }
 
+fn create_panel_mesh(device: &wgpu::Device) -> GpuMesh {
+    let vertices = [
+        GpuVertex3d {
+            position: [-0.5, -0.5, 0.0],
+        },
+        GpuVertex3d {
+            position: [0.5, -0.5, 0.0],
+        },
+        GpuVertex3d {
+            position: [0.5, 0.5, 0.0],
+        },
+        GpuVertex3d {
+            position: [-0.5, 0.5, 0.0],
+        },
+    ];
+    // Duplicate the quad winding so wall panels remain visible when they
+    // temporarily travel through opaque/proxy paths with back-face culling.
+    let indices: [u16; 12] = [0, 1, 2, 2, 3, 0, 2, 1, 0, 0, 3, 2];
+    create_mesh_u16(device, "runtime-scene-panel", &vertices, &indices)
+}
+
 fn create_sphere_mesh(device: &wgpu::Device) -> GpuMesh {
     match fbx_mesh::parse_first_mesh_from_fbx(fbx_mesh::DEFAULT_SPHERE_FBX_BYTES) {
         Ok(mesh_data) => {
@@ -2484,37 +3238,15 @@ fn create_sphere_mesh(device: &wgpu::Device) -> GpuMesh {
                 .into_iter()
                 .map(|p| GpuVertex3d { position: p })
                 .collect();
-            create_mesh_u32(device, "runtime-scene-sphere-fbx", &vertices, &mesh_data.indices)
+            create_mesh_u32(
+                device,
+                "runtime-scene-sphere-fbx",
+                &vertices,
+                &mesh_data.indices,
+            )
         }
-        Err(_) => create_octa_sphere_mesh(device),
+        Err(_) => create_icosa_sphere_mesh(device),
     }
-}
-
-fn create_octa_sphere_mesh(device: &wgpu::Device) -> GpuMesh {
-    let vertices = [
-        GpuVertex3d {
-            position: [1.0, 0.0, 0.0],
-        },
-        GpuVertex3d {
-            position: [-1.0, 0.0, 0.0],
-        },
-        GpuVertex3d {
-            position: [0.0, 1.0, 0.0],
-        },
-        GpuVertex3d {
-            position: [0.0, -1.0, 0.0],
-        },
-        GpuVertex3d {
-            position: [0.0, 0.0, 1.0],
-        },
-        GpuVertex3d {
-            position: [0.0, 0.0, -1.0],
-        },
-    ];
-    let indices: [u16; 24] = [
-        0, 2, 4, 4, 2, 1, 1, 2, 5, 5, 2, 0, 4, 3, 0, 1, 3, 4, 5, 3, 1, 0, 3, 5,
-    ];
-    create_mesh_u16(device, "runtime-scene-sphere", &vertices, &indices)
 }
 
 fn create_icosa_sphere_mesh(device: &wgpu::Device) -> GpuMesh {
@@ -2693,6 +3425,31 @@ fn create_fsr_scene_resources(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: color_format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+fn create_float_render_texture(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    label: &str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
@@ -2924,11 +3681,17 @@ fn atlas_ascii_glyph_rgba(slot: u16, px: u32, py: u32, tile: u32) -> Option<[u8;
 
 const SCENE_3D_WGSL: &str = include_str!("scene_3d.wgsl");
 
+const SCENE_3D_OIT_WGSL: &str = include_str!("scene_3d_oit.wgsl");
+
 const SCENE_3D_RT_WGSL: &str = include_str!("scene_3d_rt.wgsl");
+
+const SCENE_3D_RT_OIT_WGSL: &str = include_str!("scene_3d_rt_oit.wgsl");
 
 const SCENE_SPRITE_WGSL: &str = include_str!("scene_sprite.wgsl");
 
 const SCENE_UPSCALE_WGSL: &str = include_str!("scene_upscale.wgsl");
+
+const SCENE_OIT_COMPOSITE_WGSL: &str = include_str!("scene_oit_composite.wgsl");
 
 /// Depth-only vertex shader for the shadow map pass.
 /// Each draw uses the per-slot uniform (group 0, binding 0) containing the light view-proj.
@@ -2941,9 +3704,13 @@ struct RtInfrastructure {
     blas_sphere: wgpu::Blas,
     tlas: wgpu::Tlas,
     tlas_bgl: wgpu::BindGroupLayout,
+    pipeline_layout_3d_rt: wgpu::PipelineLayout,
+    shader_3d_rt: wgpu::ShaderModule,
+    shader_3d_rt_oit: wgpu::ShaderModule,
     tlas_bg: wgpu::BindGroup,
     pipeline_opaque_rt: wgpu::RenderPipeline,
-    pipeline_transparent_rt: wgpu::RenderPipeline,
+    pipeline_opaque_rt_single: wgpu::RenderPipeline,
+    pipeline_transparent_rt_oit: wgpu::RenderPipeline,
 }
 
 /// Converts a column-major 4×4 model matrix (stored as 4 column vecs) to a
@@ -3145,6 +3912,10 @@ fn create_rt_infrastructure(
         label: Some("runtime-scene-3d-rt-shader"),
         source: wgpu::ShaderSource::Wgsl(SCENE_3D_RT_WGSL.into()),
     });
+    let shader_3d_rt_oit = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("runtime-scene-3d-rt-oit-shader"),
+        source: wgpu::ShaderSource::Wgsl(SCENE_3D_RT_OIT_WGSL.into()),
+    });
 
     let pipeline_opaque_rt = create_3d_pipeline(
         device,
@@ -3157,16 +3928,23 @@ fn create_rt_infrastructure(
         "runtime-scene-opaque-rt-pipeline",
         msaa_sample_count,
     );
-    let pipeline_transparent_rt = create_3d_pipeline(
+    let pipeline_opaque_rt_single = create_3d_pipeline(
         device,
         &layout_3d_rt,
         &shader_3d_rt,
         color_format,
-        Some(wgpu::BlendState::ALPHA_BLENDING),
-        false,
+        Some(wgpu::BlendState::REPLACE),
+        true,
         Some(wgpu::Face::Back),
-        "runtime-scene-transparent-rt-pipeline",
-        msaa_sample_count,
+        "runtime-scene-opaque-rt-single-pipeline",
+        1,
+    );
+    let pipeline_transparent_rt_oit = create_oit_3d_pipeline(
+        device,
+        &layout_3d_rt,
+        &shader_3d_rt_oit,
+        None,
+        "runtime-scene-transparent-rt-oit-pipeline",
     );
 
     // BLAS: box (8 vertices, 36 u16 indices).
@@ -3269,9 +4047,13 @@ fn create_rt_infrastructure(
         blas_sphere,
         tlas,
         tlas_bgl,
+        pipeline_layout_3d_rt: layout_3d_rt,
+        shader_3d_rt,
+        shader_3d_rt_oit,
         tlas_bg,
         pipeline_opaque_rt,
-        pipeline_transparent_rt,
+        pipeline_opaque_rt_single,
+        pipeline_transparent_rt_oit,
     }
 }
 
@@ -3380,6 +4162,39 @@ mod tests {
     }
 
     #[test]
+    fn upload_plan_packs_shading_code_into_emissive_w() {
+        let draw = RuntimeDrawFrame {
+            mode: RuntimeSceneMode::Spatial3d,
+            view_2d: None,
+            opaque_batches: vec![DrawBatch3d {
+                lane: DrawLane::Opaque,
+                key: DrawBatchKey {
+                    primitive_code: 1,
+                    shading_code: 1,
+                    shadow_flags: 0,
+                },
+                instances: vec![make_instance(1)],
+            }],
+            transparent_batches: Vec::new(),
+            sprites: Vec::new(),
+            lights: Vec::new(),
+            stats: DrawFrameStats {
+                opaque_instances: 1,
+                transparent_instances: 0,
+                sprite_instances: 0,
+                light_instances: 0,
+                opaque_batches: 1,
+                transparent_batches: 0,
+                total_draw_calls: 1,
+            },
+        };
+
+        let plan = build_upload_plan(&draw);
+        assert_eq!(plan.instances_3d.len(), 1);
+        assert!((plan.instances_3d[0].emissive[3] - 1.0).abs() <= f32::EPSILON);
+    }
+
+    #[test]
     fn upload_plan_encodes_sprite_kind_and_virtual_atlas_rect() {
         let draw = RuntimeDrawFrame {
             mode: RuntimeSceneMode::Spatial3d,
@@ -3441,6 +4256,49 @@ mod tests {
     }
 
     #[test]
+    fn rt_instance_collection_ignores_transparent_batches() {
+        let draw = RuntimeDrawFrame {
+            mode: RuntimeSceneMode::Spatial3d,
+            view_2d: None,
+            opaque_batches: vec![DrawBatch3d {
+                lane: DrawLane::Opaque,
+                key: DrawBatchKey {
+                    primitive_code: 1,
+                    shading_code: 0,
+                    shadow_flags: 0,
+                },
+                instances: vec![make_instance(1), make_instance(2)],
+            }],
+            transparent_batches: vec![DrawBatch3d {
+                lane: DrawLane::Transparent,
+                key: DrawBatchKey {
+                    primitive_code: 0,
+                    shading_code: 0,
+                    shadow_flags: 0,
+                },
+                instances: vec![make_instance(3), make_instance(4), make_instance(5)],
+            }],
+            sprites: Vec::new(),
+            lights: Vec::new(),
+            stats: DrawFrameStats {
+                opaque_instances: 2,
+                transparent_instances: 3,
+                sprite_instances: 0,
+                light_instances: 0,
+                opaque_batches: 1,
+                transparent_batches: 1,
+                total_draw_calls: 2,
+            },
+        };
+
+        let instances = collect_rt_instances(&draw, 16);
+        assert_eq!(instances.len(), 2);
+        assert!(instances
+            .iter()
+            .all(|instance| instance.blas_kind == RtBlasKind::Box));
+    }
+
+    #[test]
     fn default_sprite_atlas_pixels_are_non_uniform() {
         let width = SPRITE_ATLAS_GRID_DIM * SPRITE_ATLAS_TILE_SIZE;
         let height = SPRITE_ATLAS_GRID_DIM * SPRITE_ATLAS_TILE_SIZE;
@@ -3486,18 +4344,21 @@ mod tests {
             GpuBatchRange {
                 lane: DrawLane::Opaque,
                 primitive_code: 0,
+                shading_code: 0,
                 start: 0,
                 count: 120,
             },
             GpuBatchRange {
                 lane: DrawLane::Opaque,
                 primitive_code: 1,
+                shading_code: 0,
                 start: 120,
                 count: 44,
             },
             GpuBatchRange {
                 lane: DrawLane::Transparent,
                 primitive_code: 0,
+                shading_code: 0,
                 start: 164,
                 count: 36,
             },
@@ -3525,6 +4386,65 @@ mod tests {
         assert!(status.active);
         assert_eq!(status.rt_dynamic_cap, RT_DYNAMIC_CAP);
         assert!(status.fallback_reason.is_empty());
+    }
+
+    #[test]
+    fn shadow_slot_selection_uses_only_shadow_casting_spotlights() {
+        let lights = vec![
+            crate::scene::SceneLight {
+                id: 1,
+                kind: crate::scene::SceneLightKind::Point,
+                casts_shadow: true,
+                ..crate::scene::SceneLight::default()
+            },
+            crate::scene::SceneLight {
+                id: 2,
+                kind: crate::scene::SceneLightKind::Spot,
+                casts_shadow: false,
+                ..crate::scene::SceneLight::default()
+            },
+            crate::scene::SceneLight {
+                id: 3,
+                kind: crate::scene::SceneLightKind::Spot,
+                casts_shadow: true,
+                ..crate::scene::SceneLight::default()
+            },
+            crate::scene::SceneLight {
+                id: 4,
+                kind: crate::scene::SceneLightKind::Spot,
+                casts_shadow: true,
+                ..crate::scene::SceneLight::default()
+            },
+            crate::scene::SceneLight {
+                id: 5,
+                kind: crate::scene::SceneLightKind::Spot,
+                casts_shadow: true,
+                ..crate::scene::SceneLight::default()
+            },
+            crate::scene::SceneLight {
+                id: 6,
+                kind: crate::scene::SceneLightKind::Spot,
+                casts_shadow: true,
+                ..crate::scene::SceneLight::default()
+            },
+            crate::scene::SceneLight {
+                id: 7,
+                kind: crate::scene::SceneLightKind::Spot,
+                casts_shadow: true,
+                ..crate::scene::SceneLight::default()
+            },
+        ];
+
+        let (shadow_slots, shadow_uniform) = select_shadow_slots(&lights, lights.len());
+        assert_eq!(shadow_uniform.shadow_count, 4);
+        assert_eq!(shadow_slots[0], -1);
+        assert_eq!(shadow_slots[1], -1);
+        assert_eq!(shadow_slots[2], 0);
+        assert_eq!(shadow_slots[3], 1);
+        assert_eq!(shadow_slots[4], 2);
+        assert_eq!(shadow_slots[5], 3);
+        assert_eq!(shadow_slots[6], -1);
+        assert_eq!(shadow_uniform.shadow_light_indices, [2, 3, 4, 5]);
     }
 
     fn make_instance(id: u64) -> DrawInstance3d {

@@ -101,11 +101,16 @@ void main() {
     vec3 base_color = v_color.rgb;
     float alpha = v_color.a;
     vec3 normal = normalize(v_world_normal);
-    vec3 lit_color = base_color * 0.04;
+    float emissive_strength = 0.0;
+    vec3 emissive_rgb = vec3(0.0);
+    vec3 lit_color = base_color * 0.10;
 
     if (u_draw.material_count > 0u) {
         uint material_index = min(v_material_index, u_draw.material_count - 1u);
         MaterialRecord material = u_materials.materials[material_index];
+        emissive_strength = material.material_params.z;
+        emissive_rgb = material.emissive_rgb;
+
         if (u_draw.texture_count > 0u) {
             uint texture_index = min(material.texture_index, u_draw.texture_count - 1u);
             TextureRecord texture_record = u_textures.textures[texture_index];
@@ -114,18 +119,23 @@ void main() {
             base_color *= sampled.rgb;
             alpha *= sampled.a;
         }
-        float emissive_strength = material.material_params.z;
-        lit_color += material.emissive_rgb * emissive_strength;
-        if ((material.flags & MATERIAL_FLAG_UNLIT) != 0u || (v_flags & MATERIAL_FLAG_UNLIT) != 0u) {
-            out_color = vec4(base_color + material.emissive_rgb * emissive_strength, alpha);
+
+        if ((material.flags & MATERIAL_FLAG_UNLIT) != 0u) {
+            bool transparent_unlit = (v_flags & INSTANCE_FLAG_TRANSPARENT) != 0u;
+            vec3 unlit_color = base_color + emissive_rgb * emissive_strength;
+            if (transparent_unlit) {
+                float edge = max(max(abs(v_local_position.x), abs(v_local_position.y)), abs(v_local_position.z));
+                float edge_boost = smoothstep(0.38, 0.50, edge);
+                unlit_color += vec3(0.10, 0.15, 0.23) * edge_boost;
+                alpha = clamp(alpha + edge_boost * 0.05, 0.0, 0.52);
+            }
+            out_color = vec4(unlit_color, alpha);
             return;
         }
     }
 
     uint light_count = min(u_draw.light_count, 32u);
     if (light_count == 0u) {
-        // Fallback "fake sun" so scenes with no configured lights remain visible.
-        // Mirrors the wgpu scene_3d.wgsl behaviour: 24% floor + directional contribution.
         vec3 fallback_dir = normalize(vec3(0.42, 0.74, 0.52));
         float fallback = max(dot(normal, fallback_dir), 0.0) * 0.76 + 0.24;
         lit_color += base_color * fallback;
@@ -134,9 +144,14 @@ void main() {
             lit_color += base_color * accumulate_light(v_world_position, normal, u_lights.lights[i]);
         }
     }
+    lit_color += emissive_rgb * emissive_strength;
 
-    // Box primitives (e.g. bounce-tank container) get an edge highlight so the
-    // silhouette stays clear from any view distance.
+    bool transparent_instance = (v_flags & INSTANCE_FLAG_TRANSPARENT) != 0u;
+    if (transparent_instance) {
+        lit_color = max(lit_color, base_color * 0.18);
+        alpha = clamp(alpha + 0.04, 0.0, 0.94);
+    }
+
     if ((v_flags & INSTANCE_FLAG_BOX) != 0u) {
         float edge = max(max(abs(v_local_position.x), abs(v_local_position.y)), abs(v_local_position.z));
         float edge_boost = smoothstep(0.38, 0.50, edge);

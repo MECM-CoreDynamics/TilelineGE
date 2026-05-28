@@ -2,11 +2,11 @@
 
 #![cfg(target_os = "macos")]
 
-use std::collections::HashMap;
 use metal::{
     Buffer, Device, MTLPixelFormat, MTLResourceOptions, SamplerDescriptor, SamplerState, Texture,
     TextureDescriptor,
 };
+use std::collections::HashMap;
 
 use super::mesh_slot::MeshSlot;
 use super::shader_library::ShaderLibrary;

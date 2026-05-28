@@ -133,7 +133,8 @@ Tileline is ambitious, but the README should stay honest about where the project
 
 - the project is still evolving quickly
 - render backend transition work is ongoing
-- the stable runtime path still leans on `wgpu` while raw Vulkan cutover work continues
+- the Linux desktop runtime defaults to `wgpu` while raw Vulkan cutover work continues
+  (`TILELINE_RENDERER=vulkan` opts into the raw Vulkan path)
 - some systems are mature enough for experimentation, not yet for mass-market stability
 - several independence goals (`wgpu`, `rayon`, `bevy`) are active roadmap work, not finished facts
 

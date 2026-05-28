@@ -14,11 +14,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam::queue::SegQueue;
 use crate::gms::{
     AdaptiveBufferDecision, AdaptiveFrameTelemetry, DispatchPlan, GmsDispatcher, GpuInventory,
     MultiGpuDispatchPlan, MultiGpuDispatcher, MultiGpuWorkloadRequest, TaskClass, WorkloadRequest,
 };
+use crossbeam::queue::SegQueue;
 use mps::{CorePreference, MpsScheduler, NativeTask, SchedulerMetrics, TaskPriority};
 
 use crate::graphics::multigpu::sync::{

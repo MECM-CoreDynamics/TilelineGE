@@ -6,7 +6,6 @@
 //! - a Linux-first raw Vulkan backend skeleton for the `v0.5.0` independence transition
 
 pub mod frame_snapshot;
-pub mod shader_flags;
 #[cfg(target_os = "macos")]
 pub mod metal;
 #[cfg(target_os = "macos")]
@@ -14,7 +13,16 @@ pub mod metal_backend;
 #[cfg(target_os = "macos")]
 pub mod metal_physics_compute;
 pub mod multigpu;
+pub mod shader_flags;
 #[cfg(target_os = "linux")]
 pub mod vulkan_backend;
 #[cfg(target_os = "linux")]
+mod vulkan_culling;
+#[cfg(target_os = "linux")]
+mod vulkan_geometry;
+#[cfg(target_os = "linux")]
 pub mod vulkan_physics_compute;
+#[cfg(target_os = "linux")]
+mod vulkan_pipeline;
+#[cfg(target_os = "linux")]
+mod vulkan_shaders;

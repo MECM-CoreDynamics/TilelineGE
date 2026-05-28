@@ -580,7 +580,10 @@ impl RuntimeBridgeOrchestrator {
         let requested = self.gms_ai_ml_requested_jobs.max(1);
         let ai_ml_drop_rate =
             1.0 - (self.gms_ai_ml_kept_jobs as f64 / requested as f64).clamp(0.0, 1.0);
-        let gpu_str = |gpu: Option<u8>| gpu.map(|g| format!("@GPU{g}")).unwrap_or_else(|| "@auto".to_string());
+        let gpu_str = |gpu: Option<u8>| {
+            gpu.map(|g| format!("@GPU{g}"))
+                .unwrap_or_else(|| "@auto".to_string())
+        };
         Some(format!(
             "gms scaler | mode={} target_fps={} guardrail={} profile={} auto_gpu={} budgets[render={}{} physics={}{} ai_ml={}{} postfx={}{} ui={}{} light={}{}] min_physics={} lane_q={} sm_cu_utilization={:.2} ai_ml_drop_rate={:.3}{}",
             self.gms_scaler.mode.as_str(),
@@ -957,8 +960,8 @@ pub fn runtime_bridge_path_from_scheduler(scheduler: GraphicsSchedulerPath) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tl_core::gms::{MultiGpuWorkloadRequest, WorkloadRequest};
     use std::time::Duration;
+    use tl_core::gms::{MultiGpuWorkloadRequest, WorkloadRequest};
 
     #[test]
     fn scheduler_mapping_prefers_matching_path() {
@@ -1059,7 +1062,12 @@ mod tests {
         )
     }
 
-    fn make_estimate(physics: u32, ai_ml: u32, postfx: u32, frame_ms: f64) -> SceneWorkloadEstimate {
+    fn make_estimate(
+        physics: u32,
+        ai_ml: u32,
+        postfx: u32,
+        frame_ms: f64,
+    ) -> SceneWorkloadEstimate {
         SceneWorkloadEstimate {
             single_gpu: WorkloadRequest::default(),
             multi_gpu: MultiGpuWorkloadRequest {

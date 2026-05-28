@@ -7,7 +7,7 @@
 - `sideview_stress_map.tlscript`: stress side-view map script for heavy tile/actor visibility
 - `bounce_hud.tlsprite`: HUD sprites + FBX mesh slot bindings
 - `sphere.fbx`: high-quality sphere mesh used by bounce scenes
-- `cube-prism.fbx`: prism mesh used for container wall bindings
+- `cube-prism.fbx`: prism mesh used for container edge bindings (and optional wall-slot experiments)
 - `main.tljoint`: primary scene manifest binding script/sprite groups
 - `bounce_showcase_mobile_safe.tljoint`: mobile-safe scene manifest
 - `sideview_static_map.tljoint`: static side-view 2D validation scene
@@ -25,6 +25,10 @@ cargo run -p runtime --example tlapp -- \
   --script docs/demos/tlapp/bounce_showcase.tlscript \
   --sprite docs/demos/tlapp/bounce_hud.tlsprite
 ```
+
+The default showcase keeps the tank walls on the built-in glass panel path for stability.
+Use `set_container_wall_mesh_slot(...)` only when you have a dedicated panel mesh you want
+to align to the collision extents.
 
 Run TLApp directly from `.tljoint`:
 

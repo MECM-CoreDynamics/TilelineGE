@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 
 use tl_core::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
-    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_OVERLAY,
+    FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 
 use crate::draw_path::{DrawBatch3d, DrawLane, RuntimeDrawFrame};
@@ -20,6 +21,11 @@ const FLAG_MESH: u32 = 1 << 1;
 const FLAG_BOX: u32 = 1 << 2;
 const MATERIAL_FLAG_UNLIT: u32 = 1 << 0;
 const MAX_SHADOW_LIGHTS: usize = 4;
+
+#[inline]
+fn is_overlay_box_batch(batch: &DrawBatch3d) -> bool {
+    batch.lane == DrawLane::Opaque && batch.key.primitive_code == 1 && batch.key.shading_code == 1
+}
 
 /// Summary of one runtime-to-Vulkan snapshot build.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -90,7 +96,11 @@ pub fn build_vulkan_render_snapshot<'a>(
                 primitive_code: batch.key.primitive_code as u32,
                 first_instance: first_instance as u32,
                 instance_count: count as u32,
-                flags: 0,
+                flags: if is_overlay_box_batch(batch) {
+                    FRAME_PRIMITIVE_RANGE_OVERLAY
+                } else {
+                    0
+                },
             });
         }
     }
@@ -248,16 +258,18 @@ fn append_batch_instances_sorted(
         let texture_index = if Some(instance.texture_index) == last_texture_slot {
             last_texture_index
         } else {
-            let idx = *texture_map.entry(instance.texture_index).or_insert_with(|| {
-                let next_index = texture_scratch.len() as u32;
-                texture_scratch.push(FrameTextureRecord {
-                    texture_slot: instance.texture_index,
-                    sampler_code: 0,
-                    flags: 0,
-                    _padding: 0,
+            let idx = *texture_map
+                .entry(instance.texture_index)
+                .or_insert_with(|| {
+                    let next_index = texture_scratch.len() as u32;
+                    texture_scratch.push(FrameTextureRecord {
+                        texture_slot: instance.texture_index,
+                        sampler_code: 0,
+                        flags: 0,
+                        _padding: 0,
+                    });
+                    next_index
                 });
-                next_index
-            });
             last_texture_slot = Some(instance.texture_index);
             last_texture_index = idx;
             idx
@@ -364,12 +376,7 @@ fn pack_light(light: &SceneLight, shadow_slot: i32) -> FrameLightRecord {
             light.position[2],
             position_kind_w,
         ],
-        direction_inner: [
-            direction[0],
-            direction[1],
-            direction[2],
-            inner_cos,
-        ],
+        direction_inner: [direction[0], direction[1], direction[2], inner_cos],
         color_intensity: [
             light.color[0].clamp(0.0, 16.0),
             light.color[1].clamp(0.0, 16.0),
@@ -637,7 +644,11 @@ mod tests {
             view_2d: None,
             opaque_batches: vec![DrawBatch3d {
                 lane: DrawLane::Opaque,
-                key: DrawBatchKey { primitive_code: 0, shading_code: 0, shadow_flags: 0 },
+                key: DrawBatchKey {
+                    primitive_code: 0,
+                    shading_code: 0,
+                    shadow_flags: 0,
+                },
                 instances: vec![
                     make_instance(1, 50.0), // far
                     make_instance(2, 20.0), // mid

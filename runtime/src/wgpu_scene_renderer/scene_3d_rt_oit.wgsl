@@ -1,7 +1,3 @@
-// RT-enabled 3D scene shader.
-// Identical to scene_3d.wgsl except shadow testing is replaced with hardware
-// ray queries against the scene TLAS (group 1, binding 0).
-// Only loaded when EXPERIMENTAL_RAY_QUERY is available on the device.
 enable wgpu_ray_query;
 
 struct Camera {
@@ -37,7 +33,6 @@ var<storage, read> u_lights: array<LightData, 32>;
 @group(0) @binding(2)
 var<uniform> u_lighting: Lighting;
 
-// Shadow map resources kept for compatibility but unused in the RT path.
 struct ShadowUniform {
     light_view_proj: array<mat4x4<f32>, 4>,
     shadow_light_indices: vec4<i32>,
@@ -54,7 +49,6 @@ var shadow_smp: sampler_comparison;
 @group(0) @binding(5)
 var<uniform> u_shadow: ShadowUniform;
 
-// ── RT acceleration structure (group 1) ──────────────────────────────────────
 @group(1) @binding(0)
 var scene_tlas: acceleration_structure;
 
@@ -71,14 +65,18 @@ struct VSIn {
 
 struct VSOut {
     @builtin(position) position: vec4<f32>,
-    @location(0) color:          vec4<f32>,
-    @location(1) emissive:       vec3<f32>,
-    @location(2) world_pos:      vec3<f32>,
-    @location(3) local_pos:      vec3<f32>,
-    @location(4) primitive_code: f32,
-    @location(5) shading_code:   f32,
-    @location(6) roughness:      f32,
-    @location(7) metallic:       f32,
+    @location(0) color: vec4<f32>,
+    @location(1) emissive: vec3<f32>,
+    @location(2) world_pos: vec3<f32>,
+    @location(3) local_pos: vec3<f32>,
+    @location(4) shading_code: f32,
+    @location(5) roughness: f32,
+    @location(6) metallic: f32,
+};
+
+struct FSOut {
+    @location(0) accum: vec4<f32>,
+    @location(1) reveal: f32,
 };
 
 @vertex
@@ -92,39 +90,29 @@ fn vs_main(input: VSIn) -> VSOut {
     let world_pos = model * vec4<f32>(input.position, 1.0);
 
     var out: VSOut;
-    out.position      = u_camera.view_proj * world_pos;
-    out.color         = input.base_color;
-    out.emissive      = input.emissive.xyz;
-    out.world_pos     = world_pos.xyz;
-    out.local_pos     = input.position;
-    out.primitive_code = input.material_params.w;
-    out.shading_code  = input.emissive.w;
-    out.roughness     = input.material_params.x;
-    out.metallic      = input.material_params.y;
+    out.position = u_camera.view_proj * world_pos;
+    out.color = input.base_color;
+    out.emissive = input.emissive.xyz;
+    out.world_pos = world_pos.xyz;
+    out.local_pos = input.position;
+    out.shading_code = input.emissive.w;
+    out.roughness = input.material_params.x;
+    out.metallic = input.material_params.y;
     return out;
 }
 
-// Traces a shadow ray from world_pos toward light_pos.
-// Returns 1.0 = lit, 0.0 = occluded.
-// The surface normal is used to compute a small offset so the ray doesn't
-// self-intersect with the originating geometry.
 fn sample_shadow_rt(world_pos: vec3<f32>, light_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
-    let to_light   = light_pos - world_pos;
+    let to_light = light_pos - world_pos;
     let light_dist = length(to_light);
     if light_dist < 0.001 {
         return 1.0;
     }
     let light_dir = to_light / light_dist;
-
-    // Small bias along normal + ray direction to avoid self-intersection.
     let origin = world_pos + normal * 0.008 + light_dir * 0.001;
 
     var rq: ray_query;
-    // RAY_FLAG_TERMINATE_ON_FIRST_HIT (4) for early exit on any occlusion.
-    rayQueryInitialize(&rq, scene_tlas,
-        RayDesc(4u, 0xFFu, 0.0, light_dist - 0.02, origin, light_dir));
+    rayQueryInitialize(&rq, scene_tlas, RayDesc(4u, 0xFFu, 0.0, light_dist - 0.02, origin, light_dir));
     rayQueryProceed(&rq);
-
     let intersection = rayQueryGetCommittedIntersection(&rq);
     return select(0.0, 1.0, intersection.kind == RAY_QUERY_INTERSECTION_NONE);
 }
@@ -152,8 +140,7 @@ fn evaluate_light(
         let cone = dot(spot_axis, light_dir);
         let inner = light.direction_inner.w;
         let outer = light.params.y;
-        let cone_factor = smoothstep(outer, inner, cone);
-        attenuation *= cone_factor;
+        attenuation *= smoothstep(outer, inner, cone);
     }
 
     let ndotl = max(dot(normal, light_dir), 0.0);
@@ -166,20 +153,13 @@ fn evaluate_light(
     let spec_power = 24.0 + light.params.w * 24.0;
     let specular = pow(max(dot(normal, half_dir), 0.0), spec_power) * light.params.w;
 
-    var shadow_term = 1.0;
-    if light.shadow.x > 0.5 {
-        shadow_term = sample_shadow_rt(world_pos, light.position_kind.xyz, normal);
-        let shadow_floor = mix(0.38, 0.62, clamp(light.params.z, 0.0, 1.0));
-        shadow_term = max(shadow_term, shadow_floor);
-    }
-
     let diffuse = base_color * ndotl;
     let spec = vec3<f32>(specular);
-    return (diffuse + spec) * light.color_intensity.rgb * light.color_intensity.w * attenuation * shadow_term;
+    return (diffuse + spec) * light.color_intensity.rgb * light.color_intensity.w * attenuation;
 }
 
 @fragment
-fn fs_main(input: VSOut, @builtin(front_facing) is_front: bool) -> @location(0) vec4<f32> {
+fn fs_main(input: VSOut, @builtin(front_facing) is_front: bool) -> FSOut {
     let dpx = dpdx(input.world_pos);
     let dpy = dpdy(input.world_pos);
     var normal = normalize(cross(dpy, dpx));
@@ -188,29 +168,42 @@ fn fs_main(input: VSOut, @builtin(front_facing) is_front: bool) -> @location(0) 
     }
 
     let is_unlit = input.shading_code > 0.5;
-    var lit = input.color.rgb * 0.10;
+    var lit = input.color.rgb * 0.30;
     if is_unlit {
-        lit = input.color.rgb + input.emissive;
+        lit = max(input.color.rgb * 0.68 + input.emissive, input.color.rgb * 0.82);
     } else {
         let light_count = min(u_lighting.light_count, 32u);
         if light_count == 0u {
             let fallback_dir = normalize(vec3<f32>(0.42, 0.74, 0.52));
-            let fallback = max(dot(normal, fallback_dir), 0.0) * 0.76 + 0.24;
+            let fallback = max(dot(normal, fallback_dir), 0.0) * 0.68 + 0.32;
             lit += input.color.rgb * fallback;
         } else {
             for (var i: u32 = 0u; i < light_count; i = i + 1u) {
                 lit += evaluate_light(u_lights[i], normal, input.world_pos, input.color.rgb);
             }
         }
+        let glass_floor = input.color.rgb * 0.30;
+        lit = max(lit, glass_floor);
         lit += input.emissive;
     }
-    var alpha = input.color.a;
 
-    if input.primitive_code > 0.5 {
-        let edge = max(max(abs(input.local_pos.x), abs(input.local_pos.y)), abs(input.local_pos.z));
-        let edge_boost = smoothstep(0.38, 0.50, edge);
-        lit += vec3<f32>(0.08, 0.12, 0.18) * edge_boost;
-        alpha = clamp(alpha + edge_boost * 0.32, 0.0, 1.0);
+    let view_dir = normalize(u_camera.camera_eye.xyz - input.world_pos);
+    let rim = pow(1.0 - max(dot(normal, view_dir), 0.0), 3.0);
+    let edge = max(max(abs(input.local_pos.x), abs(input.local_pos.y)), abs(input.local_pos.z));
+    let edge_boost = smoothstep(0.42, 0.50, edge);
+    lit += vec3<f32>(0.24, 0.30, 0.38) * rim;
+    lit += vec3<f32>(0.11, 0.16, 0.24) * edge_boost;
+
+    var alpha = 0.0;
+    if is_unlit {
+        alpha = clamp(max(input.color.a + 0.02, 0.24) + rim * 0.06 + edge_boost * 0.04, 0.0, 0.52);
+    } else {
+        alpha = clamp(max(input.color.a + 0.04, 0.34) + rim * 0.06 + edge_boost * 0.04, 0.0, 0.60);
     }
-    return vec4<f32>(lit, alpha);
+    let premultiplied = lit * alpha;
+
+    var out: FSOut;
+    out.accum = vec4<f32>(premultiplied, alpha);
+    out.reveal = alpha;
+    return out;
 }

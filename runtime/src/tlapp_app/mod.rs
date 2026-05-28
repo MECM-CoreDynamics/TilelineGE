@@ -40,35 +40,34 @@ use crate::{
     BounceTankSceneController, BounceTankTickMetrics, ChunkedTileWorld2d, DrawPathCompiler,
     FsrConfig, FsrDynamoConfig, FsrMode, FsrQualityPreset, FsrStatus, GmsGuardrailProfile,
     GmsScalerConfig, GmsScalerDomain, GmsScalerMode, GraphicsSchedulerPath, MlsBackendKind,
-    PerformanceProfile,
-    MlsExecutionMode, MlsPrecisionMode, MlsRuntimeConfig, MlsWorkloadKind, RayTracingMode,
-    RenderSyncMode, RuntimeAdapterInfo, RuntimeBridgeConfig, RuntimeBridgeMetrics,
+    MlsExecutionMode, MlsPrecisionMode, MlsRuntimeConfig, MlsWorkloadKind, PerformanceProfile,
+    RayTracingMode, RenderSyncMode, RuntimeAdapterInfo, RuntimeBridgeConfig, RuntimeBridgeMetrics,
     RuntimeBridgeOrchestrator, RuntimeBridgePath, RuntimeBridgeTick, RuntimeFramePlan,
     RuntimeGpuBackend, RuntimeGpuDeviceType, RuntimePlatform, RuntimeSceneMode,
-    SceneFrameInstances, ScenePrimitive3d, SpriteInstance, SpriteKind, TelemetryHudComposer,
-    TelemetryHudSample, TickRatePolicy, TileCoord2d, TileMutation2d, TileView2d, TileWorld2dConfig,
-    TileWorldFrameTelemetry, TljointDiagnosticLevel, TljointSceneBundle, TlpfileDiagnosticLevel,
-    TlpfileGraphicsScheduler, TlpfileSceneDimension, TlscriptGmsMetricSnapshot,
-    TlscriptMlsMetricSnapshot, TlscriptOverlayTileLookup, TlscriptPerformancePreset,
-    TlscriptShowcaseConfig, TlscriptShowcaseContactSnapshot, TlscriptShowcaseControlInput,
-    TlscriptShowcaseFrameInput, TlscriptShowcaseFrameOutput, TlscriptShowcaseProgram,
-    TlscriptTileLookup, TlscriptToggleMode, TlspriteHotReloadEvent, TlspriteProgram,
-    TlspriteProgramCache, TlspriteWatchReloader, WgpuSceneRenderer, ENGINE_ID, ENGINE_VERSION,
-    MAX_SCENE_LIGHTS,
+    SceneFrameInstances, ScenePrimitive3d, ShadingModel, SpriteInstance, SpriteKind,
+    TelemetryHudComposer, TelemetryHudSample, TickRatePolicy, TileCoord2d, TileMutation2d,
+    TileView2d, TileWorld2dConfig, TileWorldFrameTelemetry, TljointDiagnosticLevel,
+    TljointSceneBundle, TlpfileDiagnosticLevel, TlpfileGraphicsScheduler, TlpfileSceneDimension,
+    TlscriptGmsMetricSnapshot, TlscriptMlsMetricSnapshot, TlscriptOverlayTileLookup,
+    TlscriptPerformancePreset, TlscriptShowcaseConfig, TlscriptShowcaseContactSnapshot,
+    TlscriptShowcaseControlInput, TlscriptShowcaseFrameInput, TlscriptShowcaseFrameOutput,
+    TlscriptShowcaseProgram, TlscriptTileLookup, TlscriptToggleMode, TlspriteHotReloadEvent,
+    TlspriteProgram, TlspriteProgramCache, TlspriteWatchReloader, WgpuSceneRenderer, ENGINE_ID,
+    ENGINE_VERSION, MAX_SCENE_LIGHTS,
 };
 #[cfg(target_os = "macos")]
 use crate::{MetalSceneRenderer, MetalSceneRendererConfig};
 #[cfg(target_os = "linux")]
 use crate::{VulkanSceneRenderer, VulkanSceneRendererConfig};
-use tl_core::gms::safe_default_required_limits_for_adapter;
-use tl_core::mgs::MobileGpuProfile;
 use mps::{MpsThreadPoolMetrics, SimdBackendKind};
 use nalgebra::Vector3;
 use paradoxpe::{
     parallel::ParallelExecutionMode, BroadphaseConfig, ContactSolverConfig, NarrowphaseConfig,
-    PhysicsWorld, PhysicsWorldConfig,
+    PhysicsStepTimings, PhysicsWorld, PhysicsWorldConfig,
 };
 use regex::RegexBuilder;
+use tl_core::gms::safe_default_required_limits_for_adapter;
+use tl_core::mgs::MobileGpuProfile;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{
@@ -81,7 +80,10 @@ use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::platform::android::activity::AndroidApp;
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
 
-const AUTO_LOW_POLY_BALL_SLOT: u8 = 250;
+// Keep the adaptive low-poly ball slot distinct from built-in helper meshes
+// such as the glass wall panel; otherwise mobile/MGS fallback can accidentally
+// swap spheres for quads.
+const AUTO_LOW_POLY_BALL_SLOT: u8 = 251;
 const DEFAULT_FBX_BALL_SLOT: u8 = 2;
 const CONSOLE_SCRIPT_INDEX: usize = 9_999;
 const CONSOLE_MAX_LOG_LINES: usize = 320;
@@ -665,29 +667,42 @@ fn configure_parallel_runtime() {
     });
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+enum NativeRendererPlatform {
+    Linux,
+    Macos,
+    Other,
+}
+
+fn renderer_env_prefers_native(env_value: Option<&str>, platform: NativeRendererPlatform) -> bool {
+    let Some(value) = env_value else {
+        return matches!(platform, NativeRendererPlatform::Macos);
+    };
+    let lower = value.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "wgpu" | "legacy" => false,
+        "auto" | "default" | "" => matches!(platform, NativeRendererPlatform::Macos),
+        "native" | "raw" => !matches!(platform, NativeRendererPlatform::Other),
+        "vulkan" | "vk" | "raw-vulkan" => matches!(platform, NativeRendererPlatform::Linux),
+        "metal" | "mtl" | "raw-metal" => matches!(platform, NativeRendererPlatform::Macos),
+        _ => matches!(platform, NativeRendererPlatform::Macos),
+    }
+}
+
 fn prefer_native_runtime_renderer() -> bool {
+    let env_value = env::var("TILELINE_RENDERER").ok();
     #[cfg(target_os = "linux")]
     {
-        if let Ok(value) = env::var("TILELINE_RENDERER") {
-            let lower = value.trim().to_ascii_lowercase();
-            if lower == "wgpu" || lower == "legacy" {
-                return false;
-            }
-        }
-        true
+        renderer_env_prefers_native(env_value.as_deref(), NativeRendererPlatform::Linux)
     }
     #[cfg(target_os = "macos")]
     {
-        matches!(
-            env::var("TILELINE_RENDERER")
-                .ok()
-                .map(|value| value.trim().to_ascii_lowercase()),
-            Some(value) if value == "metal" || value == "mtl"
-        )
+        renderer_env_prefers_native(env_value.as_deref(), NativeRendererPlatform::Macos)
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        false
+        renderer_env_prefers_native(env_value.as_deref(), NativeRendererPlatform::Other)
     }
 }
 
@@ -1176,6 +1191,14 @@ struct TlAppRuntime {
     tick_hz: f32,
     actual_tick_hz: f32,
     actual_tick_ema_hz: f32,
+    last_tick_debug_desired_hz: f32,
+    last_tick_debug_floor_hz: f32,
+    last_tick_debug_catch_up_hz: f32,
+    last_tick_debug_physics_ceiling_hz: f32,
+    last_tick_debug_load_scale: f32,
+    last_tick_debug_fps_hint_hz: f32,
+    last_tick_debug_pressure: f32,
+    last_tick_debug_render_bound: bool,
     last_physics_queue_saturation_events: u64,
     physics_backlog_hold_timer: f32,
     fps_limit_hint: f32,
@@ -1193,10 +1216,10 @@ struct TlAppRuntime {
     adaptive_ball_render_limit: Option<usize>,
     adaptive_live_ball_budget: Option<usize>,
     adaptive_low_poly_override: bool,
-    // True only when MGS path was selected AND the adapter is genuine mobile hardware.
-    // Desktop-class adapters (Apple M-series, discrete GPUs) keep this false even when the
-    // MGS path is active via TILELINE_SCHEDULER override.
-    mgs_is_mobile_hardware: bool,
+    // True when the active adapter is genuine mobile-class GPU hardware.
+    // This stays tied to hardware, not scheduler selection, so forcing GMS vs MGS
+    // remains an apples-to-apples comparison on the same device.
+    mobile_class_hardware: bool,
     render_distance: Option<f32>,
     render_distance_min: f32,
     render_distance_max: f32,
@@ -1446,6 +1469,18 @@ impl TlAppRenderer {
         }
     }
 
+    fn bind_builtin_panel_mesh_slot(&mut self, device: &wgpu::Device, slot: u8) {
+        match self {
+            Self::Wgpu(renderer) => renderer.bind_builtin_panel_mesh_slot(device, slot),
+            #[cfg(target_os = "macos")]
+            Self::Metal(renderer) => {
+                let _ = (renderer, slot);
+            }
+            #[cfg(target_os = "linux")]
+            Self::Vulkan(renderer) => renderer.bind_builtin_panel_mesh_slot(slot),
+        }
+    }
+
     fn ray_tracing_status(&self) -> crate::SceneRayTracingStatus {
         match self {
             Self::Wgpu(renderer) => renderer.ray_tracing_status(),
@@ -1490,9 +1525,7 @@ impl TlAppRenderer {
         match self {
             Self::Wgpu(renderer) => renderer.world_radius_to_ndc_half_size(world_radius, clip_w),
             #[cfg(target_os = "macos")]
-            Self::Metal(renderer) => {
-                renderer.world_radius_to_ndc_half_size(world_radius, clip_w)
-            }
+            Self::Metal(renderer) => renderer.world_radius_to_ndc_half_size(world_radius, clip_w),
             #[cfg(target_os = "linux")]
             Self::Vulkan(renderer) => renderer.world_radius_to_ndc_half_size(world_radius, clip_w),
         }
@@ -1962,6 +1995,12 @@ fn merge_runtime_patch(target: &mut BounceTankRuntimePatch, patch: BounceTankRun
     if patch.ball_mesh_slot.is_some() {
         target.ball_mesh_slot = patch.ball_mesh_slot;
     }
+    if patch.container_wall_mesh_slot.is_some() {
+        target.container_wall_mesh_slot = patch.container_wall_mesh_slot;
+    }
+    if patch.container_edge_mesh_slot.is_some() {
+        target.container_edge_mesh_slot = patch.container_edge_mesh_slot;
+    }
     if patch.container_mesh_slot.is_some() {
         target.container_mesh_slot = patch.container_mesh_slot;
     }
@@ -2047,6 +2086,47 @@ fn scheduler_path_label(path: GraphicsSchedulerPath) -> &'static str {
     }
 }
 
+fn has_explicit_desktop_gpu_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.contains("geforce")
+        || n.contains("quadro")
+        || n.contains("titan")
+        || n.contains("radeon rx")
+        || n.contains("radeon pro")
+        || n.contains("firepro")
+        || n.contains("intel arc")
+}
+
+fn is_mobile_class_hardware(adapter_info: &RuntimeAdapterInfo) -> bool {
+    if has_explicit_desktop_gpu_name(&adapter_info.name) {
+        return false;
+    }
+    let profile = MobileGpuProfile::detect(&adapter_info.name);
+    profile.is_mobile_tbdr()
+        && !profile.is_desktop_class()
+        && matches!(
+            adapter_info.device_type,
+            RuntimeGpuDeviceType::IntegratedGpu | RuntimeGpuDeviceType::Other
+        )
+}
+
+#[inline]
+fn effective_tick_profile(
+    configured: TickProfile,
+    performance_profile: PerformanceProfile,
+) -> TickProfile {
+    if matches!(configured, TickProfile::Max)
+        || matches!(
+            performance_profile,
+            PerformanceProfile::Aggressive | PerformanceProfile::Heimdall
+        )
+    {
+        TickProfile::Max
+    } else {
+        TickProfile::Balanced
+    }
+}
+
 #[inline]
 fn phase_mode_label(mode: ParallelExecutionMode) -> &'static str {
     match mode {
@@ -2071,6 +2151,32 @@ fn phase_serial_time_us(mode: ParallelExecutionMode, phase_time_us: u64) -> u64 
     } else {
         0
     }
+}
+
+fn physics_parallel_ready(metrics: &MpsThreadPoolMetrics, timings: &PhysicsStepTimings) -> bool {
+    if metrics.worker_count <= 1 {
+        return false;
+    }
+
+    let phase_modes = [
+        timings.integrate_mode,
+        timings.broadphase_mode,
+        timings.narrowphase_mode,
+        timings.solver_mode,
+    ];
+
+    phase_modes
+        .iter()
+        .copied()
+        .any(ParallelExecutionMode::is_parallel)
+        || phase_modes.iter().copied().all(|mode| {
+            !matches!(
+                mode,
+                ParallelExecutionMode::SerialSingleWorker
+                    | ParallelExecutionMode::SerialUnsupportedPlan
+                    | ParallelExecutionMode::SerialUnimplemented
+            )
+        })
 }
 
 fn choose_aggressive_tick_hz(
@@ -2296,19 +2402,211 @@ fn physics_safe_tick_ceiling_hz(
     }
 
     let cpu_budget_ratio = match (profile, mobile_path) {
-        (TickProfile::Balanced, true) => 0.42,
-        (TickProfile::Balanced, false) => 0.52,
-        (TickProfile::Max, true) => 0.48,
-        (TickProfile::Max, false) => 0.62,
+        (TickProfile::Balanced, true) => 0.52,
+        (TickProfile::Balanced, false) => 0.68,
+        (TickProfile::Max, true) => 0.64,
+        (TickProfile::Max, false) => 0.88,
     };
     let thread_gain = if mobile_path {
-        (logical_threads as f32 / 8.0).clamp(0.75, 1.10)
+        (logical_threads as f32 / 8.0).clamp(0.80, 1.35)
     } else {
-        (logical_threads as f32 / 12.0).clamp(0.85, 1.25)
+        (logical_threads as f32 / 12.0).clamp(0.90, 1.60)
     };
     let ceiling = (1_000_000.0 / per_substep_us) * cpu_budget_ratio * thread_gain;
-    let hard_cap = if mobile_path { 180.0 } else { 420.0 };
+    let hard_cap = if mobile_path { 240.0 } else { 600.0 };
     Some(ceiling.clamp(24.0, hard_cap))
+}
+
+fn physics_has_render_bound_headroom(
+    profile: TickProfile,
+    mobile_path: bool,
+    parallel_ready: bool,
+    backlog: PhysicsBacklogState,
+    step_wall_us: u64,
+    frame_time_ms: f32,
+    framebuffer_fill_ema: f32,
+) -> bool {
+    matches!(profile, TickProfile::Max)
+        && !mobile_path
+        && parallel_ready
+        && !backlog.severe
+        && backlog.queue_pressure < 0.25
+        && backlog.inflight_pressure < 0.25
+        && backlog.phase_skew < 1.20
+        && step_wall_us > 0
+        && step_wall_us <= 8_000
+        && frame_time_ms >= 8.0
+        && framebuffer_fill_ema >= 1.25
+}
+
+fn physics_can_hold_tick_under_render_load(
+    profile: TickProfile,
+    mobile_path: bool,
+    parallel_ready: bool,
+    backlog: PhysicsBacklogState,
+    step_wall_us: u64,
+) -> bool {
+    matches!(profile, TickProfile::Max)
+        && !mobile_path
+        && parallel_ready
+        && !backlog.severe
+        && backlog.queue_pressure < 0.10
+        && backlog.inflight_pressure < 0.10
+        && backlog.phase_skew < 1.15
+        && backlog.hot_worker_ratio < 1.60
+        && step_wall_us > 0
+        && step_wall_us <= 10_000
+}
+
+fn container_edge_overlay_should_fade(eye: [f32; 3], scene: BounceTankSceneConfig) -> bool {
+    let center_z = if scene.scene_mode.is_2d() {
+        scene.side_view_plane_z
+    } else {
+        0.0
+    };
+    let hx = scene.container_half_extents[0].max(0.5);
+    let hy = scene.container_half_extents[1].max(0.5);
+    let hz = scene.container_half_extents[2].max(0.5);
+    let wall = scene
+        .wall_thickness
+        .max(scene.ball_radius_max.max(0.02) * 1.35)
+        .max(0.02);
+    let threshold = (wall * 13.0)
+        .max(scene.ball_radius_max * 13.0)
+        .clamp(3.0, 11.5);
+
+    let local_x = eye[0];
+    let local_y = eye[1];
+    let local_z = eye[2] - center_z;
+    let ax = local_x.abs();
+    let ay = local_y.abs();
+    let az = local_z.abs();
+
+    if ax <= hx && ay <= hy && az <= hz {
+        let inner_gap = (hx - ax).min(hy - ay).min(hz - az);
+        inner_gap <= threshold
+    } else {
+        let dx = (ax - hx).max(0.0);
+        let dy = (ay - hy).max(0.0);
+        let dz = (az - hz).max(0.0);
+        let outside_dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        outside_dist <= threshold
+    }
+}
+
+fn container_wall_glass_should_drop(eye: [f32; 3], scene: BounceTankSceneConfig) -> bool {
+    let center_z = if scene.scene_mode.is_2d() {
+        scene.side_view_plane_z
+    } else {
+        0.0
+    };
+    let hx = scene.container_half_extents[0].max(0.5);
+    let hy = scene.container_half_extents[1].max(0.5);
+    let hz = scene.container_half_extents[2].max(0.5);
+    let wall = scene
+        .wall_thickness
+        .max(scene.ball_radius_max.max(0.02) * 1.35)
+        .max(0.02);
+    let threshold = (wall * 4.5)
+        .max(scene.ball_radius_max * 3.0)
+        .clamp(1.25, 3.75);
+
+    let ax = eye[0].abs();
+    let ay = eye[1].abs();
+    let az = (eye[2] - center_z).abs();
+
+    if ax <= hx && ay <= hy && az <= hz {
+        let inner_gap = (hx - ax).min(hy - ay).min(hz - az);
+        inner_gap <= threshold
+    } else {
+        let dx = (ax - hx).max(0.0);
+        let dy = (ay - hy).max(0.0);
+        let dz = (az - hz).max(0.0);
+        let outside_dist = (dx * dx + dy * dy + dz * dz).sqrt();
+        outside_dist <= threshold * 0.75
+    }
+}
+
+fn retune_container_edge_overlay_instances(
+    frame: &mut SceneFrameInstances,
+    scene: BounceTankSceneConfig,
+    eye: [f32; 3],
+) {
+    let suppress_overlay = container_edge_overlay_should_fade(eye, scene);
+    let drop_wall_glass = container_wall_glass_should_drop(eye, scene);
+    let center_z = if scene.scene_mode.is_2d() {
+        scene.side_view_plane_z
+    } else {
+        0.0
+    };
+    let dx = eye[0];
+    let dy = eye[1];
+    let dz = eye[2] - center_z;
+    let radial = (dx * dx + dy * dy + dz * dz).sqrt();
+    let container_radius = (scene.container_half_extents[0] * scene.container_half_extents[0]
+        + scene.container_half_extents[1] * scene.container_half_extents[1]
+        + scene.container_half_extents[2] * scene.container_half_extents[2])
+        .sqrt()
+        .max(1.0);
+    let far_factor =
+        ((radial - container_radius * 1.15) / (container_radius * 1.35)).clamp(0.0, 1.0);
+
+    if drop_wall_glass {
+        frame.transparent_3d.retain(|instance| {
+            !(!instance.casts_shadow
+                && !instance.receives_shadow
+                && instance.material.base_color_rgba[3] < 0.95)
+        });
+    } else {
+        for instance in frame.transparent_3d.iter_mut() {
+            let is_visual_wall = !instance.casts_shadow
+                && !instance.receives_shadow
+                && instance.material.base_color_rgba[3] < 0.95;
+            if !is_visual_wall {
+                continue;
+            }
+            let base_alpha = 0.28;
+            let base_emissive = [0.12, 0.18, 0.26];
+            instance.material.base_color_rgba[3] =
+                (base_alpha + far_factor * 0.10).clamp(0.26, 0.38);
+            instance.material.emissive_rgb = [
+                base_emissive[0] + far_factor * 0.10,
+                base_emissive[1] + far_factor * 0.12,
+                base_emissive[2] + far_factor * 0.18,
+            ];
+        }
+    }
+
+    for instance in frame.opaque_3d.iter_mut().filter(|instance| {
+        matches!(instance.primitive, ScenePrimitive3d::Box)
+            && !instance.casts_shadow
+            && !instance.receives_shadow
+    }) {
+        if suppress_overlay {
+            instance.material.shading = ShadingModel::LitPbr;
+            instance.material.emissive_rgb = [0.04, 0.06, 0.08];
+        } else {
+            instance.material.shading = ShadingModel::Unlit;
+            instance.material.emissive_rgb = [
+                0.18 + far_factor * 0.08,
+                0.24 + far_factor * 0.10,
+                0.32 + far_factor * 0.14,
+            ];
+            let scale = &mut instance.transform.scale;
+            let (major_axis, _) = scale
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                .unwrap_or((0, &scale[0]));
+            let thickness_boost = 1.0 + far_factor * 1.35;
+            let min_thickness = scene.wall_thickness.max(0.03) * (0.42 + far_factor * 1.85);
+            for (axis, value) in scale.iter_mut().enumerate() {
+                if axis != major_axis {
+                    *value = (*value * thickness_boost).max(min_thickness);
+                }
+            }
+        }
+    }
 }
 
 fn evaluate_physics_backlog(
@@ -2326,7 +2624,7 @@ fn evaluate_physics_backlog(
     let active_frame_pressure = if metrics.active_frame_id.is_some()
         && (metrics.queued_jobs > 0 || metrics.in_flight_jobs > 0)
     {
-        0.35
+        0.20
     } else {
         0.0
     };
@@ -2335,7 +2633,7 @@ fn evaluate_physics_backlog(
     } else {
         0.0
     };
-    let hold_pressure = if hold_timer_active { 0.35 } else { 0.0 };
+    let hold_pressure = if hold_timer_active { 0.18 } else { 0.0 };
     // Contact pressure: high candidate pair / manifold counts add independent
     // load that the MPS queue metrics alone do not capture.
     let pair_pressure = (candidate_pairs as f32 / 10_000.0).clamp(0.0, 2.0);
@@ -2348,22 +2646,40 @@ fn evaluate_physics_backlog(
         + active_frame_pressure
         + saturation_pressure
         + hold_pressure
-        + contact_pressure * 0.55;
+        + contact_pressure * 0.32;
     let moderate = score > 0.95
         || queue_pressure > 0.35
         || hot_worker_ratio > 1.35
         || phase_skew > 1.30
-        || recent_queue_saturation_events > 0
-        || contact_pressure > 0.45;
+        || recent_queue_saturation_events > 1
+        || contact_pressure > 0.75;
     let severe = score > 2.10
         || queue_pressure > 1.10
         || hot_worker_ratio > 1.70
         || phase_skew > 1.70
         || recent_queue_saturation_events > 2
-        || contact_pressure > 1.10;
-    let block_ramp_up = hold_timer_active
-        || moderate
-        || (metrics.active_frame_id.is_some() && metrics.queued_jobs > 0);
+        || contact_pressure > 1.35;
+    let backlog_jobs = metrics.worker_count.max(1) as u64;
+    let contact_blocks = contact_pressure > 1.25
+        && (queue_pressure > 0.55
+            || inflight_pressure > 0.65
+            || hot_worker_ratio > 1.30
+            || phase_skew > 1.30);
+    let hold_blocks = hold_timer_active
+        && (queue_pressure > 0.45
+            || inflight_pressure > 0.60
+            || hot_worker_ratio > 1.60
+            || phase_skew > 1.45
+            || recent_queue_saturation_events > 0
+            || contact_pressure > 1.10);
+    let block_ramp_up = severe
+        || queue_pressure > 0.95
+        || hot_worker_ratio > 1.55
+        || phase_skew > 1.55
+        || recent_queue_saturation_events > 2
+        || hold_blocks
+        || contact_blocks
+        || (metrics.active_frame_id.is_some() && metrics.queued_jobs > backlog_jobs);
 
     PhysicsBacklogState {
         queue_pressure,
@@ -2521,10 +2837,10 @@ fn estimate_runtime_load_pressure(
 
 fn runtime_load_plan_for_pressure(
     pressure: u32,
-    live_balls: usize,
+    _live_balls: usize,
     logical_threads: usize,
     mobile_path: bool,
-    framebuffer_fill_ema: f32,
+    _framebuffer_fill_ema: f32,
 ) -> RuntimeLoadPlan {
     let thread_scale = if mobile_path {
         (logical_threads as f32 / 6.0).clamp(0.70, 2.20)
@@ -2532,64 +2848,46 @@ fn runtime_load_plan_for_pressure(
         (logical_threads as f32 / 8.0).clamp(0.75, 4.0)
     };
     let cap = |base: usize| ((base as f32) * thread_scale).round() as usize;
-    let heavy_fill = framebuffer_fill_ema > 1.20;
-    let severe_fill = framebuffer_fill_ema > 1.55;
 
     match pressure {
         0..=2 => RuntimeLoadPlan {
-            visible_ball_limit: if mobile_path && heavy_fill && live_balls > 3_600 {
-                Some(cap(2_600))
-            } else {
-                None
-            },
-            live_ball_budget: if mobile_path { Some(cap(4_800)) } else { None },
+            visible_ball_limit: None,
+            live_ball_budget: None,
             spawn_per_tick_cap: cap(if mobile_path { 96 } else { 420 }),
             max_substeps: if mobile_path { 6 } else { 14 },
             force_low_poly_ball_mesh: false,
             tick_scale: if mobile_path { 0.78 } else { 1.00 },
         },
         3..=4 => RuntimeLoadPlan {
-            visible_ball_limit: if mobile_path && heavy_fill && live_balls > 3_200 {
-                Some(cap(2_300))
-            } else {
-                None
-            },
-            live_ball_budget: if mobile_path { Some(cap(4_000)) } else { None },
+            visible_ball_limit: None,
+            live_ball_budget: None,
             spawn_per_tick_cap: cap(if mobile_path { 72 } else { 360 }),
             max_substeps: if mobile_path { 5 } else { 12 },
             force_low_poly_ball_mesh: false,
             tick_scale: if mobile_path { 0.66 } else { 0.96 },
         },
         5..=6 => RuntimeLoadPlan {
-            visible_ball_limit: if mobile_path && (heavy_fill || live_balls > 4_200) {
-                Some(cap(2_000))
-            } else {
-                None
-            },
-            live_ball_budget: if mobile_path { Some(cap(3_400)) } else { None },
+            visible_ball_limit: None,
+            live_ball_budget: None,
             spawn_per_tick_cap: cap(if mobile_path { 48 } else { 260 }),
             max_substeps: if mobile_path { 4 } else { 10 },
-            force_low_poly_ball_mesh: mobile_path && heavy_fill && live_balls > 2_600,
+            force_low_poly_ball_mesh: false,
             tick_scale: if mobile_path { 0.56 } else { 0.82 },
         },
         7..=8 => RuntimeLoadPlan {
-            visible_ball_limit: if mobile_path && (heavy_fill || live_balls > 3_600) {
-                Some(cap(1_700))
-            } else {
-                None
-            },
-            live_ball_budget: if mobile_path { Some(cap(2_900)) } else { None },
+            visible_ball_limit: None,
+            live_ball_budget: None,
             spawn_per_tick_cap: cap(if mobile_path { 32 } else { 200 }),
             max_substeps: if mobile_path { 3 } else { 10 },
-            force_low_poly_ball_mesh: mobile_path && (heavy_fill || live_balls > 3_200),
+            force_low_poly_ball_mesh: false,
             tick_scale: if mobile_path { 0.46 } else { 0.72 },
         },
         _ => RuntimeLoadPlan {
-            visible_ball_limit: if mobile_path { Some(cap(1_300)) } else { None },
-            live_ball_budget: if mobile_path { Some(cap(2_300)) } else { None },
+            visible_ball_limit: None,
+            live_ball_budget: None,
             spawn_per_tick_cap: cap(if mobile_path { 24 } else { 160 }),
             max_substeps: if mobile_path { 2 } else { 10 },
-            force_low_poly_ball_mesh: mobile_path && (severe_fill || live_balls > 3_600),
+            force_low_poly_ball_mesh: false,
             tick_scale: if mobile_path { 0.38 } else { 0.60 },
         },
     }
@@ -2683,11 +2981,12 @@ fn apply_render_distance_haze(
 
     let mut stats = RenderDistanceStats::default();
     let mut next_opaque = Vec::with_capacity(frame.opaque_3d.len());
-    let mut blurred = Vec::<(f32, crate::scene::SceneInstance3d)>::new();
     let mut hard_culled = Vec::<(f32, crate::scene::SceneInstance3d)>::new();
 
     for mut instance in frame.opaque_3d.drain(..) {
-        if matches!(instance.primitive, ScenePrimitive3d::Box) {
+        if matches!(instance.primitive, ScenePrimitive3d::Box)
+            || (!instance.casts_shadow && !instance.receives_shadow)
+        {
             next_opaque.push(instance);
             continue;
         }
@@ -2706,39 +3005,34 @@ fn apply_render_distance_haze(
             let t = ((distance - blur_start) / (hard_cull_distance - blur_start).max(1e-4))
                 .clamp(0.0, 1.0);
             soften_instance_for_distance_haze(&mut instance, t);
-            blurred.push((distance_sq, instance));
+            next_opaque.push(instance);
             stats.blurred = stats.blurred.saturating_add(1);
         } else if distance_sq > max_distance_sq {
             let distance = distance_sq.sqrt();
             let t = ((distance - max_distance) / (hard_cull_distance - max_distance).max(1e-4))
                 .clamp(0.0, 1.0);
             soften_instance_for_distance_haze(&mut instance, t * 0.80 + 0.20);
-            blurred.push((distance_sq, instance));
+            next_opaque.push(instance);
             stats.blurred = stats.blurred.saturating_add(1);
         } else {
             next_opaque.push(instance);
         }
     }
 
-    let rendered_count = next_opaque.len() + blurred.len();
+    let rendered_count = next_opaque.len();
     if rendered_count < min_keep && !hard_culled.is_empty() {
         hard_culled.sort_by(|left, right| left.0.total_cmp(&right.0));
         let rescue_count = (min_keep - rendered_count).min(hard_culled.len());
         for (distance_sq, mut instance) in hard_culled.drain(..rescue_count) {
             soften_instance_for_distance_haze(&mut instance, 0.96);
-            blurred.push((distance_sq, instance));
+            let _ = distance_sq;
+            next_opaque.push(instance);
             stats.blurred = stats.blurred.saturating_add(1);
         }
     }
 
     stats.culled = stats.culled.saturating_add(hard_culled.len());
-    // Draw farther blurred objects first to reduce alpha-overdraw artifacts.
-    blurred.sort_by(|left, right| right.0.total_cmp(&left.0));
-
     frame.opaque_3d = next_opaque;
-    frame
-        .transparent_3d
-        .extend(blurred.into_iter().map(|(_, instance)| instance));
     stats
 }
 
@@ -2751,6 +3045,644 @@ fn soften_instance_for_distance_haze(instance: &mut crate::scene::SceneInstance3
     }
     let alpha = instance.material.base_color_rgba[3];
     instance.material.base_color_rgba[3] = (alpha * (1.0 - t * 0.78)).clamp(0.10, 1.0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AUTO_LOW_POLY_BALL_SLOT;
+    use crate::scene::{
+        BounceTankSceneConfig, SceneFrameInstances, SceneInstance3d, SceneMaterial,
+        ScenePrimitive3d, SceneTransform3d, ShadingModel, BUILTIN_GLASS_PANEL_MESH_SLOT,
+    };
+    use mps::{
+        CompressionMetrics, DispatcherPhaseJobCounts, MpsThreadPoolMetrics, SimdBackendKind,
+    };
+
+    #[test]
+    fn auto_low_poly_ball_slot_does_not_collide_with_builtin_panel_slot() {
+        assert_ne!(AUTO_LOW_POLY_BALL_SLOT, BUILTIN_GLASS_PANEL_MESH_SLOT);
+    }
+
+    #[test]
+    fn linux_renderer_default_stays_on_wgpu_until_raw_vulkan_is_requested() {
+        assert!(!super::renderer_env_prefers_native(
+            None,
+            super::NativeRendererPlatform::Linux
+        ));
+        assert!(!super::renderer_env_prefers_native(
+            Some("auto"),
+            super::NativeRendererPlatform::Linux
+        ));
+        assert!(super::renderer_env_prefers_native(
+            Some("vulkan"),
+            super::NativeRendererPlatform::Linux
+        ));
+        assert!(super::renderer_env_prefers_native(
+            Some("raw-vulkan"),
+            super::NativeRendererPlatform::Linux
+        ));
+    }
+
+    #[test]
+    fn macos_renderer_default_prefers_raw_metal_with_wgpu_escape_hatch() {
+        assert!(super::renderer_env_prefers_native(
+            None,
+            super::NativeRendererPlatform::Macos
+        ));
+        assert!(super::renderer_env_prefers_native(
+            Some("metal"),
+            super::NativeRendererPlatform::Macos
+        ));
+        assert!(!super::renderer_env_prefers_native(
+            Some("wgpu"),
+            super::NativeRendererPlatform::Macos
+        ));
+    }
+
+    #[test]
+    fn runtime_load_plan_keeps_ball_count_and_mesh_quality_intact() {
+        for pressure in [0_u32, 3, 6, 9] {
+            let plan = super::runtime_load_plan_for_pressure(pressure, 10_000, 8, true, 1.8);
+            assert_eq!(plan.visible_ball_limit, None);
+            assert_eq!(plan.live_ball_budget, None);
+            assert!(!plan.force_low_poly_ball_mesh);
+        }
+    }
+
+    #[test]
+    fn render_distance_haze_keeps_softened_balls_in_opaque_lane() {
+        let mut frame = SceneFrameInstances::default();
+        frame.opaque_3d.push(SceneInstance3d {
+            instance_id: 1,
+            primitive: ScenePrimitive3d::Sphere,
+            transform: SceneTransform3d {
+                translation: [0.0, 0.0, 48.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+            material: SceneMaterial {
+                base_color_rgba: [0.9, 0.2, 0.2, 1.0],
+                roughness: 0.2,
+                metallic: 0.0,
+                emissive_rgb: [0.0, 0.0, 0.0],
+                texture_slot: 0,
+                shading: ShadingModel::LitPbr,
+            },
+            casts_shadow: true,
+            receives_shadow: true,
+        });
+
+        let stats =
+            super::apply_render_distance_haze(&mut frame, [0.0, 0.0, 0.0], Some(32.0), true);
+        assert_eq!(stats.blurred, 1);
+        assert_eq!(frame.opaque_3d.len(), 1);
+        assert!(frame.transparent_3d.is_empty());
+    }
+
+    #[test]
+    fn render_distance_haze_preserves_non_shadow_container_edges() {
+        let mut frame = SceneFrameInstances::default();
+        frame.opaque_3d.push(SceneInstance3d {
+            instance_id: u64::MAX - 20,
+            primitive: ScenePrimitive3d::Mesh { slot: 3 },
+            transform: SceneTransform3d {
+                translation: [0.0, 0.0, 96.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+            material: SceneMaterial {
+                base_color_rgba: [1.0, 1.0, 1.0, 1.0],
+                roughness: 0.0,
+                metallic: 0.0,
+                emissive_rgb: [0.0, 0.0, 0.0],
+                texture_slot: 0,
+                shading: ShadingModel::LitPbr,
+            },
+            casts_shadow: false,
+            receives_shadow: false,
+        });
+
+        let stats =
+            super::apply_render_distance_haze(&mut frame, [0.0, 0.0, 0.0], Some(16.0), true);
+        assert_eq!(stats.blurred, 0);
+        assert_eq!(stats.culled, 0);
+        assert_eq!(frame.opaque_3d.len(), 1);
+    }
+
+    #[test]
+    fn render_distance_haze_runs_with_transparent_container_walls_present() {
+        let mut frame = SceneFrameInstances::default();
+        frame.transparent_3d.push(SceneInstance3d {
+            instance_id: u64::MAX - 400,
+            primitive: ScenePrimitive3d::Mesh {
+                slot: BUILTIN_GLASS_PANEL_MESH_SLOT,
+            },
+            transform: SceneTransform3d {
+                translation: [48.1, 0.0, 0.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: [96.0, 64.0, 1.0],
+            },
+            material: SceneMaterial {
+                base_color_rgba: [0.72, 0.88, 1.0, 0.28],
+                roughness: 0.04,
+                metallic: 0.0,
+                emissive_rgb: [0.12, 0.18, 0.26],
+                texture_slot: 0,
+                shading: ShadingModel::Unlit,
+            },
+            casts_shadow: false,
+            receives_shadow: false,
+        });
+        frame.opaque_3d.push(SceneInstance3d {
+            instance_id: 1,
+            primitive: ScenePrimitive3d::Sphere,
+            transform: SceneTransform3d {
+                translation: [0.0, 0.0, 48.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+            material: SceneMaterial {
+                base_color_rgba: [0.9, 0.2, 0.2, 1.0],
+                roughness: 0.2,
+                metallic: 0.0,
+                emissive_rgb: [0.0, 0.0, 0.0],
+                texture_slot: 0,
+                shading: ShadingModel::LitPbr,
+            },
+            casts_shadow: true,
+            receives_shadow: true,
+        });
+
+        let stats =
+            super::apply_render_distance_haze(&mut frame, [0.0, 0.0, 0.0], Some(16.0), true);
+        assert_eq!(stats.blurred, 1);
+        assert_eq!(frame.transparent_3d.len(), 1);
+        assert_eq!(frame.opaque_3d.len(), 1);
+    }
+
+    #[test]
+    fn container_edge_overlay_stays_enabled_away_from_walls() {
+        let scene = BounceTankSceneConfig {
+            container_half_extents: [48.0, 32.0, 48.0],
+            wall_thickness: 0.46,
+            ball_radius_max: 0.9,
+            ..BounceTankSceneConfig::default()
+        };
+        assert!(!super::container_edge_overlay_should_fade(
+            [0.0, 12.0, 36.0],
+            scene
+        ));
+    }
+
+    #[test]
+    fn container_edge_overlay_fades_when_camera_is_near_wall() {
+        let scene = BounceTankSceneConfig {
+            container_half_extents: [48.0, 32.0, 48.0],
+            wall_thickness: 0.46,
+            ball_radius_max: 0.9,
+            ..BounceTankSceneConfig::default()
+        };
+        assert!(super::container_edge_overlay_should_fade(
+            [45.8, 12.0, 36.0],
+            scene
+        ));
+    }
+
+    #[test]
+    fn container_wall_glass_drop_uses_tighter_threshold_than_edge_overlay() {
+        let scene = BounceTankSceneConfig {
+            container_half_extents: [48.0, 32.0, 48.0],
+            wall_thickness: 0.46,
+            ball_radius_max: 0.9,
+            ..BounceTankSceneConfig::default()
+        };
+        assert!(super::container_edge_overlay_should_fade(
+            [40.0, 12.0, 36.0],
+            scene
+        ));
+        assert!(!super::container_wall_glass_should_drop(
+            [40.0, 12.0, 36.0],
+            scene
+        ));
+    }
+
+    #[test]
+    fn retune_container_edge_overlay_instances_switches_box_shading_near_wall() {
+        let scene = BounceTankSceneConfig {
+            container_half_extents: [48.0, 32.0, 48.0],
+            wall_thickness: 0.46,
+            ball_radius_max: 0.9,
+            ..BounceTankSceneConfig::default()
+        };
+        let mut frame = SceneFrameInstances::default();
+        frame.opaque_3d.push(SceneInstance3d {
+            instance_id: u64::MAX - 20,
+            primitive: ScenePrimitive3d::Box,
+            transform: SceneTransform3d {
+                translation: [48.0, 0.0, 0.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0],
+            },
+            material: SceneMaterial {
+                base_color_rgba: [1.0, 1.0, 1.0, 1.0],
+                roughness: 0.06,
+                metallic: 0.0,
+                emissive_rgb: [0.18, 0.24, 0.32],
+                texture_slot: 0,
+                shading: ShadingModel::Unlit,
+            },
+            casts_shadow: false,
+            receives_shadow: false,
+        });
+
+        super::retune_container_edge_overlay_instances(&mut frame, scene, [45.8, 12.0, 36.0]);
+        assert_eq!(frame.opaque_3d[0].material.shading, ShadingModel::LitPbr);
+
+        super::retune_container_edge_overlay_instances(&mut frame, scene, [0.0, 12.0, 36.0]);
+        assert_eq!(frame.opaque_3d[0].material.shading, ShadingModel::Unlit);
+    }
+
+    #[test]
+    fn retune_container_edge_overlay_instances_keeps_far_walls_transparent() {
+        let scene = BounceTankSceneConfig {
+            container_half_extents: [48.0, 32.0, 48.0],
+            wall_thickness: 0.46,
+            ball_radius_max: 0.9,
+            ..BounceTankSceneConfig::default()
+        };
+        let mut frame = SceneFrameInstances::default();
+        frame.transparent_3d.push(SceneInstance3d {
+            instance_id: u64::MAX - 40,
+            primitive: ScenePrimitive3d::Mesh {
+                slot: BUILTIN_GLASS_PANEL_MESH_SLOT,
+            },
+            transform: SceneTransform3d {
+                translation: [48.1, 0.0, 0.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: [96.0, 64.0, 1.0],
+            },
+            material: SceneMaterial {
+                base_color_rgba: [0.72, 0.88, 1.0, 0.28],
+                roughness: 0.04,
+                metallic: 0.0,
+                emissive_rgb: [0.12, 0.18, 0.26],
+                texture_slot: 0,
+                shading: ShadingModel::Unlit,
+            },
+            casts_shadow: false,
+            receives_shadow: false,
+        });
+
+        super::retune_container_edge_overlay_instances(&mut frame, scene, [0.0, 12.0, 180.0]);
+        assert_eq!(frame.transparent_3d.len(), 1);
+        assert!(frame.opaque_3d.is_empty());
+        assert_eq!(
+            frame.transparent_3d[0].material.shading,
+            ShadingModel::Unlit
+        );
+        assert!((0.26..=0.38).contains(&frame.transparent_3d[0].material.base_color_rgba[3]));
+    }
+
+    #[test]
+    fn retune_container_edge_overlay_instances_drops_near_wall_glass_for_fill() {
+        let scene = BounceTankSceneConfig {
+            container_half_extents: [48.0, 32.0, 48.0],
+            wall_thickness: 0.46,
+            ball_radius_max: 0.9,
+            ..BounceTankSceneConfig::default()
+        };
+        let mut frame = SceneFrameInstances::default();
+        frame.transparent_3d.push(SceneInstance3d {
+            instance_id: u64::MAX - 41,
+            primitive: ScenePrimitive3d::Mesh {
+                slot: BUILTIN_GLASS_PANEL_MESH_SLOT,
+            },
+            transform: SceneTransform3d {
+                translation: [48.1, 0.0, 0.0],
+                rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                scale: [96.0, 64.0, 1.0],
+            },
+            material: SceneMaterial {
+                base_color_rgba: [0.72, 0.88, 1.0, 0.28],
+                roughness: 0.04,
+                metallic: 0.0,
+                emissive_rgb: [0.12, 0.18, 0.26],
+                texture_slot: 0,
+                shading: ShadingModel::Unlit,
+            },
+            casts_shadow: false,
+            receives_shadow: false,
+        });
+
+        super::retune_container_edge_overlay_instances(&mut frame, scene, [45.8, 12.0, 36.0]);
+        assert!(frame.transparent_3d.is_empty());
+    }
+
+    #[test]
+    fn light_inflight_queue_does_not_block_tick_ramp_up_by_itself() {
+        let metrics = MpsThreadPoolMetrics {
+            worker_count: 24,
+            queued_jobs: 6,
+            in_flight_jobs: 12,
+            completed_jobs: 0,
+            completed_frames: 0,
+            latest_completed_frame: None,
+            active_frame_id: Some(42),
+            simd_backend: SimdBackendKind::Scalar,
+            simd_lanes: 1,
+            phase_jobs: DispatcherPhaseJobCounts::default(),
+            phase_completed_jobs: DispatcherPhaseJobCounts::default(),
+            hot_worker_ratio: 1.08,
+            phase_skew: 1.04,
+            queue_saturation_events: 0,
+            compression: CompressionMetrics {
+                compressed_bytes: 0,
+                uncompressed_bytes: 0,
+                compression_ratio: 0.0,
+            },
+        };
+        let backlog = super::evaluate_physics_backlog(&metrics, 0, false, 1_200, 320);
+        assert!(
+            !backlog.block_ramp_up,
+            "a lightly loaded active frame should not freeze tick ramp-up"
+        );
+    }
+
+    #[test]
+    fn max_profile_ceiling_is_more_permissive_than_balanced() {
+        let balanced =
+            super::physics_safe_tick_ceiling_hz(36_000, 6, super::TickProfile::Balanced, 24, false)
+                .expect("balanced ceiling");
+        let maxed =
+            super::physics_safe_tick_ceiling_hz(36_000, 6, super::TickProfile::Max, 24, false)
+                .expect("max ceiling");
+        assert!(
+            maxed > balanced,
+            "max profile should expose a higher safe tick ceiling than balanced"
+        );
+        assert!(
+            maxed >= 180.0,
+            "desktop max profile should not collapse to a low ceiling"
+        );
+    }
+
+    #[test]
+    fn heavy_contact_counts_without_scheduler_pressure_do_not_block_ramp_up() {
+        let metrics = MpsThreadPoolMetrics {
+            worker_count: 24,
+            queued_jobs: 4,
+            in_flight_jobs: 8,
+            completed_jobs: 0,
+            completed_frames: 0,
+            latest_completed_frame: None,
+            active_frame_id: Some(7),
+            simd_backend: SimdBackendKind::Scalar,
+            simd_lanes: 1,
+            phase_jobs: DispatcherPhaseJobCounts::default(),
+            phase_completed_jobs: DispatcherPhaseJobCounts::default(),
+            hot_worker_ratio: 1.06,
+            phase_skew: 1.05,
+            queue_saturation_events: 0,
+            compression: CompressionMetrics {
+                compressed_bytes: 0,
+                uncompressed_bytes: 0,
+                compression_ratio: 0.0,
+            },
+        };
+        let backlog = super::evaluate_physics_backlog(&metrics, 0, false, 12_000, 4_600);
+        assert!(
+            !backlog.block_ramp_up,
+            "contact-heavy frames should not freeze desktop max tick ramp-up when worker pressure is low"
+        );
+    }
+
+    #[test]
+    fn single_queue_saturation_event_does_not_freeze_ramp_up() {
+        let metrics = MpsThreadPoolMetrics {
+            worker_count: 16,
+            queued_jobs: 3,
+            in_flight_jobs: 5,
+            completed_jobs: 0,
+            completed_frames: 0,
+            latest_completed_frame: None,
+            active_frame_id: Some(11),
+            simd_backend: SimdBackendKind::Scalar,
+            simd_lanes: 1,
+            phase_jobs: DispatcherPhaseJobCounts::default(),
+            phase_completed_jobs: DispatcherPhaseJobCounts::default(),
+            hot_worker_ratio: 1.10,
+            phase_skew: 1.08,
+            queue_saturation_events: 1,
+            compression: CompressionMetrics {
+                compressed_bytes: 0,
+                uncompressed_bytes: 0,
+                compression_ratio: 0.0,
+            },
+        };
+        let backlog = super::evaluate_physics_backlog(&metrics, 1, false, 2_400, 640);
+        assert!(
+            !backlog.block_ramp_up,
+            "a single transient queue saturation event should not pin max tick near the current EMA"
+        );
+    }
+
+    #[test]
+    fn hold_timer_without_real_pressure_does_not_block_ramp_up() {
+        let metrics = MpsThreadPoolMetrics {
+            worker_count: 24,
+            queued_jobs: 1,
+            in_flight_jobs: 1,
+            completed_jobs: 0,
+            completed_frames: 0,
+            latest_completed_frame: None,
+            active_frame_id: Some(276),
+            simd_backend: SimdBackendKind::Scalar,
+            simd_lanes: 1,
+            phase_jobs: DispatcherPhaseJobCounts::default(),
+            phase_completed_jobs: DispatcherPhaseJobCounts::default(),
+            hot_worker_ratio: 1.54,
+            phase_skew: 1.00,
+            queue_saturation_events: 0,
+            compression: CompressionMetrics {
+                compressed_bytes: 0,
+                uncompressed_bytes: 0,
+                compression_ratio: 0.0,
+            },
+        };
+        let backlog = super::evaluate_physics_backlog(&metrics, 0, true, 194, 127);
+        assert!(
+            !backlog.block_ramp_up,
+            "a cooldown hold timer alone should not freeze tick ramp-up when scheduler pressure is otherwise low"
+        );
+    }
+
+    #[test]
+    fn render_bound_headroom_detects_gpu_limited_desktop_max_case() {
+        let backlog = super::PhysicsBacklogState {
+            queue_pressure: 0.0,
+            inflight_pressure: 0.0,
+            hot_worker_ratio: 1.42,
+            phase_skew: 1.0,
+            score: 0.98,
+            moderate: true,
+            severe: false,
+            block_ramp_up: false,
+        };
+        assert!(super::physics_has_render_bound_headroom(
+            super::TickProfile::Max,
+            false,
+            true,
+            backlog,
+            2_216,
+            27.8,
+            6.09,
+        ));
+    }
+
+    #[test]
+    fn render_bound_headroom_survives_ema_lag_when_fill_is_high() {
+        let backlog = super::PhysicsBacklogState {
+            queue_pressure: 0.0,
+            inflight_pressure: 0.0,
+            hot_worker_ratio: 1.41,
+            phase_skew: 1.0,
+            score: 0.96,
+            moderate: true,
+            severe: false,
+            block_ramp_up: false,
+        };
+        assert!(super::physics_has_render_bound_headroom(
+            super::TickProfile::Max,
+            false,
+            true,
+            backlog,
+            3_827,
+            9.82,
+            3.86,
+        ));
+    }
+
+    #[test]
+    fn desktop_max_profile_can_hold_tick_under_render_load_with_physics_headroom() {
+        let backlog = super::PhysicsBacklogState {
+            queue_pressure: 0.0,
+            inflight_pressure: 0.0,
+            hot_worker_ratio: 1.32,
+            phase_skew: 1.0,
+            score: 0.72,
+            moderate: false,
+            severe: false,
+            block_ramp_up: false,
+        };
+        assert!(super::physics_can_hold_tick_under_render_load(
+            super::TickProfile::Max,
+            false,
+            true,
+            backlog,
+            5_172,
+        ));
+    }
+
+    #[test]
+    fn heimdall_performance_profile_implies_max_tick_behavior() {
+        assert_eq!(
+            super::effective_tick_profile(
+                super::TickProfile::Balanced,
+                super::PerformanceProfile::Heimdall,
+            ),
+            super::TickProfile::Max
+        );
+        assert_eq!(
+            super::effective_tick_profile(
+                super::TickProfile::Balanced,
+                super::PerformanceProfile::Aggressive,
+            ),
+            super::TickProfile::Max
+        );
+        assert_eq!(
+            super::effective_tick_profile(
+                super::TickProfile::Balanced,
+                super::PerformanceProfile::Balanced,
+            ),
+            super::TickProfile::Balanced
+        );
+    }
+
+    #[test]
+    fn discrete_desktop_gpu_is_not_mobile_class_hardware() {
+        let adapter = super::RuntimeAdapterInfo {
+            name: "NVIDIA GeForce RTX 5060 Ti".to_string(),
+            backend: super::RuntimeGpuBackend::Vulkan,
+            device_type: super::RuntimeGpuDeviceType::DiscreteGpu,
+        };
+        assert!(!super::is_mobile_class_hardware(&adapter));
+    }
+
+    #[test]
+    fn integrated_mobile_tbdr_gpu_is_mobile_class_hardware() {
+        let adapter = super::RuntimeAdapterInfo {
+            name: "Mali-G610".to_string(),
+            backend: super::RuntimeGpuBackend::Vulkan,
+            device_type: super::RuntimeGpuDeviceType::IntegratedGpu,
+        };
+        assert!(super::is_mobile_class_hardware(&adapter));
+    }
+
+    #[test]
+    fn apple_m_series_desktop_gpu_is_not_mobile_class_hardware() {
+        let adapter = super::RuntimeAdapterInfo {
+            name: "Apple M4 Max".to_string(),
+            backend: super::RuntimeGpuBackend::Metal,
+            device_type: super::RuntimeGpuDeviceType::IntegratedGpu,
+        };
+        assert!(!super::is_mobile_class_hardware(&adapter));
+    }
+
+    #[test]
+    fn discrete_radeon_desktop_gpu_is_not_mobile_class_hardware() {
+        let adapter = super::RuntimeAdapterInfo {
+            name: "AMD Radeon RX 7900 XTX".to_string(),
+            backend: super::RuntimeGpuBackend::Vulkan,
+            device_type: super::RuntimeGpuDeviceType::DiscreteGpu,
+        };
+        assert!(!super::is_mobile_class_hardware(&adapter));
+    }
+
+    #[test]
+    fn physics_parallel_ready_uses_actual_phase_modes_not_script_dispatch() {
+        let metrics = MpsThreadPoolMetrics {
+            worker_count: 24,
+            queued_jobs: 0,
+            in_flight_jobs: 0,
+            completed_jobs: 0,
+            completed_frames: 0,
+            latest_completed_frame: None,
+            active_frame_id: Some(1),
+            simd_backend: SimdBackendKind::Scalar,
+            simd_lanes: 1,
+            phase_jobs: DispatcherPhaseJobCounts::default(),
+            phase_completed_jobs: DispatcherPhaseJobCounts::default(),
+            hot_worker_ratio: 1.0,
+            phase_skew: 1.0,
+            queue_saturation_events: 0,
+            compression: CompressionMetrics {
+                compressed_bytes: 0,
+                uncompressed_bytes: 0,
+                compression_ratio: 0.0,
+            },
+        };
+        let timings = super::PhysicsStepTimings {
+            integrate_mode: super::ParallelExecutionMode::Parallel,
+            broadphase_mode: super::ParallelExecutionMode::Parallel,
+            narrowphase_mode: super::ParallelExecutionMode::SerialSmallWorkload,
+            solver_mode: super::ParallelExecutionMode::SerialSmallWorkload,
+            ..super::PhysicsStepTimings::default()
+        };
+        assert!(
+            super::physics_parallel_ready(&metrics, &timings),
+            "actual phase telemetry should mark physics as parallel-ready even if some phases stay serial_small_workload"
+        );
+    }
 }
 
 fn print_tlsprite_event(prefix: &str, event: TlspriteHotReloadEvent) {

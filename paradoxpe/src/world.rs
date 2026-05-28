@@ -174,6 +174,12 @@ impl Default for PhysicsWorldConfig {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PhysicsStepTimings {
     pub substeps: u32,
+    /// End-to-end wall-clock time for the full fixed-step run.
+    ///
+    /// Unlike `total_us()`, this does not sum each phase's timing buckets.
+    /// Parallel execution paths can therefore report a much smaller wall time
+    /// than the accumulated per-phase total.
+    pub wall_us: u64,
     pub compute_us: u64,
     pub integrate_us: u64,
     pub integrate_mode: ParallelExecutionMode,
@@ -197,6 +203,14 @@ pub struct PhysicsStepTimings {
 }
 
 impl PhysicsStepTimings {
+    pub fn ceiling_basis_us(&self) -> u64 {
+        if self.wall_us > 0 {
+            self.wall_us
+        } else {
+            self.total_us()
+        }
+    }
+
     pub fn total_us(&self) -> u64 {
         self.compute_us
             + self.integrate_us
@@ -834,6 +848,8 @@ impl PhysicsWorld {
             return 0;
         }
 
+        let wall_started = Instant::now();
+
         let backend_name = self
             .compute_backend
             .as_ref()
@@ -858,6 +874,7 @@ impl PhysicsWorld {
         }
 
         self.capture_post_step_snapshot(&mut timings);
+        timings.wall_us = duration_us(wall_started.elapsed());
         self.last_step_timings = timings;
         plan.substeps
     }
@@ -1747,6 +1764,27 @@ mod tests {
         assert_eq!(world.config().max_substeps, 24);
         assert!((world.fixed_step_clock().fixed_dt() - (1.0 / 480.0)).abs() < 1e-6);
         assert_eq!(world.fixed_step_clock().max_substeps(), 24);
+    }
+
+    #[test]
+    fn ceiling_basis_prefers_wall_time_when_available() {
+        let timings = PhysicsStepTimings {
+            wall_us: 4_000,
+            integrate_us: 3_000,
+            broadphase_us: 5_000,
+            solver_us: 7_000,
+            ..PhysicsStepTimings::default()
+        };
+        assert_eq!(timings.ceiling_basis_us(), 4_000);
+
+        let timings = PhysicsStepTimings {
+            wall_us: 0,
+            integrate_us: 3_000,
+            broadphase_us: 5_000,
+            solver_us: 7_000,
+            ..PhysicsStepTimings::default()
+        };
+        assert_eq!(timings.ceiling_basis_us(), 15_000);
     }
 
     #[test]

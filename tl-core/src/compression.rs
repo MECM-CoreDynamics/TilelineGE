@@ -71,9 +71,7 @@ impl SnapshotCompressor {
 
     /// Decompress a vector of pages back into a contiguous byte vector.
     pub fn decompress(&self, pages: &[SxrcCompressedPage]) -> Result<Vec<u8>, sxrc::SxrcError> {
-        let mut out = Vec::with_capacity(
-            pages.iter().map(|p| p.original_len).sum(),
-        );
+        let mut out = Vec::with_capacity(pages.iter().map(|p| p.original_len).sum());
         for page in pages {
             out.extend_from_slice(&self.codec.decompress_page(page)?);
         }
@@ -141,7 +139,10 @@ mod tests {
         let decoded = compressor.decompress(&pages).unwrap();
         assert_eq!(data, decoded);
         let ratio = SnapshotCompressor::ratio(&pages);
-        assert!(ratio < 0.1, "zero-filled data should compress well, got ratio {ratio}");
+        assert!(
+            ratio < 0.1,
+            "zero-filled data should compress well, got ratio {ratio}"
+        );
     }
 
     #[test]

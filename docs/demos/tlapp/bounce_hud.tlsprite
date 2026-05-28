@@ -44,6 +44,16 @@ position = 0.78, 0.84, 0.0
 rotation_rad = 0.0
 color = 0.88, 0.94, 1.0, 0.80
 
+[scene.mesh_wall_panel]
+sprite_id = 104
+kind = camera
+texture_slot = 4
+fbx = cube-prism.fbx
+layer = 152
+position = 0.68, 0.84, 0.0
+rotation_rad = 0.0
+color = 0.72, 0.86, 1.0, 0.72
+
 [light.flashlight]
 entry_kind = light
 light_id = 200

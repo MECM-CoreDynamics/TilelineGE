@@ -219,8 +219,7 @@ impl GmsRuntimeTuningProfile {
                     self.throughput_startup_ramp_frames.saturating_sub(30);
                 self.throughput_startup_prewarm_submits =
                     (self.throughput_startup_prewarm_submits + 2).min(6);
-                self.benchmark_timing_capacity =
-                    (self.benchmark_timing_capacity * 2).min(524_288);
+                self.benchmark_timing_capacity = (self.benchmark_timing_capacity * 2).min(524_288);
             }
         }
     }

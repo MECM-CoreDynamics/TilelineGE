@@ -8,8 +8,7 @@ use std::io::Cursor;
 use fbx::Property as FbxProperty;
 
 /// Default embedded sphere FBX used for the high-quality sphere slot.
-pub const DEFAULT_SPHERE_FBX_BYTES: &[u8] =
-    include_bytes!("../../docs/demos/tlapp/sphere.fbx");
+pub const DEFAULT_SPHERE_FBX_BYTES: &[u8] = include_bytes!("../../docs/demos/tlapp/sphere.fbx");
 
 /// Parsed FBX mesh output: world-space positions normalized to unit box, plus triangle indices.
 pub struct ParsedFbxMesh {
@@ -102,9 +101,21 @@ fn normalize_positions_to_unit_box(positions: &mut [[f32; 3]]) {
     ];
     let extent = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
     let inv_extent = [
-        if extent[0].abs() > 1e-6 { 1.0 / extent[0] } else { 0.0 },
-        if extent[1].abs() > 1e-6 { 1.0 / extent[1] } else { 0.0 },
-        if extent[2].abs() > 1e-6 { 1.0 / extent[2] } else { 0.0 },
+        if extent[0].abs() > 1e-6 {
+            1.0 / extent[0]
+        } else {
+            0.0
+        },
+        if extent[1].abs() > 1e-6 {
+            1.0 / extent[1]
+        } else {
+            0.0
+        },
+        if extent[2].abs() > 1e-6 {
+            1.0 / extent[2]
+        } else {
+            0.0
+        },
     ];
     for p in positions.iter_mut() {
         for axis in 0..3 {
@@ -212,7 +223,10 @@ mod tests {
             .expect("embedded sphere.fbx should parse");
         for p in &mesh.positions {
             for &coord in p.iter() {
-                assert!(coord >= -0.5 - 1e-4 && coord <= 0.5 + 1e-4, "position out of unit box: {coord}");
+                assert!(
+                    coord >= -0.5 - 1e-4 && coord <= 0.5 + 1e-4,
+                    "position out of unit box: {coord}"
+                );
             }
         }
     }

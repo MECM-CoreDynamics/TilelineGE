@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::ffi::{CStr, CString};
 use std::fmt::{Display, Formatter};
-use std::mem::{align_of, offset_of, size_of};
+use std::mem::{align_of, size_of};
 use std::path::PathBuf;
 use std::ptr::{self, NonNull};
 use std::sync::Arc;
@@ -33,9 +33,17 @@ use winit::window::Window;
 
 use crate::graphics::frame_snapshot::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
-    FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+    FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_OVERLAY,
+    FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 use crate::graphics::multigpu::sync::{GpuQueueLane, MultiGpuFrameSyncConfig, SyncBackendHint};
+use crate::graphics::vulkan_culling;
+use crate::graphics::vulkan_geometry::{
+    unit_cube_indices, unit_cube_vertices, unit_icosa_sphere_indices, unit_icosa_sphere_vertices,
+};
+use crate::graphics::vulkan_pipeline::{create_scene_pipeline, ScenePipelineMode};
+
+pub use crate::graphics::vulkan_geometry::SceneVertex;
 
 const ENGINE_NAME: &[u8] = b"Tileline\0";
 const APPLICATION_NAME: &[u8] = b"Tileline TLCore Vulkan Backend\0";
@@ -90,6 +98,8 @@ pub struct VulkanBackendConfig {
     pub max_lights: usize,
     /// Camera-relative distance beyond which lights are culled.
     pub light_cull_distance: f32,
+    /// Enable CPU-side view-frustum culling + compaction.
+    pub occlusion_culling_enabled: bool,
 }
 
 impl Default for VulkanBackendConfig {
@@ -104,6 +114,7 @@ impl Default for VulkanBackendConfig {
             pipeline_cache_path: None,
             max_lights: 8,
             light_cull_distance: 100.0,
+            occlusion_culling_enabled: true,
         }
     }
 }
@@ -122,7 +133,7 @@ pub struct VulkanMultiGpuConfig {
 impl Default for VulkanMultiGpuConfig {
     fn default() -> Self {
         Self {
-            enable_secondary_gpu: true,
+            enable_secondary_gpu: false,
             allow_transfer_lane: true,
             sync: MultiGpuFrameSyncConfig::default(),
         }
@@ -220,27 +231,16 @@ struct SnapshotHeader {
 #[derive(Debug, Clone, Copy, Default)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    camera_eye: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-struct DrawPushConstants {
+pub(crate) struct DrawPushConstants {
     material_count: u32,
     light_count: u32,
     texture_count: u32,
     _padding0: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SceneVertex {
-    pub position: [f32; 3],
-    pub uv: [f32; 2],
-}
-
-#[derive(Debug, Clone)]
-struct SpirvShaderArtifact {
-    words: Vec<u32>,
 }
 
 /// Snapshot metadata exposed for debugging / telemetry.
@@ -456,6 +456,7 @@ struct ScenePipelineResources {
     pipeline_layout: vk::PipelineLayout,
     opaque_pipeline: vk::Pipeline,
     transparent_pipeline: vk::Pipeline,
+    overlay_pipeline: vk::Pipeline,
     vertex_buffer: PersistentlyMappedBuffer,
     index_buffer: PersistentlyMappedBuffer,
     index_count: u32,
@@ -564,6 +565,7 @@ impl VulkanBackend {
                 queue_selection,
                 window.inner_size(),
                 config.present_mode,
+                vk::SwapchainKHR::null(),
             )?
         };
         let render_pass =
@@ -577,9 +579,8 @@ impl VulkanBackend {
                 &mut swapchain,
             )?
         };
-        let pipeline_cache = unsafe {
-            create_pipeline_cache(&device, &config.pipeline_cache_path)?
-        };
+        let pipeline_cache =
+            unsafe { create_pipeline_cache(&device, &config.pipeline_cache_path)? };
         let scene_pipeline = unsafe {
             create_scene_pipeline_resources(
                 &instance,
@@ -683,17 +684,19 @@ impl VulkanBackend {
             lanes.push(GpuQueueLane::Transfer);
         }
 
+        let native_active = secondary_enabled
+            && self.multi_gpu_capabilities.native_support.active
+            && self.secondary_device.is_some();
+
         VulkanMultiGpuFramePlan {
             frame_id,
             lanes,
-            require_secondary: secondary_enabled,
+            require_secondary: native_active,
             require_transfer: transfer_enabled,
             cross_adapter_bytes,
             compose_wait_budget_us: self.config.multi_gpu.sync.compose_wait_budget.as_micros()
                 as u64,
-            native_multi_gpu_active: secondary_enabled
-                && self.multi_gpu_capabilities.native_support.active
-                && self.secondary_device.is_some(),
+            native_multi_gpu_active: native_active,
             native_multi_gpu_reason: self.multi_gpu_capabilities.native_support.reason.clone(),
         }
     }
@@ -712,8 +715,7 @@ impl VulkanBackend {
         slot: u16,
         rgba_pixels: &[u8],
     ) -> Result<(), VulkanBackendError> {
-        const EXPECTED: usize =
-            (SPRITE_ATLAS_TILE_SIZE * SPRITE_ATLAS_TILE_SIZE * 4) as usize;
+        const EXPECTED: usize = (SPRITE_ATLAS_TILE_SIZE * SPRITE_ATLAS_TILE_SIZE * 4) as usize;
         if slot as u32 >= SPRITE_ATLAS_LAYER_COUNT {
             return Err(VulkanBackendError::InvalidConfig(
                 "texture slot index exceeds atlas layer count",
@@ -751,7 +753,8 @@ impl VulkanBackend {
         let command_buffer = self.device.allocate_command_buffers(&alloc_info)?[0];
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        self.device.begin_command_buffer(command_buffer, &begin_info)?;
+        self.device
+            .begin_command_buffer(command_buffer, &begin_info)?;
 
         let subresource = vk::ImageSubresourceRange::default()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -824,11 +827,15 @@ impl VulkanBackend {
         self.device.end_command_buffer(command_buffer)?;
         let command_buffers = [command_buffer];
         let submit = vk::SubmitInfo::default().command_buffers(&command_buffers);
-        let fence = self.device.create_fence(&vk::FenceCreateInfo::default(), None)?;
-        self.device.queue_submit(self.graphics_queue, &[submit], fence)?;
+        let fence = self
+            .device
+            .create_fence(&vk::FenceCreateInfo::default(), None)?;
+        self.device
+            .queue_submit(self.graphics_queue, &[submit], fence)?;
         self.device.wait_for_fences(&[fence], true, u64::MAX)?;
         self.device.destroy_fence(fence, None);
-        self.device.free_command_buffers(command_pool, &[command_buffer]);
+        self.device
+            .free_command_buffers(command_pool, &[command_buffer]);
         self.device.destroy_command_pool(command_pool, None);
         destroy_mapped_buffer(&self.device, staging);
 
@@ -898,12 +905,13 @@ impl VulkanBackend {
 
         unsafe {
             self.device.device_wait_idle()?;
-            destroy_framebuffers(&self.device, &mut self.swapchain);
-            destroy_image_views(&self.device, &mut self.swapchain);
-            self.swapchain
-                .loader
-                .destroy_swapchain(self.swapchain.swapchain, None);
-            self.swapchain = create_swapchain_state(
+        }
+
+        let old_format = self.swapchain.format;
+        let old_depth_format = self.swapchain.depth_format;
+        let old_swapchain = self.swapchain.swapchain;
+        let mut new_swapchain = unsafe {
+            create_swapchain_state(
                 &self.instance,
                 &self.device,
                 self.physical_device,
@@ -912,34 +920,125 @@ impl VulkanBackend {
                 self.queue_selection,
                 new_size,
                 self.config.present_mode,
-            )?;
+                old_swapchain,
+            )?
+        };
+
+        let mut replacement_render_pass = vk::RenderPass::null();
+        let render_pass_for_targets = if new_swapchain.format != old_format
+            || new_swapchain.depth_format != old_depth_format
+        {
+            replacement_render_pass = unsafe {
+                create_render_pass(
+                    &self.device,
+                    new_swapchain.format,
+                    new_swapchain.depth_format,
+                )?
+            };
+            replacement_render_pass
+        } else {
+            self.render_pass
+        };
+
+        if let Err(err) = unsafe {
             create_framebuffers(
                 &self.instance,
                 &self.device,
                 self.physical_device,
-                self.render_pass,
-                &mut self.swapchain,
-            )?;
+                render_pass_for_targets,
+                &mut new_swapchain,
+            )
+        } {
+            unsafe {
+                if replacement_render_pass != vk::RenderPass::null() {
+                    self.device
+                        .destroy_render_pass(replacement_render_pass, None);
+                }
+                destroy_swapchain_state(&self.device, &mut new_swapchain);
+            }
+            return Err(err);
+        }
+
+        let new_opaque_pipeline = unsafe {
+            match create_scene_pipeline(
+                &self.device,
+                render_pass_for_targets,
+                new_swapchain.extent,
+                self.scene_pipeline.pipeline_layout,
+                ScenePipelineMode::Opaque,
+                self.pipeline_cache,
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(err) => {
+                    destroy_swapchain_state(&self.device, &mut new_swapchain);
+                    if replacement_render_pass != vk::RenderPass::null() {
+                        self.device
+                            .destroy_render_pass(replacement_render_pass, None);
+                    }
+                    return Err(err);
+                }
+            }
+        };
+        let new_transparent_pipeline = unsafe {
+            match create_scene_pipeline(
+                &self.device,
+                render_pass_for_targets,
+                new_swapchain.extent,
+                self.scene_pipeline.pipeline_layout,
+                ScenePipelineMode::Transparent,
+                self.pipeline_cache,
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(err) => {
+                    self.device.destroy_pipeline(new_opaque_pipeline, None);
+                    destroy_swapchain_state(&self.device, &mut new_swapchain);
+                    if replacement_render_pass != vk::RenderPass::null() {
+                        self.device
+                            .destroy_render_pass(replacement_render_pass, None);
+                    }
+                    return Err(err);
+                }
+            }
+        };
+        let new_overlay_pipeline = unsafe {
+            match create_scene_pipeline(
+                &self.device,
+                render_pass_for_targets,
+                new_swapchain.extent,
+                self.scene_pipeline.pipeline_layout,
+                ScenePipelineMode::Overlay,
+                self.pipeline_cache,
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(err) => {
+                    self.device.destroy_pipeline(new_opaque_pipeline, None);
+                    self.device.destroy_pipeline(new_transparent_pipeline, None);
+                    destroy_swapchain_state(&self.device, &mut new_swapchain);
+                    if replacement_render_pass != vk::RenderPass::null() {
+                        self.device
+                            .destroy_render_pass(replacement_render_pass, None);
+                    }
+                    return Err(err);
+                }
+            }
+        };
+
+        unsafe {
             self.device
                 .destroy_pipeline(self.scene_pipeline.opaque_pipeline, None);
             self.device
                 .destroy_pipeline(self.scene_pipeline.transparent_pipeline, None);
-            self.scene_pipeline.opaque_pipeline = create_scene_pipeline(
-                &self.device,
-                self.render_pass,
-                self.swapchain.extent,
-                self.scene_pipeline.pipeline_layout,
-                false,
-                self.pipeline_cache,
-            )?;
-            self.scene_pipeline.transparent_pipeline = create_scene_pipeline(
-                &self.device,
-                self.render_pass,
-                self.swapchain.extent,
-                self.scene_pipeline.pipeline_layout,
-                true,
-                self.pipeline_cache,
-            )?;
+            self.device
+                .destroy_pipeline(self.scene_pipeline.overlay_pipeline, None);
+            destroy_swapchain_state(&self.device, &mut self.swapchain);
+            if replacement_render_pass != vk::RenderPass::null() {
+                self.device.destroy_render_pass(self.render_pass, None);
+                self.render_pass = replacement_render_pass;
+            }
+            self.swapchain = new_swapchain;
+            self.scene_pipeline.opaque_pipeline = new_opaque_pipeline;
+            self.scene_pipeline.transparent_pipeline = new_transparent_pipeline;
+            self.scene_pipeline.overlay_pipeline = new_overlay_pipeline;
         }
 
         Ok(())
@@ -1005,10 +1104,10 @@ impl VulkanBackend {
                 .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
         });
         let cull_dist_sq = self.config.light_cull_distance * self.config.light_cull_distance;
-        let kept: Vec<&FrameLightRecord> = lights
+        let kept: Vec<FrameLightRecord> = lights
             .into_iter()
             .filter(|(dist_sq, _, _)| *dist_sq <= cull_dist_sq)
-            .map(|(_, _, light)| light)
+            .map(|(_, _, light)| *light)
             .take(self.config.max_lights)
             .collect();
         if kept.len() > slot.snapshot_slot.light_capacity {
@@ -1019,9 +1118,28 @@ impl VulkanBackend {
         }
         let lights_dropped = snapshot.lights.len().saturating_sub(kept.len());
 
+        let mut visible_transforms = None;
+        let mut visible_ranges = None;
+        if self.config.occlusion_culling_enabled {
+            let planes = vulkan_culling::extract_frustum_planes(snapshot.camera_view_proj);
+            let (visible, ranges) = vulkan_culling::cull_and_compact(&snapshot, &planes);
+            visible_transforms = Some(visible);
+            visible_ranges = Some(ranges);
+        }
+
+        let transforms_slice = match &visible_transforms {
+            Some(v) => v.as_slice(),
+            None => snapshot.transforms,
+        };
+
+        let ranges_vec = match visible_ranges {
+            Some(r) => r,
+            None => snapshot.primitive_ranges.to_vec(),
+        };
+
         let header = SnapshotHeader {
             frame_id: snapshot.frame_id,
-            instance_count: snapshot.transforms.len() as u32,
+            instance_count: transforms_slice.len() as u32,
             material_count: snapshot.materials.len() as u32,
             texture_count: snapshot.textures.len() as u32,
             light_count: kept.len() as u32,
@@ -1038,17 +1156,20 @@ impl VulkanBackend {
                 slot.camera_uniform.as_mut_ptr::<CameraUniform>(0)?,
                 CameraUniform {
                     view_proj: snapshot.camera_view_proj,
+                    camera_eye: snapshot.camera_eye,
                 },
             );
             let transform_dst = slot
                 .snapshot_slot
                 .mapped
                 .as_mut_ptr::<FrameInstanceTransform>(slot.snapshot_slot.transforms_offset)?;
-            ptr::copy_nonoverlapping(
-                snapshot.transforms.as_ptr(),
-                transform_dst,
-                snapshot.transforms.len(),
-            );
+            if !transforms_slice.is_empty() {
+                ptr::copy_nonoverlapping(
+                    transforms_slice.as_ptr(),
+                    transform_dst,
+                    transforms_slice.len(),
+                );
+            }
             let material_dst = slot
                 .snapshot_slot
                 .mapped
@@ -1072,22 +1193,22 @@ impl VulkanBackend {
                 .mapped
                 .as_mut_ptr::<FrameLightRecord>(slot.snapshot_slot.lights_offset)?;
             if !kept.is_empty() {
-                ptr::copy_nonoverlapping(kept.as_ptr() as *const FrameLightRecord, light_dst, kept.len());
+                ptr::copy_nonoverlapping(kept.as_ptr(), light_dst, kept.len());
             }
         }
 
-        let byte_len = slot.snapshot_slot.lights_offset
-            + kept.len() * size_of::<FrameLightRecord>();
+        let byte_len =
+            slot.snapshot_slot.lights_offset + kept.len() * size_of::<FrameLightRecord>();
         slot.snapshot_slot.last_state = VulkanSnapshotSlotState {
             frame_id: snapshot.frame_id,
-            instance_count: snapshot.transforms.len() as u32,
+            instance_count: transforms_slice.len() as u32,
             opaque_instance_count: snapshot.opaque_instance_count,
             transparent_instance_count: snapshot.transparent_instance_count,
             material_count: snapshot.materials.len() as u32,
             texture_count: snapshot.textures.len() as u32,
             light_count: kept.len() as u32,
             byte_len,
-            primitive_ranges: snapshot.primitive_ranges.to_vec(),
+            primitive_ranges: ranges_vec,
         };
         Ok(slot.snapshot_slot.last_state.clone())
     }
@@ -1259,21 +1380,23 @@ impl Drop for VulkanBackend {
             self.device
                 .destroy_pipeline(self.scene_pipeline.transparent_pipeline, None);
             self.device
+                .destroy_pipeline(self.scene_pipeline.overlay_pipeline, None);
+            self.device
                 .destroy_pipeline_layout(self.scene_pipeline.pipeline_layout, None);
             self.device
                 .destroy_descriptor_pool(self.scene_pipeline.descriptor_pool, None);
             self.device
                 .destroy_descriptor_set_layout(self.scene_pipeline.descriptor_set_layout, None);
-            destroy_framebuffers(&self.device, &mut self.swapchain);
+            destroy_swapchain_state(&self.device, &mut self.swapchain);
             self.device.destroy_render_pass(self.render_pass, None);
-            destroy_image_views(&self.device, &mut self.swapchain);
-            self.swapchain
-                .loader
-                .destroy_swapchain(self.swapchain.swapchain, None);
-            let cache_path = self.config.pipeline_cache_path.clone()
+            let cache_path = self
+                .config
+                .pipeline_cache_path
+                .clone()
                 .unwrap_or_else(|| std::env::temp_dir().join("tileline_vk_pipeline_cache.bin"));
             let _ = save_pipeline_cache(&self.device, self.pipeline_cache, &cache_path);
-            self.device.destroy_pipeline_cache(self.pipeline_cache, None);
+            self.device
+                .destroy_pipeline_cache(self.pipeline_cache, None);
             self.device.destroy_device(None);
             self.surface_loader.destroy_surface(self.surface, None);
             self.instance.destroy_instance(None);
@@ -1289,8 +1412,7 @@ unsafe fn create_pipeline_cache(
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().join("tileline_vk_pipeline_cache.bin"));
     let initial_data = std::fs::read(&cache_path).unwrap_or_default();
-    let create_info = vk::PipelineCacheCreateInfo::default()
-        .initial_data(&initial_data);
+    let create_info = vk::PipelineCacheCreateInfo::default().initial_data(&initial_data);
     let cache = device.create_pipeline_cache(&create_info, None)?;
     Ok(cache)
 }
@@ -1685,6 +1807,7 @@ unsafe fn create_swapchain_state(
     selection: VulkanQueueSelection,
     window_size: PhysicalSize<u32>,
     present_preference: PresentModePreference,
+    old_swapchain: vk::SwapchainKHR,
 ) -> Result<SwapchainState, VulkanBackendError> {
     let present_family_index = selection
         .present_family_index
@@ -1728,7 +1851,8 @@ unsafe fn create_swapchain_state(
         .pre_transform(capabilities.current_transform)
         .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
         .present_mode(present_mode)
-        .clipped(true);
+        .clipped(true)
+        .old_swapchain(old_swapchain);
 
     let loader = swapchain::Device::new(instance, device);
     let swapchain = loader.create_swapchain(&create_info, None)?;
@@ -2308,10 +2432,30 @@ unsafe fn create_scene_pipeline_resources(
         graphics_queue_family_index,
         graphics_queue,
     )?;
-    let opaque_pipeline =
-        create_scene_pipeline(device, render_pass, extent, pipeline_layout, false, pipeline_cache)?;
-    let transparent_pipeline =
-        create_scene_pipeline(device, render_pass, extent, pipeline_layout, true, pipeline_cache)?;
+    let opaque_pipeline = create_scene_pipeline(
+        device,
+        render_pass,
+        extent,
+        pipeline_layout,
+        ScenePipelineMode::Opaque,
+        pipeline_cache,
+    )?;
+    let transparent_pipeline = create_scene_pipeline(
+        device,
+        render_pass,
+        extent,
+        pipeline_layout,
+        ScenePipelineMode::Transparent,
+        pipeline_cache,
+    )?;
+    let overlay_pipeline = create_scene_pipeline(
+        device,
+        render_pass,
+        extent,
+        pipeline_layout,
+        ScenePipelineMode::Overlay,
+        pipeline_cache,
+    )?;
 
     Ok(ScenePipelineResources {
         descriptor_set_layout,
@@ -2319,6 +2463,7 @@ unsafe fn create_scene_pipeline_resources(
         pipeline_layout,
         opaque_pipeline,
         transparent_pipeline,
+        overlay_pipeline,
         vertex_buffer,
         index_buffer,
         index_count: cube_indices.len() as u32,
@@ -2405,203 +2550,6 @@ fn find_memory_type(
         }
     }
     None
-}
-
-unsafe fn create_scene_pipeline(
-    device: &Device,
-    render_pass: vk::RenderPass,
-    extent: vk::Extent2D,
-    pipeline_layout: vk::PipelineLayout,
-    transparent: bool,
-    pipeline_cache: vk::PipelineCache,
-) -> Result<vk::Pipeline, VulkanBackendError> {
-    let [vertex_artifact, fragment_artifact] = build_scene_shader_spirv_artifacts()?;
-    let vertex_module = create_shader_module(device, &vertex_artifact.words)?;
-    let fragment_module = create_shader_module(device, &fragment_artifact.words)?;
-
-    let entry_name = CString::new("main")
-        .map_err(|_| VulkanBackendError::InvalidConfig("invalid Vulkan shader entrypoint"))?;
-    let shader_stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .module(vertex_module)
-            .name(&entry_name)
-            .stage(vk::ShaderStageFlags::VERTEX),
-        vk::PipelineShaderStageCreateInfo::default()
-            .module(fragment_module)
-            .name(&entry_name)
-            .stage(vk::ShaderStageFlags::FRAGMENT),
-    ];
-
-    let vertex_binding_descriptions = [
-        vk::VertexInputBindingDescription {
-            binding: 0,
-            stride: size_of::<SceneVertex>() as u32,
-            input_rate: vk::VertexInputRate::VERTEX,
-        },
-        vk::VertexInputBindingDescription {
-            binding: 1,
-            stride: size_of::<FrameInstanceTransform>() as u32,
-            input_rate: vk::VertexInputRate::INSTANCE,
-        },
-    ];
-    let instance_model_offset = offset_of!(FrameInstanceTransform, model) as u32;
-    let instance_color_offset = offset_of!(FrameInstanceTransform, color_rgba) as u32;
-    let instance_material_index_offset = offset_of!(FrameInstanceTransform, material_index) as u32;
-    let instance_flags_offset = offset_of!(FrameInstanceTransform, flags) as u32;
-    let vertex_attribute_descriptions = [
-        vk::VertexInputAttributeDescription {
-            location: 0,
-            binding: 0,
-            format: vk::Format::R32G32B32_SFLOAT,
-            offset: offset_of!(SceneVertex, position) as u32,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 1,
-            binding: 1,
-            format: vk::Format::R32G32B32A32_SFLOAT,
-            offset: instance_model_offset,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 2,
-            binding: 1,
-            format: vk::Format::R32G32B32A32_SFLOAT,
-            offset: instance_model_offset + 16,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 3,
-            binding: 1,
-            format: vk::Format::R32G32B32A32_SFLOAT,
-            offset: instance_model_offset + 32,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 4,
-            binding: 1,
-            format: vk::Format::R32G32B32A32_SFLOAT,
-            offset: instance_model_offset + 48,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 5,
-            binding: 1,
-            format: vk::Format::R32G32B32A32_SFLOAT,
-            offset: instance_color_offset,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 6,
-            binding: 1,
-            format: vk::Format::R32_UINT,
-            offset: instance_material_index_offset,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 7,
-            binding: 1,
-            format: vk::Format::R32_UINT,
-            offset: instance_flags_offset,
-        },
-        vk::VertexInputAttributeDescription {
-            location: 8,
-            binding: 0,
-            format: vk::Format::R32G32_SFLOAT,
-            offset: offset_of!(SceneVertex, uv) as u32,
-        },
-    ];
-    let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::default()
-        .vertex_binding_descriptions(&vertex_binding_descriptions)
-        .vertex_attribute_descriptions(&vertex_attribute_descriptions);
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
-        .primitive_restart_enable(false);
-    let viewports = [vk::Viewport {
-        x: 0.0,
-        y: 0.0,
-        width: extent.width as f32,
-        height: extent.height as f32,
-        min_depth: 0.0,
-        max_depth: 1.0,
-    }];
-    let scissors = [vk::Rect2D::default().extent(extent)];
-    let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-        .viewports(&viewports)
-        .scissors(&scissors);
-    let rasterizer = vk::PipelineRasterizationStateCreateInfo::default()
-        .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::BACK)
-        .front_face(vk::FrontFace::CLOCKWISE)
-        .line_width(1.0);
-    let multisampling = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(true)
-        .depth_write_enable(!transparent)
-        .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
-        .depth_bounds_test_enable(false)
-        .stencil_test_enable(false);
-    let color_blend_attachment = if transparent {
-        [vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(true)
-            .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
-            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-            .color_blend_op(vk::BlendOp::ADD)
-            .src_alpha_blend_factor(vk::BlendFactor::ONE)
-            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-            .alpha_blend_op(vk::BlendOp::ADD)
-            .color_write_mask(vk::ColorComponentFlags::RGBA)]
-    } else {
-        [vk::PipelineColorBlendAttachmentState::default()
-            .blend_enable(false)
-            .color_write_mask(vk::ColorComponentFlags::RGBA)]
-    };
-    let color_blending =
-        vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachment);
-    let pipeline_info = [vk::GraphicsPipelineCreateInfo::default()
-        .stages(&shader_stages)
-        .vertex_input_state(&vertex_input_state)
-        .input_assembly_state(&input_assembly)
-        .viewport_state(&viewport_state)
-        .rasterization_state(&rasterizer)
-        .multisample_state(&multisampling)
-        .depth_stencil_state(&depth_stencil)
-        .color_blend_state(&color_blending)
-        .layout(pipeline_layout)
-        .render_pass(render_pass)
-        .subpass(0)];
-    let pipeline = device
-        .create_graphics_pipelines(pipeline_cache, &pipeline_info, None)
-        .map_err(|(_, err)| VulkanBackendError::Vk(err))?[0];
-
-    device.destroy_shader_module(vertex_module, None);
-    device.destroy_shader_module(fragment_module, None);
-    Ok(pipeline)
-}
-
-fn build_scene_shader_spirv_artifacts() -> Result<[SpirvShaderArtifact; 2], VulkanBackendError> {
-    Ok([
-        SpirvShaderArtifact {
-            words: spirv_bytes_to_words(include_bytes!("../../assets/shaders/spv/scene.vert.spv"))?,
-        },
-        SpirvShaderArtifact {
-            words: spirv_bytes_to_words(include_bytes!("../../assets/shaders/spv/scene.frag.spv"))?,
-        },
-    ])
-}
-
-fn spirv_bytes_to_words(bytes: &[u8]) -> Result<Vec<u32>, VulkanBackendError> {
-    let chunks = bytes.chunks_exact(4);
-    if !chunks.remainder().is_empty() {
-        return Err(VulkanBackendError::InvalidConfig(
-            "embedded SPIR-V artifact length is not aligned to 4 bytes",
-        ));
-    }
-    Ok(chunks
-        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect())
-}
-
-unsafe fn create_shader_module(
-    device: &Device,
-    spirv: &[u32],
-) -> Result<vk::ShaderModule, VulkanBackendError> {
-    let info = vk::ShaderModuleCreateInfo::default().code(spirv);
-    Ok(device.create_shader_module(&info, None)?)
 }
 
 unsafe fn create_dummy_texture_array_resources(
@@ -2706,8 +2654,7 @@ unsafe fn create_dummy_texture_array_resources(
         .map(|layer| {
             vk::BufferImageCopy::default()
                 .buffer_offset(
-                    (layer as usize * TEX_WIDTH as usize * TEX_HEIGHT as usize * 4)
-                        as u64,
+                    (layer as usize * TEX_WIDTH as usize * TEX_HEIGHT as usize * 4) as u64,
                 )
                 .buffer_row_length(0)
                 .buffer_image_height(0)
@@ -2869,48 +2816,51 @@ unsafe fn record_frame_commands(
     let mut last_pipeline = vk::Pipeline::null();
     let mut last_vertex_buffer = vk::Buffer::null();
     let mut last_index_buffer = vk::Buffer::null();
-    for range in &snapshot_state.primitive_ranges {
-        if range.instance_count == 0 {
-            continue;
-        }
-        let transparent = range.flags & FRAME_PRIMITIVE_RANGE_TRANSPARENT != 0;
-        let pipeline = if transparent {
-            scene_pipeline.transparent_pipeline
-        } else {
-            scene_pipeline.opaque_pipeline
-        };
-        if pipeline != last_pipeline {
-            device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
-            last_pipeline = pipeline;
-        }
-        let (vertex_buffer, index_buffer, index_count, index_type) =
-            mesh_resources_for_primitive(scene_pipeline, mesh_slots, range.primitive_code);
-        if vertex_buffer.buffer != last_vertex_buffer {
-            device.cmd_bind_vertex_buffers(
+    for overlay_pass in [false, true] {
+        for range in &snapshot_state.primitive_ranges {
+            if range.instance_count == 0 {
+                continue;
+            }
+            let overlay = range.flags & FRAME_PRIMITIVE_RANGE_OVERLAY != 0;
+            if overlay != overlay_pass {
+                continue;
+            }
+            let transparent = range.flags & FRAME_PRIMITIVE_RANGE_TRANSPARENT != 0;
+            let pipeline = if overlay {
+                scene_pipeline.overlay_pipeline
+            } else if transparent {
+                scene_pipeline.transparent_pipeline
+            } else {
+                scene_pipeline.opaque_pipeline
+            };
+            if pipeline != last_pipeline {
+                device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                last_pipeline = pipeline;
+            }
+            let (vertex_buffer, index_buffer, index_count, index_type) =
+                mesh_resources_for_primitive(scene_pipeline, mesh_slots, range.primitive_code);
+            if vertex_buffer.buffer != last_vertex_buffer {
+                device.cmd_bind_vertex_buffers(
+                    command_buffer,
+                    0,
+                    &[vertex_buffer.buffer, frame.snapshot_slot.mapped.buffer],
+                    &vertex_offsets,
+                );
+                last_vertex_buffer = vertex_buffer.buffer;
+            }
+            if index_buffer.buffer != last_index_buffer {
+                device.cmd_bind_index_buffer(command_buffer, index_buffer.buffer, 0, index_type);
+                last_index_buffer = index_buffer.buffer;
+            }
+            device.cmd_draw_indexed(
                 command_buffer,
+                index_count,
+                range.instance_count,
                 0,
-                &[vertex_buffer.buffer, frame.snapshot_slot.mapped.buffer],
-                &vertex_offsets,
-            );
-            last_vertex_buffer = vertex_buffer.buffer;
-        }
-        if index_buffer.buffer != last_index_buffer {
-            device.cmd_bind_index_buffer(
-                command_buffer,
-                index_buffer.buffer,
                 0,
-                index_type,
+                range.first_instance,
             );
-            last_index_buffer = index_buffer.buffer;
         }
-        device.cmd_draw_indexed(
-            command_buffer,
-            index_count,
-            range.instance_count,
-            0,
-            0,
-            range.first_instance,
-        );
     }
 
     device.cmd_end_render_pass(command_buffer);
@@ -2922,7 +2872,12 @@ fn mesh_resources_for_primitive<'a>(
     scene_pipeline: &'a ScenePipelineResources,
     mesh_slots: &'a HashMap<u8, VulkanMeshSlot>,
     primitive_code: u32,
-) -> (&'a PersistentlyMappedBuffer, &'a PersistentlyMappedBuffer, u32, vk::IndexType) {
+) -> (
+    &'a PersistentlyMappedBuffer,
+    &'a PersistentlyMappedBuffer,
+    u32,
+    vk::IndexType,
+) {
     match primitive_code {
         0 => (
             &scene_pipeline.sphere_vertex_buffer,
@@ -2993,6 +2948,17 @@ unsafe fn destroy_framebuffers(device: &Device, swapchain: &mut SwapchainState) 
     }
 }
 
+unsafe fn destroy_swapchain_state(device: &Device, swapchain: &mut SwapchainState) {
+    destroy_framebuffers(device, swapchain);
+    destroy_image_views(device, swapchain);
+    if swapchain.swapchain != vk::SwapchainKHR::null() {
+        swapchain
+            .loader
+            .destroy_swapchain(swapchain.swapchain, None);
+        swapchain.swapchain = vk::SwapchainKHR::null();
+    }
+}
+
 unsafe fn destroy_depth_attachments(device: &Device, swapchain: &mut SwapchainState) {
     for depth in swapchain.depth_attachments.drain(..) {
         device.destroy_image_view(depth.view, None);
@@ -3028,59 +2994,6 @@ fn slice_as_bytes<T>(slice: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
 }
 
-fn unit_cube_vertices() -> [SceneVertex; 8] {
-    [
-        SceneVertex { position: [-0.5, -0.5, -0.5], uv: [0.0, 0.0] },
-        SceneVertex { position: [ 0.5, -0.5, -0.5], uv: [1.0, 0.0] },
-        SceneVertex { position: [ 0.5,  0.5, -0.5], uv: [1.0, 1.0] },
-        SceneVertex { position: [-0.5,  0.5, -0.5], uv: [0.0, 1.0] },
-        SceneVertex { position: [-0.5, -0.5,  0.5], uv: [0.0, 0.0] },
-        SceneVertex { position: [ 0.5, -0.5,  0.5], uv: [1.0, 0.0] },
-        SceneVertex { position: [ 0.5,  0.5,  0.5], uv: [1.0, 1.0] },
-        SceneVertex { position: [-0.5,  0.5,  0.5], uv: [0.0, 1.0] },
-    ]
-}
-
-fn unit_icosa_sphere_vertices() -> [SceneVertex; 12] {
-    let t = (1.0 + 5.0_f32.sqrt()) * 0.5;
-    let mut vertices = [
-        [-1.0, t, 0.0],
-        [1.0, t, 0.0],
-        [-1.0, -t, 0.0],
-        [1.0, -t, 0.0],
-        [0.0, -1.0, t],
-        [0.0, 1.0, t],
-        [0.0, -1.0, -t],
-        [0.0, 1.0, -t],
-        [t, 0.0, -1.0],
-        [t, 0.0, 1.0],
-        [-t, 0.0, -1.0],
-        [-t, 0.0, 1.0],
-    ];
-    for position in &mut vertices {
-        let length =
-            (position[0] * position[0] + position[1] * position[1] + position[2] * position[2])
-                .sqrt()
-                .max(1e-6);
-        position[0] /= length * 2.0;
-        position[1] /= length * 2.0;
-        position[2] /= length * 2.0;
-    }
-    vertices.map(|position| {
-        let u = 0.5 + f32::atan2(position[2], position[0]) / (2.0 * std::f32::consts::PI);
-        let v = 0.5 - position[1];
-        SceneVertex { position, uv: [u, v] }
-    })
-}
-
-fn unit_icosa_sphere_indices() -> [u16; 60] {
-    [
-        0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7,
-        1, 8, 3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9,
-        8, 1,
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3094,24 +3007,6 @@ mod tests {
         assert_eq!(size_of::<FrameLightRecord>(), 80);
         assert_eq!(align_of::<FrameLightRecord>(), 16);
     }
-
-    #[test]
-    fn embedded_scene_shader_artifacts_are_non_empty() {
-        let [vertex, fragment] = build_scene_shader_spirv_artifacts().expect("embedded SPIR-V");
-        assert!(!vertex.words.is_empty());
-        assert!(!fragment.words.is_empty());
-    }
-}
-
-fn unit_cube_indices() -> [u16; 36] {
-    [
-        0, 1, 2, 2, 3, 0, // back
-        4, 5, 6, 6, 7, 4, // front
-        0, 4, 7, 7, 3, 0, // left
-        1, 5, 6, 6, 2, 1, // right
-        3, 2, 6, 6, 7, 3, // top
-        0, 1, 5, 5, 4, 0, // bottom
-    ]
 }
 
 const fn align_up(value: usize, alignment: usize) -> usize {
