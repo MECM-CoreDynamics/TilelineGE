@@ -38,6 +38,7 @@ pub struct CliOptions {
     pub performance_profile: PerformanceProfile,
     pub network_enabled: bool,
     pub network_bind_addr: String,
+    pub no_render: bool,
 }
 
 impl Default for CliOptions {
@@ -69,6 +70,7 @@ impl Default for CliOptions {
             performance_profile: PerformanceProfile::Balanced,
             network_enabled: false,
             network_bind_addr: "127.0.0.1:0".to_string(),
+            no_render: false,
         }
     }
 }
@@ -477,6 +479,9 @@ fn parse_cli_overrides(args: &[String], options: &mut CliOptions) -> Result<bool
                 let value = next_arg(&mut iter, "--vsync")?;
                 options.vsync = VsyncMode::parse(&value)?;
             }
+            "--no-render" => {
+                options.no_render = true;
+            }
             "--fps-cap" => {
                 let value = next_arg(&mut iter, "--fps-cap")?;
                 options.fps_cap = parse_fps_cap(&value)?;
@@ -732,6 +737,7 @@ fn print_usage() {
     println!("Options:");
     println!("  --resolution <WxH>        Window size (default: 1280x720)");
     println!("  --vsync auto|on|off       Present mode preference (default: auto)");
+    println!("  --no-render               Disable rendering completely to isolate CPU physics metrics");
     println!("  --fps-cap <N|off>         Frame cap target (default: off)");
     println!(
         "  --pipeline <mode>         Runtime frame pipeline: parallel|legacy (default: parallel)"
@@ -879,6 +885,7 @@ mod tests {
     fn scan_ini_path_from_args_detects_flag() {
         let args = vec![
             "--vsync".to_string(),
+            "--no-render".to_string(),
             "off".to_string(),
             "--ini".to_string(),
             "config/tlapp.ini".to_string(),

@@ -1264,15 +1264,17 @@ impl TlAppRuntime {
         if let Some(bridge) = self.runtime_bridge.as_mut() {
             let frame_id = self.bridge_frame_counter;
             self.bridge_frame_counter = self.bridge_frame_counter.saturating_add(1);
-            let submission = bridge.submit_scene_workload(
-                frame_id,
-                &frame,
-                tick.live_balls,
-                self.size.width.max(1),
-                self.size.height.max(1),
-            );
-            self.runtime_bridge_telemetry.latest_submission_frame_id = Some(submission.frame_id());
-            self.runtime_bridge_telemetry.latest_submission_tasks = submission.submitted_tasks();
+            if !self.cli_options.no_render {
+                let submission = bridge.submit_scene_workload(
+                    frame_id,
+                    &frame,
+                    tick.live_balls,
+                    self.size.width.max(1),
+                    self.size.height.max(1),
+                );
+                self.runtime_bridge_telemetry.latest_submission_frame_id = Some(submission.frame_id());
+                self.runtime_bridge_telemetry.latest_submission_tasks = submission.submitted_tasks();
+            }
             self.runtime_bridge_telemetry.physics_lag_frames = self
                 .runtime_bridge_telemetry
                 .latest_submission_frame_id
@@ -1400,6 +1402,39 @@ impl TlAppRuntime {
             .is_ok();
 
         let (upload, rt_status, fsr_status, upload_us, present_us) = match &mut self.renderer {
+            crate::tlapp_app::TlAppRenderer::Disabled => (
+                crate::wgpu_scene_renderer::WgpuSceneRendererUploadStats {
+                    opaque_draw_calls: 0,
+                    transparent_draw_calls: 0,
+                    sprite_draw_calls: 0,
+                    total_draw_calls: 0,
+                    instance_3d_count: 0,
+                    sprite_count: 0,
+                    light_count: 0,
+                    rt_active: false,
+                    rt_dynamic_count: 0,
+                    fsr_active: false,
+                    fsr_scale: 1.0,
+                },
+                crate::wgpu_scene_renderer::SceneRayTracingStatus {
+                    mode: crate::RayTracingMode::Auto,
+                    active: false,
+                    fallback_reason: String::new(),
+                    rt_dynamic_count: 0,
+                    rt_dynamic_cap: 0,
+                    supports_ray_query: false,
+                    as_build_us: 0,
+                },
+                crate::upscaler::FsrStatus {
+                    requested_mode: crate::upscaler::FsrMode::Off,
+                    active: false,
+                    render_scale: 1.0,
+                    sharpness: 0.0,
+                    reason: String::new(),
+                },
+                0,
+                0,
+            ),
             TlAppRenderer::Wgpu(renderer) => {
                 let upload = renderer.upload_draw_frame(&self.device, &self.queue, &draw);
                 renderer.upload_overlay_sprites(

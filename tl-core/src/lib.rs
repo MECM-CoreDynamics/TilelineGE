@@ -17,9 +17,7 @@ pub const MODULE_ID: &str = "tl-core";
 /// Crate version resolved at compile time.
 pub const MODULE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub mod compression;
 pub mod core;
-pub mod gms;
 pub mod graphics;
 pub mod mgs;
 pub mod mls;
@@ -27,7 +25,7 @@ pub mod nps;
 pub mod physics;
 pub mod tlscript;
 
-pub use crate::gms::{AdaptiveBufferDecision, AdaptiveFrameTelemetry};
+pub use gms::{AdaptiveBufferDecision, AdaptiveFrameTelemetry};
 pub use core::bridge::{
     BridgeFrameId, BridgeFramePlan, BridgeGpuTaskKind, BridgeMpsSubmission, BridgeSubmitReceipt,
     BridgeTaskDescriptor, BridgeTaskRouting, MpsGmsBridge, MpsGmsBridgeConfig, MpsGmsBridgeMetrics,
@@ -39,8 +37,8 @@ pub use core::mgs_bridge::{
 };
 pub use graphics::frame_snapshot::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
-    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_OVERLAY,
-    FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_CASTS_SHADOW,
+    FRAME_PRIMITIVE_RANGE_OVERLAY, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 #[cfg(target_os = "macos")]
 pub use graphics::metal_backend::{
@@ -70,6 +68,10 @@ pub use graphics::vulkan_backend::{
 pub use graphics::vulkan_physics_compute::{
     VulkanPhysicsComputeBackend, VulkanPhysicsComputeCapabilities, VulkanPhysicsComputeConfig,
     VulkanPhysicsDispatchPlan,
+};
+pub use graphics::wgpu_physics_compute::{
+    WgpuPhysicsComputeBackend, WgpuPhysicsComputeCapabilities, WgpuPhysicsComputeConfig,
+    WgpuPhysicsDispatchPlan,
 };
 pub use mls::{
     MlsBackendAdapter, MlsBackendKind, MlsCapabilityMatrix, MlsDeviceProfile, MlsExecutionMode,

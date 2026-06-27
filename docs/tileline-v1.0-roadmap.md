@@ -69,7 +69,7 @@ build on Tileline without fear of breaking changes.
 |----------|---------|--------------|
 | Linux x86_64 | Vulkan + GMS | `8k` @ 60 FPS, `30k` @ 30 FPS |
 | macOS aarch64 | Metal + GMS | `8k` @ 60 FPS, `30k` @ 30 FPS |
-| HXNU x86_64 | HXNU native | boots, renders, physics stable |
+| HXNU x86_64 | Vulkan + GMS | boots, renders, physics stable |
 | Android aarch64 | MGS | `8k` @ 30 FPS on Mali-G710 / Adreno 740 |
 
 ### Licensing and Governance

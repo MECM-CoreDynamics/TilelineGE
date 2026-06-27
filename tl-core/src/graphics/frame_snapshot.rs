@@ -70,6 +70,8 @@ pub struct FrameSpriteRecord {
 pub const FRAME_PRIMITIVE_RANGE_TRANSPARENT: u32 = 1 << 0;
 /// Overlay flag for one primitive draw range that should render after regular scene geometry.
 pub const FRAME_PRIMITIVE_RANGE_OVERLAY: u32 = 1 << 1;
+/// Shadow-caster flag for one primitive draw range. Transparent visual glass should not set this.
+pub const FRAME_PRIMITIVE_RANGE_CASTS_SHADOW: u32 = 1 << 2;
 
 /// CPU-side primitive run metadata for raw backends that issue multiple mesh draws per snapshot.
 #[repr(C)]

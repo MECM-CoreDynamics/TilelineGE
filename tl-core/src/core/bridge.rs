@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::gms::{
+use gms::{
     AdaptiveBufferDecision, AdaptiveFrameTelemetry, DispatchPlan, GmsDispatcher, GpuInventory,
     MultiGpuDispatchPlan, MultiGpuDispatcher, MultiGpuWorkloadRequest, TaskClass, WorkloadRequest,
 };
@@ -733,8 +733,8 @@ impl MpsGmsBridge {
 }
 
 fn detect_expected_sync_backend(
-    primary: &crate::gms::GpuAdapterProfile,
-    secondary: Option<&crate::gms::GpuAdapterProfile>,
+    primary: &gms::GpuAdapterProfile,
+    secondary: Option<&gms::GpuAdapterProfile>,
 ) -> crate::graphics::multigpu::sync::SyncBackendHint {
     if primary.backend == wgpu::Backend::Metal
         || secondary

@@ -10,12 +10,13 @@ crossbeam.workspace = true
 wgpu.workspace = true
 winit.workspace = true
 mps = { path = "../mps" }
-paradoxpe = { path = "../paradoxpe" }
+paradoxpe = { git = "https://github.com/berrycomp/paradoxpe" }
 sxrc = { path = "../sxrc" }
 nalgebra.workspace = true
 wasm-encoder = "0.224.0"
 miniz_oxide = "0.8.9"
 pollster = "0.4.0"
+gms = { git = "https://github.com/berrycomp/gms" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ash = "0.38.0"

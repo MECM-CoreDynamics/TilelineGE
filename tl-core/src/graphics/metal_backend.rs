@@ -30,7 +30,7 @@ use winit::window::Window;
 use super::metal::mesh_slot::MeshSlot;
 use crate::graphics::frame_snapshot::{
     FrameInstanceTransform, FrameLightRecord, FramePrimitiveRange, FrameSpriteRecord,
-    RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+    RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_CASTS_SHADOW, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 
 /// Runtime configuration for the raw Metal backend.
@@ -761,7 +761,7 @@ impl MetalBackend {
         spub: &Buffer,
         sub: &Buffer,
         snapshot: &RenderStateSnapshot<'_>,
-    ) {
+    ) -> u32 {
         use nalgebra::{Isometry3, Perspective3, Point3, Vector3};
 
         let mut shadow_uniform = ShadowUniform {
@@ -848,6 +848,7 @@ impl MetalBackend {
                 std::mem::size_of::<ShadowUniform>(),
             );
         }
+        shadow_uniform.shadow_count
     }
 
     fn encode_shadow_pass(
@@ -856,7 +857,13 @@ impl MetalBackend {
         tb: &Buffer,
         spub: &Buffer,
         ranges: &[FramePrimitiveRange],
+        shadow_count: u32,
     ) {
+        let layer_count = (shadow_count as usize).min(METAL_SHADOW_LAYERS);
+        if layer_count == 0 {
+            return;
+        }
+
         let pass_desc = RenderPassDescriptor::new();
         let depth_attachment = pass_desc.depth_attachment().unwrap();
         depth_attachment.set_texture(Some(&self.shadow_texture));
@@ -872,7 +879,7 @@ impl MetalBackend {
         encoder.set_depth_bias(0.001, 1.0, 0.001);
         encoder.set_vertex_buffer(1, Some(tb), 0);
 
-        for layer in 0..METAL_SHADOW_LAYERS {
+        for layer in 0..layer_count {
             let offset_x = if layer % 2 == 0 { 0.0 } else { 1024.0 };
             let offset_y = if layer / 2 == 0 { 0.0 } else { 1024.0 };
             encoder.set_viewport(metal::MTLViewport {
@@ -885,10 +892,9 @@ impl MetalBackend {
             });
             let offset = (layer * std::mem::size_of::<ShadowPassUniform>()) as u64;
             encoder.set_vertex_buffer(2, Some(spub), offset);
-            for range in ranges
-                .iter()
-                .filter(|range| !Self::is_transparent_range(range))
-            {
+            for range in ranges.iter().filter(|range| {
+                !Self::is_transparent_range(range) && Self::is_shadow_caster_range(range)
+            }) {
                 if let Some(mesh) = self.resolve_mesh_slot(range.primitive_code as u8) {
                     encoder.set_vertex_buffer(0, Some(&mesh.vertex_buffer), 0);
                     encoder.draw_indexed_primitives_instanced_base_instance(
@@ -1139,11 +1145,11 @@ impl MetalBackend {
             let spub = &self.shadow_pass_uniform_buffers[frame_slot];
             let sub = &self.shadow_uniform_buffers[frame_slot];
             self.upload_lights(frame_slot, lb, lub, &snapshot);
-            self.upload_shadows(frame_slot, spub, sub, &snapshot);
+            let shadow_count = self.upload_shadows(frame_slot, spub, sub, &snapshot);
 
             let shadow_start = std::time::Instant::now();
-            if METAL_REAL_SHADOW_MAPS_ENABLED {
-                self.encode_shadow_pass(&command_buffer, tb, spub, &draw_ranges);
+            if METAL_REAL_SHADOW_MAPS_ENABLED && shadow_count > 0 {
+                self.encode_shadow_pass(&command_buffer, tb, spub, &draw_ranges, shadow_count);
             }
             let shadow_pass_us = shadow_start.elapsed().as_micros() as u64;
 
@@ -1420,6 +1426,11 @@ impl MetalBackend {
     #[inline]
     fn is_transparent_range(range: &FramePrimitiveRange) -> bool {
         range.flags & FRAME_PRIMITIVE_RANGE_TRANSPARENT != 0
+    }
+
+    #[inline]
+    fn is_shadow_caster_range(range: &FramePrimitiveRange) -> bool {
+        range.flags & FRAME_PRIMITIVE_RANGE_CASTS_SHADOW != 0
     }
 
     /// Approximate squared camera distance for a primitive range, averaged over
@@ -2055,11 +2066,11 @@ impl MetalBackend {
         let spub = &self.shadow_pass_uniform_buffers[frame_slot];
         let sub = &self.shadow_uniform_buffers[frame_slot];
         self.upload_lights(frame_slot, lb, lub, &snapshot);
-        self.upload_shadows(frame_slot, spub, sub, &snapshot);
+        let shadow_count = self.upload_shadows(frame_slot, spub, sub, &snapshot);
 
         let shadow_start = std::time::Instant::now();
-        if METAL_REAL_SHADOW_MAPS_ENABLED {
-            self.encode_shadow_pass(&command_buffer, tb, spub, &draw_ranges);
+        if METAL_REAL_SHADOW_MAPS_ENABLED && shadow_count > 0 {
+            self.encode_shadow_pass(&command_buffer, tb, spub, &draw_ranges, shadow_count);
         }
         let shadow_pass_us = shadow_start.elapsed().as_micros() as u64;
 
@@ -2499,14 +2510,26 @@ mod tests {
     }
 
     fn dummy_snapshot_with_instances(instance_count: usize) -> RenderStateSnapshot<'static> {
-        dummy_snapshot(instance_count, [0.0, 0.0, 0.0], 0, instance_count as u32, 0)
+        dummy_snapshot(
+            instance_count,
+            [0.0, 0.0, 0.0],
+            FRAME_PRIMITIVE_RANGE_CASTS_SHADOW,
+            instance_count as u32,
+            0,
+        )
     }
 
     fn dummy_snapshot_with_translation(
         instance_count: usize,
         translation: [f32; 3],
     ) -> RenderStateSnapshot<'static> {
-        dummy_snapshot(instance_count, translation, 0, instance_count as u32, 0)
+        dummy_snapshot(
+            instance_count,
+            translation,
+            FRAME_PRIMITIVE_RANGE_CASTS_SHADOW,
+            instance_count as u32,
+            0,
+        )
     }
 
     fn dummy_transparent_snapshot(instance_count: usize) -> RenderStateSnapshot<'static> {
@@ -2737,10 +2760,11 @@ mod tests {
 
         let spub = &backend.shadow_pass_uniform_buffers[0];
         let sub = &backend.shadow_uniform_buffers[0];
-        backend.upload_shadows(0, spub, sub, &snapshot);
+        let shadow_count = backend.upload_shadows(0, spub, sub, &snapshot);
         let stored = unsafe { std::ptr::read_unaligned(sub.contents() as *const ShadowUniform) };
         // With METAL_REAL_SHADOW_MAPS_ENABLED=true, a shadow-casting spot light
         // should occupy slot 0 and shadow_count should be 1.
+        assert_eq!(shadow_count, 1);
         assert_eq!(stored.shadow_count, 1);
         assert_eq!(stored.shadow_light_indices[0], 0);
         // Slot 1..3 remain unused.
@@ -2809,7 +2833,7 @@ mod tests {
                 primitive_code: 0,
                 first_instance: 0,
                 instance_count: 1,
-                flags: 0,
+                flags: FRAME_PRIMITIVE_RANGE_CASTS_SHADOW,
             }]
             .into_boxed_slice(),
         );

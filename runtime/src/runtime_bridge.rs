@@ -7,7 +7,7 @@
 //! It enables TLApp to keep one overlapped frame loop while selecting GPU planner
 //! path by scheduler policy.
 
-use tl_core::gms::SceneWorkloadEstimate;
+use gms::SceneWorkloadEstimate;
 use tl_core::mgs::MobileGpuProfile;
 use tl_core::{
     BridgeFramePlan, MgsBridgeFramePlan, MlsBackendKind, MlsExecutionMode, MlsPrecisionMode,
@@ -961,7 +961,7 @@ pub fn runtime_bridge_path_from_scheduler(scheduler: GraphicsSchedulerPath) -> R
 mod tests {
     use super::*;
     use std::time::Duration;
-    use tl_core::gms::{MultiGpuWorkloadRequest, WorkloadRequest};
+    use gms::{MultiGpuWorkloadRequest, WorkloadRequest};
 
     #[test]
     fn scheduler_mapping_prefers_matching_path() {

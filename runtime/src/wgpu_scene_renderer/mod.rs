@@ -169,6 +169,7 @@ struct GpuBatchRange {
     lane: DrawLane,
     primitive_code: u8,
     shading_code: u8,
+    shadow_flags: u8,
     start: u32,
     count: u32,
 }
@@ -2055,7 +2056,11 @@ impl WgpuSceneRenderer {
             });
             pass.set_pipeline(&self.pipeline_shadow);
             pass.set_bind_group(0, &self.shadow_pass_bind_groups[slot], &[]);
-            for range in self.ranges.iter().filter(|r| r.lane == DrawLane::Opaque) {
+            for range in self
+                .ranges
+                .iter()
+                .filter(|r| r.lane == DrawLane::Opaque && (r.shadow_flags & 1) != 0)
+            {
                 draw_3d_range(
                     &mut pass,
                     &self.box_mesh,
@@ -2225,6 +2230,7 @@ fn build_upload_plan(draw: &RuntimeDrawFrame) -> UploadPlan {
                 lane: DrawLane::Opaque,
                 primitive_code: batch.key.primitive_code,
                 shading_code: batch.key.shading_code,
+                shadow_flags: batch.key.shadow_flags,
                 start,
                 count,
             });
@@ -2255,6 +2261,7 @@ fn build_upload_plan(draw: &RuntimeDrawFrame) -> UploadPlan {
                 lane: DrawLane::Transparent,
                 primitive_code: batch.key.primitive_code,
                 shading_code: batch.key.shading_code,
+                shadow_flags: batch.key.shadow_flags,
                 start,
                 count,
             });
@@ -2293,6 +2300,9 @@ fn build_upload_plan(draw: &RuntimeDrawFrame) -> UploadPlan {
 fn collect_rt_instances(draw: &RuntimeDrawFrame, cap: usize) -> Vec<RtInstance> {
     let mut rt_instances = Vec::with_capacity(draw.stats.opaque_instances.min(cap.max(1)));
     'outer: for batch in &draw.opaque_batches {
+        if (batch.key.shadow_flags & 1) == 0 {
+            continue;
+        }
         let blas_kind = match batch.key.primitive_code {
             1 => RtBlasKind::Box,
             _ => RtBlasKind::Sphere,
@@ -4256,19 +4266,30 @@ mod tests {
     }
 
     #[test]
-    fn rt_instance_collection_ignores_transparent_batches() {
+    fn rt_instance_collection_uses_shadow_caster_opaque_batches_only() {
         let draw = RuntimeDrawFrame {
             mode: RuntimeSceneMode::Spatial3d,
             view_2d: None,
-            opaque_batches: vec![DrawBatch3d {
-                lane: DrawLane::Opaque,
-                key: DrawBatchKey {
-                    primitive_code: 1,
-                    shading_code: 0,
-                    shadow_flags: 0,
+            opaque_batches: vec![
+                DrawBatch3d {
+                    lane: DrawLane::Opaque,
+                    key: DrawBatchKey {
+                        primitive_code: 1,
+                        shading_code: 0,
+                        shadow_flags: 3,
+                    },
+                    instances: vec![make_instance(1), make_instance(2)],
                 },
-                instances: vec![make_instance(1), make_instance(2)],
-            }],
+                DrawBatch3d {
+                    lane: DrawLane::Opaque,
+                    key: DrawBatchKey {
+                        primitive_code: 0,
+                        shading_code: 0,
+                        shadow_flags: 2,
+                    },
+                    instances: vec![make_instance(6), make_instance(7)],
+                },
+            ],
             transparent_batches: vec![DrawBatch3d {
                 lane: DrawLane::Transparent,
                 key: DrawBatchKey {
@@ -4285,9 +4306,9 @@ mod tests {
                 transparent_instances: 3,
                 sprite_instances: 0,
                 light_instances: 0,
-                opaque_batches: 1,
+                opaque_batches: 2,
                 transparent_batches: 1,
-                total_draw_calls: 2,
+                total_draw_calls: 3,
             },
         };
 
@@ -4345,6 +4366,7 @@ mod tests {
                 lane: DrawLane::Opaque,
                 primitive_code: 0,
                 shading_code: 0,
+                shadow_flags: 3,
                 start: 0,
                 count: 120,
             },
@@ -4352,6 +4374,7 @@ mod tests {
                 lane: DrawLane::Opaque,
                 primitive_code: 1,
                 shading_code: 0,
+                shadow_flags: 3,
                 start: 120,
                 count: 44,
             },
@@ -4359,6 +4382,7 @@ mod tests {
                 lane: DrawLane::Transparent,
                 primitive_code: 0,
                 shading_code: 0,
+                shadow_flags: 0,
                 start: 164,
                 count: 36,
             },

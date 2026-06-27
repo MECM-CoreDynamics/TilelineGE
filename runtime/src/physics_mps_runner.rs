@@ -129,8 +129,13 @@ impl PhysicsMpsRunner {
     /// Replace the inner world (e.g. for simulation reset).
     ///
     /// The caller must drain any pending [`PhysicsStepToken`] first.
-    pub fn replace(&self, new_world: PhysicsWorld) {
+    pub fn replace(&self, mut new_world: PhysicsWorld) {
         let mut guard = self.world.lock().unwrap();
+        if new_world.compute_backend_name().is_none() {
+            if let Some(backend) = guard.take_compute_backend() {
+                new_world.set_compute_backend(Some(backend));
+            }
+        }
         *guard = new_world;
         let transforms = self.dispatcher.transforms();
         write_world_render_transforms_to_dispatcher_storage(
@@ -207,10 +212,12 @@ impl PhysicsMpsRunner {
         let integrate = Arc::new(move |_ctx: &mps::DispatcherTaskContext| {
             let _ = catch_unwind(AssertUnwindSafe(|| {
                 let mut world = integrate_world.lock().unwrap();
+                world.reset_step_compute_stats();
                 let mut timings = paradoxpe::PhysicsStepTimings::default();
                 for step_index in 0..integrate_plan.substeps {
                     world.execute_integrate_phase(&integrate_plan, step_index, &mut timings);
                 }
+                world.last_step_timings.compute_us = timings.compute_us;
                 world.last_step_timings.integrate_us = timings.integrate_us;
                 world.last_step_timings.integrate_mode = timings.integrate_mode;
                 world.last_step_timings.integrate_serial_fallback_reason =

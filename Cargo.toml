@@ -1,5 +1,5 @@
 [workspace]
-members = ["paradoxpe", "runtime", "sxrc", "tl-core"]
+members = ["runtime", "sxrc", "tl-core"]
 resolver = "2"
 
 [workspace.package]
@@ -34,3 +34,7 @@ strip = true
 inherits = "release"
 strip = false
 debug = true
+[patch."https://github.com/berrycomp/paradoxpe"]
+paradoxpe = { path = "/tmp/paradoxpe_fix" }
+[patch."https://github.com/berrycomp/gms"]
+gms = { path = "/tmp/gms_fix" }

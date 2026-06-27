@@ -11,6 +11,9 @@ Key themes:
 
 - **WGPU exit is complete** — `tl-core`, `runtime`, and all shipping crates are free of `wgpu`
   types, `wgpu`-backed render loops, and `wgpu`-derived adapter metadata.
+- **Native Vulkan ownership is audited** — while removing WGPU dependence, the raw Vulkan path
+  explicitly revisits `ash` + VMA usage so allocation, lifetime, synchronization, and telemetry
+  become engine-owned rather than inherited from the bootstrap layer.
 - **GMS is the canonical GPU path** — all GPU scheduling, multi-GPU sync, and render backend
   decisions flow through `gms` and `tl-core` native backends (Vulkan, Metal), not through a
   portable abstraction layer.
@@ -106,6 +109,26 @@ Acceptance:
 - `cargo tree -p tl-core | grep wgpu` returns nothing
 - all existing tests pass
 - runtime smoke test on macOS (Metal) and Linux (Vulkan) passes
+
+### V1.6. Ash + VMA Native Vulkan Audit
+
+Target:
+
+- review the raw Vulkan backend's `ash` and VMA integration while WGPU ownership is removed
+- make Vulkan object lifetime, allocator ownership, memory budgets, mapped-buffer behavior, and
+  queue/sync primitives explicit in `tl-core`
+- replace any remaining WGPU-derived assumptions in Vulkan telemetry, adapter probing, and
+  frame-resource recycling with native `ash` + VMA data
+- document the boundary between engine-owned abstractions and backend-owned Vulkan handles
+
+Acceptance:
+
+- Vulkan backend initialization, resize, shutdown, and frame-resource recycling paths are covered
+  by smoke tests or renderer-logic tests
+- VMA allocation failures and budget pressure report structured fallback diagnostics instead of
+  panics or silent corruption
+- native Vulkan telemetry can explain allocation pressure, queue ownership, and sync waits without
+  referencing WGPU terms
 
 ---
 

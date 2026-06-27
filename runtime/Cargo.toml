@@ -20,7 +20,8 @@ sxrc-compression = ["mps/sxrc-compression"]
 tl-core = { path = "../tl-core" }
 wgpu.workspace = true
 mps = { path = "../mps" }
-paradoxpe = { path = "../paradoxpe" }
+paradoxpe = { git = "https://github.com/berrycomp/paradoxpe" }
+gms = { git = "https://github.com/berrycomp/gms" }
 tokio = { workspace = true, features = ["net", "time", "rt", "macros"] }
 nalgebra.workspace = true
 num_cpus.workspace = true

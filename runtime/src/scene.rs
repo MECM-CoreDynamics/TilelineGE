@@ -2509,12 +2509,12 @@ impl BounceTankSceneController {
 
     fn container_wall_material(&self) -> SceneMaterial {
         SceneMaterial {
-            base_color_rgba: [0.72, 0.88, 1.0, 0.28],
+            base_color_rgba: [0.72, 0.88, 1.0, 0.34],
             roughness: 0.04,
             metallic: 0.0,
-            emissive_rgb: [0.12, 0.18, 0.26],
+            emissive_rgb: [0.08, 0.12, 0.18],
             texture_slot: 0,
-            shading: ShadingModel::Unlit,
+            shading: ShadingModel::LitPbr,
         }
     }
 
@@ -2603,7 +2603,7 @@ impl BounceTankSceneController {
                 },
                 material: self.container_wall_material(),
                 casts_shadow: false,
-                receives_shadow: false,
+                receives_shadow: true,
             });
         }
     }
@@ -2630,7 +2630,7 @@ impl BounceTankSceneController {
                 },
                 material: self.container_wall_material(),
                 casts_shadow: false,
-                receives_shadow: false,
+                receives_shadow: true,
             });
         }
     }
@@ -3009,9 +3009,9 @@ mod tests {
                     slot: BUILTIN_GLASS_PANEL_MESH_SLOT
                 }
             ) && !instance.casts_shadow
-                && !instance.receives_shadow
-                && instance.material.shading == ShadingModel::Unlit
-                && (0.24..=0.30).contains(&instance.material.base_color_rgba[3])
+                && instance.receives_shadow
+                && instance.material.shading == ShadingModel::LitPbr
+                && (0.32..=0.36).contains(&instance.material.base_color_rgba[3])
         }));
 
         assert_eq!(frame.opaque_3d.len(), 12);

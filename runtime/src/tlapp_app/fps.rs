@@ -84,14 +84,15 @@ impl FpsTracker {
     }
 
     pub fn record(&mut self, now: Instant, frame_time: f32) -> Option<FpsReport> {
-        let frame_time = frame_time.clamp(1.0 / 500.0, 0.25);
+        let frame_time = frame_time.clamp(1.0 / 20_000.0, 1.0);
         self.frame_times[self.cursor] = frame_time;
         self.cursor = (self.cursor + 1) % self.frame_times.len();
         self.count = self.count.saturating_add(1).min(self.frame_times.len());
 
         let instant_fps = 1.0 / frame_time.max(1e-6);
-        // Guard EMA against startup/outlier spikes so scheduler tuning follows real throughput.
-        let ema_sample_fps = instant_fps.clamp(1.0, 180.0);
+        // Guard EMA against pathological startup/outlier spikes while still preserving
+        // real high-throughput desktop measurements for HUD/scheduler parity.
+        let ema_sample_fps = instant_fps.clamp(1.0, 1_200.0);
         let alpha = 0.12;
         self.ema_fps += (ema_sample_fps - self.ema_fps) * alpha;
 
@@ -126,6 +127,35 @@ impl FpsTracker {
             avg_fps: 1.0 / avg_frame.max(1e-6),
             frame_time_stddev_ms: stddev * 1_000.0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FpsTracker;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn records_high_fps_without_legacy_500hz_display_clamp() {
+        let mut tracker = FpsTracker::new(Duration::ZERO);
+        let report = tracker
+            .record(Instant::now(), 1.0 / 2_000.0)
+            .expect("zero report interval should emit immediately");
+
+        assert!(report.instant_fps > 1_900.0);
+        assert!(report.avg_fps > 1_900.0);
+        assert!(report.ema_fps > 60.0);
+    }
+
+    #[test]
+    fn records_low_fps_without_legacy_4hz_display_floor() {
+        let mut tracker = FpsTracker::new(Duration::ZERO);
+        let report = tracker
+            .record(Instant::now(), 0.50)
+            .expect("zero report interval should emit immediately");
+
+        assert!((1.9..=2.1).contains(&report.instant_fps));
+        assert!((1.9..=2.1).contains(&report.avg_fps));
     }
 }
 

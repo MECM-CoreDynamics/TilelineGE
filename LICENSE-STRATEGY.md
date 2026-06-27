@@ -6,9 +6,9 @@ open-core and commercial layers do not drift into each other by accident.
 
 ## Current Baseline
 
-- The repository is licensed under `MPL-2.0`.
-- Contributions submitted to this repository are accepted under that same license.
-- Existing `MPL-2.0` source files should be treated as permanently open within this repository
+- The repository is dual-licensed under `MPL-2.0` OR `Apache-2.0`. Users can choose the license that best fits their needs.
+- Contributions submitted to this repository are accepted under both licenses (the dual license).
+- Existing source files should be treated as permanently open within this repository
   unless they are rewritten outside the covered file history.
 
 That means the realistic path is **open core + proprietary larger works**, not "open everything now
@@ -74,8 +74,8 @@ Tileline should behave as:
 - **Commercial layers** for advanced tooling, hosted services, and premium deployment/optimization
   products
 
-This is consistent with `MPL-2.0`, because MPL allows a larger work to combine covered files with
-other files under different terms, as long as the covered files remain available under MPL.
+This is consistent with our dual-license approach. Both `MPL-2.0` and `Apache-2.0` allow a larger work to combine covered files with
+other files under different terms, as long as the obligations of the chosen license for the original files are met.
 
 ## Boundary Rule
 
@@ -97,6 +97,14 @@ change and a repository split:
 - content format specifications
 - baseline runtime loading path for those formats
 
+## Patents and Corporate Adoption
+
+Adding `Apache-2.0` as an option alongside `MPL-2.0` significantly bolsters the project's safety for corporate adoption:
+
+- **Explicit Patent Grant**: `Apache-2.0` includes an explicit, irrevocable patent grant from contributors to users. Anyone using the software is protected from patent claims regarding the contributed code.
+- **Patent Retaliation**: If any entity initiates patent litigation alleging the software infringes their patents, their patent rights granted under `Apache-2.0` are immediately revoked. This creates a defensive ecosystem that discourages patent trolling.
+- This protects both the open-core community and any entities building proprietary layers on top of it.
+
 ## Trademarks and Branding
 
 Open source code does not require open trademark rights.
@@ -112,11 +120,12 @@ for maintainer-approved use, even if core code remains open-source.
 
 ## Contributor Expectations
 
-By contributing to this repository, contributors are contributing to the open-core layer.
+By contributing to this repository, contributors are contributing to the open-core layer under the dual-license model.
 
 That means:
 
-- contributions here stay under `MPL-2.0`
+- contributions here are made under both `MPL-2.0` and `Apache-2.0`
+- contributors grant patent rights to users as defined by the `Apache-2.0` license
 - maintainers may distribute this repository as part of larger open or commercial distributions
 - contribution to this repository does not imply participation in future proprietary repositories,
   revenue share, or ownership rights
@@ -142,5 +151,5 @@ That means:
 If we need a one-paragraph version:
 
 > Tileline should keep its runtime, scheduling, physics, transport, and content-format foundations
-> open under `MPL-2.0`, while reserving advanced tooling, hosted services, premium optimization
+> open under a dual `MPL-2.0` OR `Apache-2.0` license, while reserving advanced tooling, hosted services, premium optimization
 > layers, and branded studio products for separate commercial offerings.

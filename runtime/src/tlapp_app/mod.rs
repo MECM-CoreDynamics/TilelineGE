@@ -66,7 +66,7 @@ use paradoxpe::{
     PhysicsStepTimings, PhysicsWorld, PhysicsWorldConfig,
 };
 use regex::RegexBuilder;
-use tl_core::gms::safe_default_required_limits_for_adapter;
+use gms::safe_default_required_limits_for_adapter;
 use tl_core::mgs::MobileGpuProfile;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -1307,6 +1307,7 @@ struct PhysicsBacklogState {
 }
 
 enum TlAppRenderer {
+    Disabled,
     Wgpu(WgpuSceneRenderer),
     #[cfg(target_os = "macos")]
     Metal(MetalSceneRenderer),
@@ -1317,6 +1318,7 @@ enum TlAppRenderer {
 impl TlAppRenderer {
     fn backend_label(&self) -> &'static str {
         match self {
+            Self::Disabled => "disabled",
             Self::Wgpu(_) => "wgpu",
             #[cfg(target_os = "macos")]
             Self::Metal(_) => "metal",
@@ -1327,6 +1329,7 @@ impl TlAppRenderer {
 
     fn resize(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) {
         match self {
+            Self::Disabled => {}
             Self::Wgpu(renderer) => renderer.resize(device, queue, width, height),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => {
@@ -1352,6 +1355,7 @@ impl TlAppRenderer {
         target: [f32; 3],
     ) {
         match self {
+            Self::Disabled => {}
             Self::Wgpu(renderer) => renderer.set_camera_view(queue, width, height, eye, target),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => {
@@ -1364,6 +1368,7 @@ impl TlAppRenderer {
 
     fn set_ray_tracing_mode(&mut self, queue: &wgpu::Queue, mode: RayTracingMode) {
         match self {
+            Self::Disabled => {}
             Self::Wgpu(renderer) => renderer.set_ray_tracing_mode(queue, mode),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => {
@@ -1376,6 +1381,7 @@ impl TlAppRenderer {
 
     fn set_fsr_config(&mut self, queue: &wgpu::Queue, config: FsrConfig) {
         match self {
+            Self::Disabled => {}
             Self::Wgpu(renderer) => renderer.set_fsr_config(queue, config),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => {
@@ -1388,6 +1394,7 @@ impl TlAppRenderer {
 
     fn set_msaa_sample_count(&mut self, device: &wgpu::Device, count: u32) {
         match self {
+            Self::Disabled => {}
             Self::Wgpu(renderer) => renderer.set_msaa_sample_count(device, count),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => {
@@ -1400,6 +1407,7 @@ impl TlAppRenderer {
 
     fn msaa_sample_count(&self) -> u32 {
         match self {
+            Self::Disabled => 1,
             Self::Wgpu(renderer) => renderer.msaa_sample_count(),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => renderer.msaa_sample_count(),
@@ -1410,6 +1418,7 @@ impl TlAppRenderer {
 
     fn set_force_full_fbx_sphere(&mut self, force: bool) {
         match self {
+            Self::Disabled => {}
             Self::Wgpu(renderer) => renderer.set_force_full_fbx_sphere(force),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => {
@@ -1427,6 +1436,7 @@ impl TlAppRenderer {
         path: &Path,
     ) -> Result<(), String> {
         match self {
+            Self::Disabled => Ok(()),
             Self::Wgpu(renderer) => renderer.bind_fbx_mesh_slot_from_path(device, slot, path),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => renderer.bind_fbx_mesh_slot_from_path(slot, path),
@@ -1442,6 +1452,7 @@ impl TlAppRenderer {
         path: &Path,
     ) -> Result<(), String> {
         match self {
+            Self::Disabled => Ok(()),
             Self::Wgpu(renderer) => renderer.bind_sprite_texture_slot_from_path(queue, slot, path),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => renderer.bind_sprite_texture_slot_from_path(slot, path),
@@ -1457,6 +1468,7 @@ impl TlAppRenderer {
         high_quality: bool,
     ) {
         match self {
+            Self::Disabled => {}
             Self::Wgpu(renderer) => {
                 renderer.bind_builtin_sphere_mesh_slot(device, slot, high_quality)
             }
@@ -1471,6 +1483,7 @@ impl TlAppRenderer {
 
     fn bind_builtin_panel_mesh_slot(&mut self, device: &wgpu::Device, slot: u8) {
         match self {
+            Self::Disabled => {}
             Self::Wgpu(renderer) => renderer.bind_builtin_panel_mesh_slot(device, slot),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => {
@@ -1481,8 +1494,9 @@ impl TlAppRenderer {
         }
     }
 
-    fn ray_tracing_status(&self) -> crate::SceneRayTracingStatus {
+    fn ray_tracing_status(&self) -> crate::wgpu_scene_renderer::SceneRayTracingStatus {
         match self {
+            Self::Disabled => crate::wgpu_scene_renderer::SceneRayTracingStatus { mode: RayTracingMode::Auto, active: false, fallback_reason: String::new(), rt_dynamic_count: 0, rt_dynamic_cap: 0, supports_ray_query: false, as_build_us: 0 },
             Self::Wgpu(renderer) => renderer.ray_tracing_status(),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => renderer.ray_tracing_status(),
@@ -1491,8 +1505,9 @@ impl TlAppRenderer {
         }
     }
 
-    fn fsr_status(&self) -> FsrStatus {
+    fn fsr_status(&self) -> crate::upscaler::FsrStatus {
         match self {
+            Self::Disabled => crate::upscaler::FsrStatus { requested_mode: crate::upscaler::FsrMode::Off, active: false, render_scale: 1.0, sharpness: 0.0, reason: String::new() },
             Self::Wgpu(renderer) => renderer.fsr_status(),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => renderer.fsr_status(),
@@ -1503,6 +1518,7 @@ impl TlAppRenderer {
 
     fn world_to_ndc(&self, world_pos: [f32; 3]) -> Option<[f32; 3]> {
         match self {
+            Self::Disabled => None,
             Self::Wgpu(renderer) => renderer.world_to_ndc(world_pos),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => renderer.world_to_ndc(world_pos),
@@ -1513,6 +1529,7 @@ impl TlAppRenderer {
 
     fn camera_eye(&self) -> [f32; 3] {
         match self {
+            Self::Disabled => [0.0; 3],
             Self::Wgpu(renderer) => renderer.camera_eye(),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => renderer.camera_eye(),
@@ -1523,6 +1540,7 @@ impl TlAppRenderer {
 
     fn world_radius_to_ndc_half_size(&self, world_radius: f32, clip_w: f32) -> f32 {
         match self {
+            Self::Disabled => 0.0,
             Self::Wgpu(renderer) => renderer.world_radius_to_ndc_half_size(world_radius, clip_w),
             #[cfg(target_os = "macos")]
             Self::Metal(renderer) => renderer.world_radius_to_ndc_half_size(world_radius, clip_w),

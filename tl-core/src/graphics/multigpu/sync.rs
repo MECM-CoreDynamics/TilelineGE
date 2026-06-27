@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::gms::{
+use gms::{
     AdaptiveBuffer, AdaptiveBufferConfig, AdaptiveBufferDecision, AdaptiveFrameTelemetry,
     GpuAdapterProfile, MemoryTopology, MultiGpuSyncPlan, SharedBufferKey, SharedBufferLease,
     SharedBufferLockError,
@@ -841,8 +841,8 @@ mod tests {
     #[test]
     fn admission_rejects_when_window_is_full() {
         let dummy_plan = MultiGpuSyncPlan {
-            fence_equivalent: crate::gms::SyncEquivalent::QueueCompletionFence,
-            semaphore_equivalent: crate::gms::SyncEquivalent::QueueSubmissionTimeline,
+            fence_equivalent: gms::SyncEquivalent::QueueCompletionFence,
+            semaphore_equivalent: gms::SyncEquivalent::QueueSubmissionTimeline,
             frames_in_flight: 1,
             queue_timeline_stages: 3,
             primary_command_buffers_preallocated: 3,
@@ -864,18 +864,18 @@ mod tests {
             backend: wgpu::Backend::Vulkan,
             device_type: wgpu::DeviceType::IntegratedGpu,
             memory_topology: MemoryTopology::Unified,
-            compute_unit_kind: crate::gms::ComputeUnitKind::CoreCluster,
+            compute_unit_kind: gms::ComputeUnitKind::CoreCluster,
             estimated_compute_units: 8,
             unit_grouping: 2,
             unit_perf_score: 125.0,
             thermal_headroom: 0.65,
-            compute_unit_source: crate::gms::ComputeUnitEstimateSource::DeviceNameTable,
+            compute_unit_source: gms::ComputeUnitEstimateSource::DeviceNameTable,
             compute_unit_probe_note: None,
             arm_shader_core_count: None,
             estimated_vram_mb: 4096,
             estimated_bandwidth_gbps: 50.0,
             supports_mappable_primary_buffers: true,
-            limits: crate::gms::hardware::GpuLimitsSummary {
+            limits: gms::hardware::GpuLimitsSummary {
                 max_buffer_size: 1 << 20,
                 max_storage_buffer_binding_size: 1 << 20,
                 max_compute_invocations_per_workgroup: 256,
@@ -883,7 +883,7 @@ mod tests {
                 max_compute_workgroups_per_dimension: 65535,
             },
             score: 1000,
-            score_breakdown: crate::gms::GpuScoreBreakdown::default(),
+            score_breakdown: gms::GpuScoreBreakdown::default(),
         };
 
         let mut sync = MultiGpuFrameSynchronizer::new(

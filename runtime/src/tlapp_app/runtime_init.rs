@@ -49,6 +49,7 @@ impl TlAppRuntime {
             event_loop.create_window(
                 WindowAttributes::default()
                     .with_title("Tileline TLApp")
+                    .with_visible(!options.no_render)
                     .with_inner_size(LogicalSize::new(
                         options.resolution.width as f64,
                         options.resolution.height as f64,
@@ -613,13 +614,20 @@ impl TlAppRuntime {
         });
         let tile_world_2d = build_default_side_view_tile_world(scene.config());
         let tile_world_frame = tile_world_2d.telemetry_snapshot();
-        let fsr_config = FsrConfig {
-            mode: options.fsr_mode,
+        let mut fsr_config = FsrConfig {
+            mode: if options.no_render { FsrMode::Off } else { options.fsr_mode },
             quality: options.fsr_quality,
             sharpness: options.fsr_sharpness,
             render_scale_override: options.fsr_scale_override,
         };
-        let mut renderer = if prefer_native_runtime_renderer() {
+        let msaa = if options.no_render { 1 } else { options.msaa };
+        if options.no_render {
+            window.set_visible(false);
+        }
+        let mut renderer = if options.no_render {
+            eprintln!("[renderer] global bypass requested, rendering disabled");
+            TlAppRenderer::Disabled
+        } else if prefer_native_runtime_renderer() {
             #[cfg(target_os = "linux")]
             {
                 let present_mode = match options.vsync {
@@ -699,7 +707,7 @@ impl TlAppRuntime {
                     size.width,
                     size.height,
                     adapter_info.backend,
-                    options.msaa,
+                    msaa,
                 ))
             }
         } else {
@@ -711,7 +719,7 @@ impl TlAppRuntime {
                 size.width,
                 size.height,
                 adapter_info.backend,
-                options.msaa,
+                msaa,
             ))
         };
         renderer.set_ray_tracing_mode(&queue, RayTracingMode::Auto);

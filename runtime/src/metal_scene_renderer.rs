@@ -318,6 +318,12 @@ impl MetalSceneRenderer {
         self.backend.bind_mesh_slot(slot, mesh);
     }
 
+    /// Bind the built-in unit wall panel mesh used by transparent tank walls.
+    pub fn bind_builtin_panel_mesh_slot(&mut self, slot: u8) {
+        let mesh = build_panel_mesh(self.backend.device());
+        self.backend.bind_mesh_slot(slot, mesh);
+    }
+
     /// Estimate snapshot payload bytes for telemetry and planning.
     pub fn estimate_snapshot_bytes(draw: &RuntimeDrawFrame) -> u64 {
         let transform_bytes = (draw.stats.opaque_instances + draw.stats.transparent_instances)
@@ -656,6 +662,14 @@ impl SceneVertex {
             uv: [position[0] + 0.5, position[1] + 0.5],
         }
     }
+
+    fn new_panel(position: [f32; 3], uv: [f32; 2]) -> Self {
+        Self {
+            position,
+            normal: [0.0, 0.0, 1.0],
+            uv,
+        }
+    }
 }
 
 fn build_octa_sphere_mesh(device: &metal::Device) -> MeshSlot {
@@ -716,6 +730,20 @@ fn build_box_mesh(device: &metal::Device) -> MeshSlot {
         3, 2, 6, 6, 7, 3, // top
         1, 5, 6, 6, 2, 1, // right
         0, 3, 7, 7, 4, 0, // left
+    ];
+    MeshSlot::new(device, &vertices, &indices, MTLIndexType::UInt16)
+}
+
+fn build_panel_mesh(device: &metal::Device) -> MeshSlot {
+    let vertices = [
+        SceneVertex::new_panel([-0.5, -0.5, 0.0], [0.0, 0.0]),
+        SceneVertex::new_panel([0.5, -0.5, 0.0], [1.0, 0.0]),
+        SceneVertex::new_panel([0.5, 0.5, 0.0], [1.0, 1.0]),
+        SceneVertex::new_panel([-0.5, 0.5, 0.0], [0.0, 1.0]),
+    ];
+    let indices: [u16; 12] = [
+        0, 1, 2, 2, 3, 0, // front
+        2, 1, 0, 0, 3, 2, // back
     ];
     MeshSlot::new(device, &vertices, &indices, MTLIndexType::UInt16)
 }

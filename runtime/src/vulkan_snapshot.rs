@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 
 use tl_core::{
     FrameInstanceTransform, FrameLightRecord, FrameMaterialRecord, FramePrimitiveRange,
-    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_OVERLAY,
-    FRAME_PRIMITIVE_RANGE_TRANSPARENT,
+    FrameSpriteRecord, FrameTextureRecord, RenderStateSnapshot, FRAME_PRIMITIVE_RANGE_CASTS_SHADOW,
+    FRAME_PRIMITIVE_RANGE_OVERLAY, FRAME_PRIMITIVE_RANGE_TRANSPARENT,
 };
 
 use crate::draw_path::{DrawBatch3d, DrawLane, RuntimeDrawFrame};
@@ -21,6 +21,7 @@ const FLAG_MESH: u32 = 1 << 1;
 const FLAG_BOX: u32 = 1 << 2;
 const MATERIAL_FLAG_UNLIT: u32 = 1 << 0;
 const MAX_SHADOW_LIGHTS: usize = 4;
+const SNAPSHOT_SORT_INSTANCE_CAP: usize = 8_192;
 
 #[inline]
 fn is_overlay_box_batch(batch: &DrawBatch3d) -> bool {
@@ -43,9 +44,9 @@ pub struct VulkanSnapshotBuildStats {
 /// Flatten a runtime draw frame into the compact per-instance snapshot consumed by
 /// `tl_core::VulkanBackend`.
 ///
-/// `camera_eye` is used to sort opaque instances front-to-back so the GPU's early-Z
-/// rejects occluded fragments before the fragment shader runs. Pass `[0.0; 3]` to
-/// disable sorting.
+/// `camera_eye` is used to sort modest opaque instance batches front-to-back so the GPU's
+/// early-Z rejects occluded fragments before the fragment shader runs. Very large batches
+/// keep author order to avoid making CPU snapshot sorting the frame bottleneck.
 pub fn build_vulkan_render_snapshot<'a>(
     frame_id: u64,
     camera_view_proj: [[f32; 4]; 4],
@@ -92,15 +93,19 @@ pub fn build_vulkan_render_snapshot<'a>(
         );
         let count = transform_scratch.len().saturating_sub(first_instance);
         if count > 0 {
+            let mut flags = if (batch.key.shadow_flags & 1) != 0 {
+                FRAME_PRIMITIVE_RANGE_CASTS_SHADOW
+            } else {
+                0
+            };
+            if is_overlay_box_batch(batch) {
+                flags |= FRAME_PRIMITIVE_RANGE_OVERLAY;
+            }
             primitive_range_scratch.push(FramePrimitiveRange {
                 primitive_code: batch.key.primitive_code as u32,
                 first_instance: first_instance as u32,
                 instance_count: count as u32,
-                flags: if is_overlay_box_batch(batch) {
-                    FRAME_PRIMITIVE_RANGE_OVERLAY
-                } else {
-                    0
-                },
+                flags,
             });
         }
     }
@@ -222,8 +227,11 @@ fn append_batch_instances_sorted(
         | (if is_mesh { FLAG_MESH } else { 0 })
         | (if is_box { FLAG_BOX } else { 0 });
 
-    // Skip sorting for tiny batches and box primitives where it offers no early-Z benefit.
-    let should_sort = !is_box && batch.instances.len() >= 4;
+    // Sorting helps early-Z for modest batches, but dense ball clouds make per-frame
+    // O(n log n) snapshot sorting the CPU bottleneck before the GPU is saturated.
+    let should_sort = !is_box
+        && batch.instances.len() >= 4
+        && batch.instances.len() <= SNAPSHOT_SORT_INSTANCE_CAP;
 
     sort_scratch.clear();
     if should_sort {
@@ -694,6 +702,83 @@ mod tests {
         // After front-to-back sort: 5 → 20 → 35 → 50 (column 3, row 0 = translation x).
         let xs: Vec<f32> = snapshot.transforms.iter().map(|t| t.model[3][0]).collect();
         assert_eq!(xs, vec![5.0, 20.0, 35.0, 50.0]);
+    }
+
+    #[test]
+    fn very_large_opaque_batches_skip_cpu_distance_sort() {
+        let make_instance = |id: u64, x: f32| {
+            let mut model = [[0.0_f32; 4]; 4];
+            model[0][0] = 1.0;
+            model[1][1] = 1.0;
+            model[2][2] = 1.0;
+            model[3] = [x, 0.0, 0.0, 1.0];
+            DrawInstance3d {
+                instance_id: id,
+                model_cols: model,
+                base_color_rgba: [1.0; 4],
+                material_params: [0.0; 4],
+                emissive_rgb: [0.0; 3],
+                texture_index: 0,
+            }
+        };
+
+        let instances: Vec<_> = (0..=SNAPSHOT_SORT_INSTANCE_CAP)
+            .map(|i| make_instance(i as u64, (SNAPSHOT_SORT_INSTANCE_CAP - i) as f32))
+            .collect();
+        let instance_count = instances.len();
+        let draw = RuntimeDrawFrame {
+            mode: RuntimeSceneMode::Spatial3d,
+            view_2d: None,
+            opaque_batches: vec![DrawBatch3d {
+                lane: DrawLane::Opaque,
+                key: DrawBatchKey {
+                    primitive_code: 0,
+                    shading_code: 0,
+                    shadow_flags: 0,
+                },
+                instances,
+            }],
+            transparent_batches: Vec::new(),
+            sprites: Vec::new(),
+            lights: Vec::new(),
+            stats: crate::draw_path::DrawFrameStats {
+                opaque_instances: instance_count,
+                transparent_instances: 0,
+                sprite_instances: 0,
+                light_instances: 0,
+                opaque_batches: 1,
+                transparent_batches: 0,
+                total_draw_calls: 1,
+            },
+        };
+
+        let mut transform_scratch = Vec::new();
+        let mut material_scratch = Vec::new();
+        let mut texture_scratch = Vec::new();
+        let mut light_scratch = Vec::new();
+        let mut primitive_range_scratch = Vec::new();
+        let mut sprite_scratch = Vec::new();
+        let mut sort_scratch = Vec::new();
+        let (snapshot, _) = build_vulkan_render_snapshot(
+            1,
+            [[1.0, 0.0, 0.0, 0.0]; 4],
+            [0.0, 0.0, 0.0],
+            &draw,
+            &mut transform_scratch,
+            &mut material_scratch,
+            &mut texture_scratch,
+            &mut light_scratch,
+            &mut primitive_range_scratch,
+            &mut sprite_scratch,
+            &mut sort_scratch,
+        );
+
+        assert_eq!(snapshot.transforms.len(), instance_count);
+        assert_eq!(
+            snapshot.transforms[0].model[3][0],
+            SNAPSHOT_SORT_INSTANCE_CAP as f32
+        );
+        assert!(sort_scratch.is_empty());
     }
 
     #[test]

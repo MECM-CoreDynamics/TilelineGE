@@ -1,5 +1,10 @@
 # Tileline
 
+> [!WARNING]
+> **END OF LIFE (EOL) NOTICE**
+> The monolithic `tl-core` architecture has reached End of Life. The project is being sunset in favor of rewriting a true micro-kernel HPC (High Performance Computing) runtime from scratch.
+> Major subsystems like `gms` and `paradoxpe` have been extracted into independent repositories.
+
 > Parallel Compute Runtime with Game Engine Capabilities
 
 Tileline is a runtime-first engine workspace for projects that need explicit CPU/GPU scheduling,

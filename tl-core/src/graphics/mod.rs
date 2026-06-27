@@ -26,3 +26,4 @@ pub mod vulkan_physics_compute;
 mod vulkan_pipeline;
 #[cfg(target_os = "linux")]
 mod vulkan_shaders;
+pub mod wgpu_physics_compute;
